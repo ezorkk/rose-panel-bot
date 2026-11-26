@@ -229,7 +229,7 @@ export default function SettingsDrawer({
       haptic('light');
 
       let safetyGuard = 0;
-      while (mountedRef.current && safetyGuard < 500) {
+      while (mountedRef.current && safetyGuard < 2000) {
         safetyGuard += 1;
         const res = await apiRequest('/api/admin/storage/migrate', {
           method: 'POST',

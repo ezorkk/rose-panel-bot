@@ -16,6 +16,16 @@ export const D1_PHOTO_QUERY_LIMIT = 500;
 export const D1_LINK_QUERY_LIMIT = 500;
 export const D1_PM_QUERY_LIMIT = 1000;
 
+// Excludes internal archive-only photo rows (`p_*`, `p:*`) and non-bubble PM tracking rows (`pm:*`)
+// without using SQL `LIKE` `_` single-character wildcards.
+const IS_BUBBLE_ID_SQL = `substr(id, 1, 2) NOT IN ('p_', 'p:') AND substr(id, 1, 3) != 'pm:'`;
+
+let localRowSeq = 0;
+function nextLocalSuffix() {
+  localRowSeq = (localRowSeq + 1) % 100000;
+  return `${Math.floor(Math.random() * 1000)}_${localRowSeq}`;
+}
+
 function toNullablePositiveInt(val) {
   if (val === null || val === undefined || val === '') return null;
   const n = Number(val);
@@ -198,9 +208,8 @@ export function createD1Store(env, hooks = {}) {
       const batchStmts = [];
 
       if (hasBubble || validPmId) {
-        rowId = hasBubble
-          ? `m_${ts}_${Math.floor(Math.random() * 10000)}`
-          : `pm:${ts}_${Math.floor(Math.random() * 10000)}`;
+        const suffix = nextLocalSuffix();
+        rowId = hasBubble ? `m_${ts}_${suffix}` : `pm:${ts}_${suffix}`;
 
         batchStmts.push(
           db
@@ -249,13 +258,13 @@ export function createD1Store(env, hooks = {}) {
       }
 
       if (Array.isArray(urls) && urls.length > 0) {
-        const linkMsgId = rowId || `l_${ts}_${Math.floor(Math.random() * 10000)}`;
+        const linkMsgId = rowId || `l_${ts}_${nextLocalSuffix()}`;
         for (const url of urls) {
           if (!url) continue;
           batchStmts.push(
             db
               .prepare(
-                `INSERT INTO message_links (message_id, uid, url, snippet, sender, created_at)
+                `INSERT OR IGNORE INTO message_links (message_id, uid, url, snippet, sender, created_at)
                  VALUES (?, ?, ?, ?, ?, ?)`
               )
               .bind(linkMsgId, cleanUid, String(url), cleanSnippet || null, cleanSender, ts)
@@ -296,7 +305,7 @@ export function createD1Store(env, hooks = {}) {
         db
           .prepare(
             `SELECT * FROM messages
-             WHERE uid = ? AND id NOT LIKE 'p_%' AND id NOT LIKE 'p:%' AND id NOT LIKE 'pm:%'
+             WHERE uid = ? AND ${IS_BUBBLE_ID_SQL}
              ORDER BY created_at DESC, rowid DESC
              LIMIT ?`
           )
@@ -507,7 +516,7 @@ export function createD1Store(env, hooks = {}) {
       const target = await db
         .prepare(
           `SELECT id, ${col} AS prev_val FROM messages
-           WHERE uid = ? AND pm_message_id = ? AND id NOT LIKE 'p_%' AND id NOT LIKE 'p:%' AND id NOT LIKE 'pm:%'
+           WHERE uid = ? AND pm_message_id = ? AND ${IS_BUBBLE_ID_SQL}
            ORDER BY created_at DESC, rowid DESC
            LIMIT 1`
         )
@@ -520,8 +529,8 @@ export function createD1Store(env, hooks = {}) {
       if (prevVal === cleanVal) return false;
 
       await db
-        .prepare(`UPDATE messages SET ${col} = ? WHERE id = ?`)
-        .bind(cleanVal || null, String(target.id))
+        .prepare(`UPDATE messages SET ${col} = ? WHERE uid = ? AND id = ?`)
+        .bind(cleanVal || null, cleanUid, String(target.id))
         .run();
       return true;
     },

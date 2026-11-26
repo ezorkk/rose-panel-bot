@@ -7,6 +7,7 @@ import { cleanupExpiredMaps, createD1Store, shouldRunDailyCleanup } from './d1St
 import { createKvStore } from './kvStore.js';
 import {
   DEFAULT_MIGRATE_BATCH_SIZE,
+  MIGRATE_QUERY_BUDGET,
   ensureVisitorMigrated,
   getStorageStatus,
   markVisitorMigratedInCache,
@@ -16,6 +17,7 @@ import {
 
 export {
   DEFAULT_MIGRATE_BATCH_SIZE,
+  MIGRATE_QUERY_BUDGET,
   SCHEMA_VERSION,
   cleanupExpiredMaps,
   ensureSchema,

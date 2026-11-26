@@ -1,6 +1,7 @@
 // Cloudflare D1 test double backed by Node's built-in `node:sqlite` (`new DatabaseSync(':memory:')`).
 // Implements D1's Workers binding surface (`prepare(sql).bind(...).all()` / `.first()` / `.run()`
-// and transactional `batch([...])`), including D1's strict rejection of `undefined` bind parameters.
+// and transactional `batch([...])`), including D1's strict rejection of `undefined` bind parameters
+// and accurate per-invocation D1 query counting (`batch()` counts as 1 D1 query, matching Cloudflare).
 
 import { DatabaseSync } from 'node:sqlite';
 
@@ -24,12 +25,15 @@ function toPlainObject(row) {
 export function createD1Shim() {
   const sqlite = new DatabaseSync(':memory:');
   const stats = {
+    // Matches Cloudflare D1 per-Worker-invocation query limit accounting:
+    // each standalone `.all()` / `.first()` / `.run()` / `.raw()` / `.exec()` = 1, and each `batch([...])` = 1.
     queries: 0,
     batches: 0,
+    statements: 0,
   };
 
   function executeStatement(sql, boundArgs, mode = 'auto') {
-    stats.queries += 1;
+    stats.statements += 1;
     const stmt = sqlite.prepare(sql);
     const returnsRows = stmt.columns().length > 0;
 
@@ -86,12 +90,15 @@ export function createD1Shim() {
         return makePreparedStatement(sql, normalizeBindValues(values));
       },
       async all() {
+        stats.queries += 1;
         return executeStatement(sql, boundArgs, 'all');
       },
       async run() {
+        stats.queries += 1;
         return executeStatement(sql, boundArgs, 'run');
       },
       async first(colName) {
+        stats.queries += 1;
         const row = executeStatement(sql, boundArgs, 'first');
         if (!row) return null;
         if (colName !== undefined) {
@@ -101,6 +108,7 @@ export function createD1Shim() {
       },
       async raw(options = {}) {
         stats.queries += 1;
+        stats.statements += 1;
         const stmt = sqlite.prepare(sql);
         const cols = stmt.columns().map((c) => c.name);
         stmt.setReturnArrays(true);
@@ -122,6 +130,7 @@ export function createD1Shim() {
       if (!Array.isArray(statements)) {
         throw new TypeError('D1_ERROR: batch() expects an array of prepared statements');
       }
+      stats.queries += 1;
       stats.batches += 1;
       const out = [];
       sqlite.exec('BEGIN');
@@ -146,8 +155,15 @@ export function createD1Shim() {
 
     async exec(sql) {
       stats.queries += 1;
+      stats.statements += 1;
       sqlite.exec(sql);
       return { count: 1, duration: 0 };
+    },
+
+    resetStats() {
+      stats.queries = 0;
+      stats.batches = 0;
+      stats.statements = 0;
     },
 
     // Test inspection helpers

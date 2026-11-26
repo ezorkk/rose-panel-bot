@@ -3,12 +3,18 @@
 // keeping KV intact as a zero-risk backup until after v2.2.
 
 import { safeGetJSON } from '../config.js';
-import { ensureSchema } from './d1Schema.js';
+import { ensureSchema, isSchemaInitialized } from './d1Schema.js';
 
 export const DEFAULT_MIGRATE_BATCH_SIZE = 20;
 export const MAX_MIGRATE_BATCH_SIZE = 50;
+// Cloudflare Workers Free plan limits each Worker invocation to 50 D1 queries (`batch()` counts as 1).
+// Keep a 40-query budget so `ensureSchema` + `discover` + a multi-chunk visitor at the end never exceed 50.
+export const MIGRATE_QUERY_BUDGET = 40;
 const D1_BATCH_CHUNK_SIZE = 80;
 const KV_LIST_MAX_PAGES = 10;
+// Deterministic fallback base timestamp when a legacy KV entry has no valid `at`,
+// ensuring concurrent or retried migrations always derive identical row IDs.
+const FALLBACK_MIGRATION_TS = 1700000000000;
 
 // Per-isolate cache of UIDs confirmed present in `migrated_visitors`, keyed by `env.DB`
 const migratedUidCache = new WeakMap();
@@ -50,25 +56,55 @@ function parseTimestampMs(isoCandidate, numericCandidate, fallbackMs) {
 
 /**
  * Migrates a single visitor's KV `history:{uid}` into D1 (`messages` + `message_links`)
- * and marks `uid` in `migrated_visitors`. Safe to retry after partial failure (zero duplicates).
+ * and marks `uid` in `migrated_visitors`. Safe under concurrent calls and partial-failure retries.
  */
-export async function migrateVisitor(env, uid) {
+export async function migrateVisitor(env, uid, options = {}) {
   const db = env?.DB;
   const cleanUid = String(uid || '').trim();
   if (!db || !/^\d+$/.test(cleanUid)) {
-    return { ok: false, uid: cleanUid, alreadyMigrated: false, migratedMessages: 0, migratedLinks: 0 };
+    return {
+      ok: false,
+      uid: cleanUid,
+      alreadyMigrated: false,
+      migratedMessages: 0,
+      migratedLinks: 0,
+      queriesUsed: 0,
+    };
   }
 
+  let queriesUsed = 0;
+  const schemaWasCached = isSchemaInitialized(env);
   await ensureSchema(env);
+  if (!schemaWasCached) {
+    queriesUsed += 1;
+  }
+
   const memSet = getMigratedSet(db);
   if (memSet.has(cleanUid)) {
-    return { ok: true, uid: cleanUid, alreadyMigrated: true, migratedMessages: 0, migratedLinks: 0 };
+    return {
+      ok: true,
+      uid: cleanUid,
+      alreadyMigrated: true,
+      migratedMessages: 0,
+      migratedLinks: 0,
+      queriesUsed,
+    };
   }
 
-  const doneRow = await db.prepare(`SELECT 1 AS ok FROM migrated_visitors WHERE uid = ?`).bind(cleanUid).first();
-  if (doneRow) {
-    memSet.add(cleanUid);
-    return { ok: true, uid: cleanUid, alreadyMigrated: true, migratedMessages: 0, migratedLinks: 0 };
+  if (!options?.skipMigratedCheck) {
+    const doneRow = await db.prepare(`SELECT 1 AS ok FROM migrated_visitors WHERE uid = ?`).bind(cleanUid).first();
+    queriesUsed += 1;
+    if (doneRow) {
+      memSet.add(cleanUid);
+      return {
+        ok: true,
+        uid: cleanUid,
+        alreadyMigrated: true,
+        migratedMessages: 0,
+        migratedLinks: 0,
+        queriesUsed,
+      };
+    }
   }
 
   const kv = env?.TOPIC_MAP || null;
@@ -80,20 +116,29 @@ export async function migrateVisitor(env, uid) {
       .prepare(`INSERT OR IGNORE INTO migrated_visitors (uid, migrated_at) VALUES (?, ?)`)
       .bind(cleanUid, nowMs)
       .run();
+    queriesUsed += 1;
     memSet.add(cleanUid);
-    return { ok: true, uid: cleanUid, alreadyMigrated: false, migratedMessages: 0, migratedLinks: 0 };
+    return {
+      ok: true,
+      uid: cleanUid,
+      alreadyMigrated: false,
+      migratedMessages: 0,
+      migratedLinks: 0,
+      queriesUsed,
+    };
   }
 
-  // Inspect any already-present D1 rows for this uid so retries after a mid-flight failure never duplicate rows
+  // Inspect any already-present D1 rows for this uid so retries after a mid-flight failure skip written rows
   const [existingMsgRes, existingLinkRes] = await db.batch([
     db.prepare(`SELECT id, pm_message_id FROM messages WHERE uid = ?`).bind(cleanUid),
     db.prepare(`SELECT message_id, url FROM message_links WHERE uid = ?`).bind(cleanUid),
   ]);
+  queriesUsed += 1;
 
-  const usedIds = new Set();
+  const existingIds = new Set();
   const matchedPmIds = new Set();
   for (const r of existingMsgRes?.results || []) {
-    if (r?.id) usedIds.add(String(r.id));
+    if (r?.id) existingIds.add(String(r.id));
     const pId = toNullablePositiveInt(r?.pm_message_id);
     if (pId) matchedPmIds.add(pId);
   }
@@ -119,8 +164,8 @@ export async function migrateVisitor(env, uid) {
     }
   }
 
+  const seenInCurrentKv = new Set();
   const unmatchedPhotos = [...kvPhotos];
-  const fallbackBaseMs = nowMs - 600_000;
   const writeStmts = [];
   let migratedMessages = 0;
   let migratedLinks = 0;
@@ -148,17 +193,21 @@ export async function migrateVisitor(env, uid) {
       }
     }
 
-    const createdAt = parseTimestampMs(m.at, pmEntry?.at, fallbackBaseMs + i);
+    const createdAt = parseTimestampMs(m.at, pmEntry?.at, FALLBACK_MIGRATION_TS + i);
     const rawMsgId = typeof m.id === 'string' ? m.id.trim() : '';
-    const preferredId = rawMsgId
+    let rowId = rawMsgId
       ? rawMsgId.startsWith('p_') || rawMsgId.startsWith('p:') || rawMsgId.startsWith('pm:')
         ? `m_${rawMsgId}`
         : rawMsgId
       : `m_mig_${createdAt}_${i}`;
-    if (usedIds.has(preferredId)) {
+    if (seenInCurrentKv.has(rowId)) {
+      rowId = `${rowId}_dup_${i}`;
+    }
+    seenInCurrentKv.add(rowId);
+
+    if (existingIds.has(rowId)) {
       continue;
     }
-    usedIds.add(preferredId);
 
     const sender = m.sender === 'admin' ? 'admin' : 'visitor';
     const topicMsgId = toNullablePositiveInt(m.topicMsgId ?? pmEntry?.topicMsgId);
@@ -172,7 +221,11 @@ export async function migrateVisitor(env, uid) {
     const dmMsgId = toNullablePositiveInt(pmEntry?.dmMsgId);
     const dmCopyId = toNullablePositiveInt(pmEntry?.dmCopyId);
 
-    const rawText = m.text ? String(m.text).slice(0, 1500) : matchedPhoto?.caption ? String(matchedPhoto.caption).slice(0, 140) : '';
+    const rawText = m.text
+      ? String(m.text).slice(0, 1500)
+      : matchedPhoto?.caption
+        ? String(matchedPhoto.caption).slice(0, 140)
+        : '';
     const mediaTag = m.mediaTag ? String(m.mediaTag) : null;
     const photoFileId = m.photoFileId ? String(m.photoFileId) : null;
     const thumbFileId = m.thumbFileId
@@ -195,7 +248,7 @@ export async function migrateVisitor(env, uid) {
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .bind(
-          preferredId,
+          rowId,
           cleanUid,
           sender,
           pmId,
@@ -224,10 +277,13 @@ export async function migrateVisitor(env, uid) {
   for (let i = 0; i < olderPhotosChronological.length; i += 1) {
     const p = olderPhotosChronological[i];
     if (!p?.fileId) continue;
-    const createdAt = parseTimestampMs(p.at, null, fallbackBaseMs - 200_000 + i);
-    const preferredId = typeof p.id === 'string' && p.id.startsWith('p_') ? p.id : `p:${createdAt}_${i}`;
-    if (usedIds.has(preferredId)) continue;
-    usedIds.add(preferredId);
+    const createdAt = parseTimestampMs(p.at, null, FALLBACK_MIGRATION_TS - 200_000 + i);
+    let rowId = typeof p.id === 'string' && p.id.startsWith('p_') ? p.id : `p:${createdAt}_${i}`;
+    if (seenInCurrentKv.has(rowId)) {
+      rowId = `${rowId}_dup_${i}`;
+    }
+    seenInCurrentKv.add(rowId);
+    if (existingIds.has(rowId)) continue;
 
     const fileId = String(p.fileId);
     const thumbFileId = p.thumbFileId ? String(p.thumbFileId) : fileId;
@@ -243,12 +299,12 @@ export async function migrateVisitor(env, uid) {
             thumb_file_id, sticker_file_id, sticker_format, visitor_reaction, owner_reaction, created_at
           ) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL, ?, ?, NULL, NULL, NULL, NULL, ?)`
         )
-        .bind(preferredId, cleanUid, sender, caption, fileId, thumbFileId, createdAt)
+        .bind(rowId, cleanUid, sender, caption, fileId, thumbFileId, createdAt)
     );
     migratedMessages += 1;
   }
 
-  // 3. Migrate non-bubble or older `pmMessageIds` entries (`pm_*`), oldest -> newest
+  // 3. Migrate non-bubble or older `pmMessageIds` entries (`pm:*`), oldest -> newest
   const olderPmChronological = [...kvPmIds].reverse();
   for (let i = 0; i < olderPmChronological.length; i += 1) {
     const pm = olderPmChronological[i];
@@ -256,11 +312,12 @@ export async function migrateVisitor(env, uid) {
     if (!pmId || matchedPmIds.has(pmId)) continue;
     matchedPmIds.add(pmId);
 
-    const createdAt = parseTimestampMs(null, pm?.at, fallbackBaseMs - 100_000 + i);
-    const basePmRowId = `pm:${createdAt}_${pmId}_${i}`;
-    if (usedIds.has(basePmRowId)) continue;
-    usedIds.add(basePmRowId);
-    const rowId = basePmRowId;
+    const createdAt = parseTimestampMs(null, pm?.at, FALLBACK_MIGRATION_TS - 100_000 + i);
+    const rowId = `pm:${createdAt}_${pmId}_${i}`;
+    if (seenInCurrentKv.has(rowId)) continue;
+    seenInCurrentKv.add(rowId);
+    if (existingIds.has(rowId)) continue;
+
     const sender = pm?.sender === 'admin' ? 'admin' : 'visitor';
     const topicMsgId = toNullablePositiveInt(pm?.topicMsgId);
     const topicCopyId = toNullablePositiveInt(pm?.topicCopyId);
@@ -301,15 +358,16 @@ export async function migrateVisitor(env, uid) {
 
   // 4. Migrate `links` oldest -> newest so `ORDER BY created_at DESC, rowid DESC` matches KV order
   const linksChronological = [...kvLinks].reverse();
+  const seenLinkKeys = new Set(existingLinkKeys);
   for (let i = 0; i < linksChronological.length; i += 1) {
     const l = linksChronological[i];
     if (!l?.url) continue;
     const url = String(l.url);
-    const createdAt = parseTimestampMs(l.at, null, fallbackBaseMs - 50_000 + i);
+    const createdAt = parseTimestampMs(l.at, null, FALLBACK_MIGRATION_TS - 50_000 + i);
     const linkMsgId = typeof l.id === 'string' && l.id ? l.id : `l_mig_${createdAt}_${i}`;
     const dedupKey = `${linkMsgId}|${url}`;
-    if (existingLinkKeys.has(dedupKey)) continue;
-    existingLinkKeys.add(dedupKey);
+    if (seenLinkKeys.has(dedupKey)) continue;
+    seenLinkKeys.add(dedupKey);
 
     const snippet = l.snippet ? String(l.snippet).slice(0, 90) : null;
     const sender = l.sender === 'admin' ? 'admin' : 'visitor';
@@ -317,7 +375,7 @@ export async function migrateVisitor(env, uid) {
     writeStmts.push(
       db
         .prepare(
-          `INSERT INTO message_links (message_id, uid, url, snippet, sender, created_at)
+          `INSERT OR IGNORE INTO message_links (message_id, uid, url, snippet, sender, created_at)
            VALUES (?, ?, ?, ?, ?, ?)`
         )
         .bind(linkMsgId, cleanUid, url, snippet, sender, createdAt)
@@ -332,6 +390,7 @@ export async function migrateVisitor(env, uid) {
 
   if (writeStmts.length === 0) {
     await markStmt.run();
+    queriesUsed += 1;
   } else {
     for (let offset = 0; offset < writeStmts.length; offset += D1_BATCH_CHUNK_SIZE) {
       const chunk = writeStmts.slice(offset, offset + D1_BATCH_CHUNK_SIZE);
@@ -339,6 +398,7 @@ export async function migrateVisitor(env, uid) {
         chunk.push(markStmt);
       }
       await db.batch(chunk);
+      queriesUsed += 1;
     }
   }
 
@@ -349,6 +409,7 @@ export async function migrateVisitor(env, uid) {
     alreadyMigrated: false,
     migratedMessages,
     migratedLinks,
+    queriesUsed,
   };
 }
 
@@ -386,7 +447,9 @@ async function listKvPrefixUids(kv, prefix) {
 async function discoverVisitorMigrationSet(env) {
   const db = env?.DB;
   const kv = env?.TOPIC_MAP || null;
+  const schemaWasCached = isSchemaInitialized(env);
   await ensureSchema(env);
+  const queriesUsed = (schemaWasCached ? 0 : 1) + 1;
 
   const [indexedRaw, historyUids, userUids, migratedRes] = await Promise.all([
     kv ? safeGetJSON(kv, 'visitors:index', []) : Promise.resolve([]),
@@ -420,6 +483,7 @@ async function discoverVisitorMigrationSet(env) {
     allUids,
     migratedSet,
     pendingUids,
+    queriesUsed,
   };
 }
 
@@ -459,16 +523,28 @@ export async function migrateVisitorsBatch(env, options = {}) {
   }
 
   const requestedSize = Number(options?.batchSize);
-  const batchSize = Number.isInteger(requestedSize) && requestedSize > 0
-    ? Math.min(requestedSize, MAX_MIGRATE_BATCH_SIZE)
-    : DEFAULT_MIGRATE_BATCH_SIZE;
+  const batchSize =
+    Number.isInteger(requestedSize) && requestedSize > 0
+      ? Math.min(requestedSize, MAX_MIGRATE_BATCH_SIZE)
+      : DEFAULT_MIGRATE_BATCH_SIZE;
 
-  const { allUids, pendingUids } = await discoverVisitorMigrationSet(env);
-  const batch = pendingUids.slice(0, batchSize);
+  const requestedBudget = Number(options?.queryBudget);
+  const queryBudget =
+    Number.isInteger(requestedBudget) && requestedBudget > 0 ? requestedBudget : MIGRATE_QUERY_BUDGET;
+
+  const { allUids, pendingUids, queriesUsed: discoverQueries } = await discoverVisitorMigrationSet(env);
+  const candidates = pendingUids.slice(0, batchSize);
+  let queriesUsed = discoverQueries;
   let batchMigrated = 0;
 
-  for (const uid of batch) {
-    await migrateVisitor(env, uid);
+  for (const uid of candidates) {
+    // Always migrate at least 1 visitor when `candidates` is non-empty so a large visitor never stalls;
+    // afterwards, stop before starting the next visitor if remaining budget cannot cover a 2-query visitor.
+    if (batchMigrated > 0 && queriesUsed + 2 > queryBudget) {
+      break;
+    }
+    const res = await migrateVisitor(env, uid, { skipMigratedCheck: true });
+    queriesUsed += Number(res.queriesUsed || 0);
     batchMigrated += 1;
   }
 
@@ -481,6 +557,7 @@ export async function migrateVisitorsBatch(env, options = {}) {
     mode: 'd1',
     d1Bound: true,
     batchMigrated,
+    queriesUsed,
     done,
     total,
     finished: remaining <= 0,

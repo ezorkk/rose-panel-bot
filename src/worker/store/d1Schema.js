@@ -10,7 +10,7 @@ const SCHEMA_DDL_STATEMENTS = [
     value TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS messages (
-    id               TEXT PRIMARY KEY,
+    id               TEXT NOT NULL,
     uid              TEXT NOT NULL,
     sender           TEXT NOT NULL,
     pm_message_id    INTEGER,
@@ -28,7 +28,8 @@ const SCHEMA_DDL_STATEMENTS = [
     sticker_format   TEXT,
     visitor_reaction TEXT,
     owner_reaction   TEXT,
-    created_at       INTEGER NOT NULL
+    created_at       INTEGER NOT NULL,
+    PRIMARY KEY (uid, id)
   )`,
   `CREATE INDEX IF NOT EXISTS idx_messages_uid_time ON messages(uid, created_at)`,
   `CREATE INDEX IF NOT EXISTS idx_messages_uid_pm ON messages(uid, pm_message_id)`,
@@ -41,6 +42,7 @@ const SCHEMA_DDL_STATEMENTS = [
     created_at INTEGER NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS idx_links_uid_time ON message_links(uid, created_at)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_links_uniq ON message_links(uid, message_id, url)`,
   `CREATE TABLE IF NOT EXISTS topic_map (
     group_id      TEXT NOT NULL,
     topic_msg_id  INTEGER NOT NULL,
@@ -83,6 +85,10 @@ async function runSchemaInit(db) {
   }
 
   return SCHEMA_VERSION;
+}
+
+export function isSchemaInitialized(env) {
+  return Boolean(env?.DB && schemaInitCache.has(env.DB));
 }
 
 export async function ensureSchema(env, options = {}) {

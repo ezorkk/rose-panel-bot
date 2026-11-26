@@ -7842,7 +7842,28 @@ describe('Cloudflare D1 storage layer, schema idempotency, map fallback & daily 
     ).json();
     expect(initialStatus).toEqual({ ok: true, mode: 'd1', d1Bound: true, done: 0, total: 45, finished: false });
 
-    // 4. Batch 1 (default 20 visitors -> 20 / 45)
+    // 4. Batch 1 on a fresh DB (even when caller requests batchSize: 50) stays strictly <= 50 D1 queries
+    const coldDb = createD1Shim();
+    const coldEnv = { ...kvOnlyEnv, DB: coldDb };
+    coldDb.resetStats();
+    const coldFirstBatch = await (
+      await worker.fetch(
+        new Request('https://panel.test/api/admin/storage/migrate', {
+          method: 'POST',
+          headers: { 'X-Telegram-Init-Data': adminInit, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ batchSize: 50 }),
+        }),
+        coldEnv
+      )
+    ).json();
+    expect(coldFirstBatch.ok).toBe(true);
+    expect(coldFirstBatch.batchMigrated).toBeGreaterThanOrEqual(1);
+    expect(coldFirstBatch.batchMigrated).toBeLessThan(25);
+    expect(coldFirstBatch.finished).toBe(false);
+    expect(coldDb._stats.queries).toBeLessThanOrEqual(50);
+
+    // Also verify on `d1Env` that every batch stays <= 50 D1 queries and recovers from mid-batch failures
+    db.resetStats();
     const b1 = await (
       await worker.fetch(
         new Request('https://panel.test/api/admin/storage/migrate', {
@@ -7853,7 +7874,13 @@ describe('Cloudflare D1 storage layer, schema idempotency, map fallback & daily 
         d1Env
       )
     ).json();
-    expect(b1).toMatchObject({ ok: true, mode: 'd1', batchMigrated: 20, done: 20, total: 45, finished: false });
+    expect(b1.ok).toBe(true);
+    expect(b1.mode).toBe('d1');
+    expect(b1.batchMigrated).toBe(19);
+    expect(b1.done).toBe(19);
+    expect(b1.total).toBe(45);
+    expect(b1.finished).toBe(false);
+    expect(db._stats.queries).toBeLessThanOrEqual(50);
 
     // 5. Simulate mid-batch D1 failure during Batch 2 right on the 2nd chunk of the 95-row visitor (`60025`)
     const origBatch = db.batch.bind(db);
@@ -7882,26 +7909,29 @@ describe('Cloudflare D1 storage layer, schema idempotency, map fallback & daily 
     expect(failedRes.status).toBe(500);
     expect(sawFirstChunkOfBigVisitor).toBe(true);
 
-    // Restore D1 batch and run remaining batches to completion
+    // Restore D1 batch and run remaining batches to completion, verifying <= 50 D1 queries on EVERY request
     db.batch = origBatch;
     let latest = await getStorageStatus(d1Env);
     expect(latest.finished).toBe(false);
-    expect(latest.done).toBeGreaterThanOrEqual(20);
+    expect(latest.done).toBeGreaterThanOrEqual(19);
     expect(latest.done).toBeLessThan(45);
 
     let safetyLoops = 0;
-    while (!latest.finished && safetyLoops < 5) {
+    while (!latest.finished && safetyLoops < 10) {
       safetyLoops += 1;
+      db.resetStats();
       latest = await (
         await worker.fetch(
           new Request('https://panel.test/api/admin/storage/migrate', {
             method: 'POST',
             headers: { 'X-Telegram-Init-Data': adminInit, 'Content-Type': 'application/json' },
-            body: '{}',
+            body: JSON.stringify({ batchSize: 50 }),
           }),
           d1Env
         )
       ).json();
+      expect(db._stats.queries).toBeLessThanOrEqual(50);
+      expect(latest.batchMigrated).toBeGreaterThanOrEqual(1);
     }
     expect(latest).toMatchObject({ ok: true, done: 45, total: 45, finished: true });
 
@@ -8006,5 +8036,201 @@ describe('Cloudflare D1 storage layer, schema idempotency, map fallback & daily 
     expect(await kv.get('history:91001')).toBeNull();
     const hist = await getVisitorHistory(env, '91001');
     expect(hist.messages.map((m) => m.text)).toEqual(['D1 + KV 协同正常']);
+  });
+
+  it('isolates composite PRIMARY KEY (uid, id) across visitors on identical message IDs (including p-prefixed IDs) and scopes reactions to uid', async () => {
+    const kv = createMemoryKV();
+    const db = createD1Shim();
+    const d1Env = { TOPIC_MAP: kv, DB: db };
+
+    // Two distinct visitors share identical KV message IDs (`m_1700000000000_42` and `p1`) and identical `pmMessageId: 101`
+    await kv.put(
+      'history:81001',
+      JSON.stringify({
+        photos: [],
+        links: [],
+        pmMessageIds: [{ id: 101, topicMsgId: null, sender: 'visitor', at: 1700000000000 }],
+        messages: [
+          {
+            id: 'm_1700000000000_42',
+            sender: 'visitor',
+            text: 'Alice 的第一条消息',
+            mediaTag: '',
+            photoFileId: '',
+            thumbFileId: '',
+            pmMessageId: 101,
+            topicMsgId: null,
+            at: '2023-11-14T22:13:20.000Z',
+          },
+          {
+            id: 'p1',
+            sender: 'admin',
+            text: '以 p 开头但非 p_/p:/pm: 的气泡消息',
+            mediaTag: '',
+            photoFileId: '',
+            thumbFileId: '',
+            pmMessageId: 102,
+            topicMsgId: null,
+            at: '2023-11-14T22:13:21.000Z',
+          },
+        ],
+      })
+    );
+    await kv.put(
+      'history:81002',
+      JSON.stringify({
+        photos: [],
+        links: [],
+        pmMessageIds: [{ id: 101, topicMsgId: null, sender: 'visitor', at: 1700000000000 }],
+        messages: [
+          {
+            id: 'm_1700000000000_42',
+            sender: 'visitor',
+            text: 'Bob 的同名 ID 消息',
+            mediaTag: '',
+            photoFileId: '',
+            thumbFileId: '',
+            pmMessageId: 101,
+            topicMsgId: null,
+            at: '2023-11-14T22:13:20.000Z',
+          },
+          {
+            id: 'p1',
+            sender: 'admin',
+            text: 'Bob 的 p1 消息',
+            mediaTag: '',
+            photoFileId: '',
+            thumbFileId: '',
+            pmMessageId: 102,
+            topicMsgId: null,
+            at: '2023-11-14T22:13:21.000Z',
+          },
+        ],
+      })
+    );
+
+    const histA = await getVisitorHistory(d1Env, '81001');
+    const histB = await getVisitorHistory(d1Env, '81002');
+    expect(histA.messages.map((m) => ({ id: m.id, text: m.text }))).toEqual([
+      { id: 'm_1700000000000_42', text: 'Alice 的第一条消息' },
+      { id: 'p1', text: '以 p 开头但非 p_/p:/pm: 的气泡消息' },
+    ]);
+    expect(histB.messages.map((m) => ({ id: m.id, text: m.text }))).toEqual([
+      { id: 'm_1700000000000_42', text: 'Bob 的同名 ID 消息' },
+      { id: 'p1', text: 'Bob 的 p1 消息' },
+    ]);
+
+    // Reacting on visitor 81001's message (`m_1700000000000_42` and `p1`) MUST NOT leak onto visitor 81002
+    expect(await updateVisitorMessageReaction(d1Env, '81001', 101, 'owner', '❤️')).toBe(true);
+    expect(await updateVisitorMessageReaction(d1Env, '81001', 102, 'visitor', '👍')).toBe(true);
+
+    const afterA = await getVisitorHistory(d1Env, '81001');
+    const afterB = await getVisitorHistory(d1Env, '81002');
+    expect(afterA.messages.find((m) => m.id === 'm_1700000000000_42')?.ownerReaction).toBe('❤️');
+    expect(afterA.messages.find((m) => m.id === 'p1')?.visitorReaction).toBe('👍');
+    expect(afterB.messages.find((m) => m.id === 'm_1700000000000_42')?.ownerReaction).toBeUndefined();
+    expect(afterB.messages.find((m) => m.id === 'p1')?.visitorReaction).toBeUndefined();
+  });
+
+  it('deduplicates messages and message_links under concurrent migrateVisitor calls and advances at least 1 visitor under tight queryBudget', async () => {
+    const kv = createMemoryKV();
+    const db = createD1Shim();
+    const env = { TOPIC_MAP: kv, DB: db };
+
+    await kv.put(
+      'history:82001',
+      JSON.stringify({
+        photos: [
+          {
+            id: 'p_old_1',
+            fileId: 'old_photo_file',
+            thumbFileId: 'old_photo_thumb',
+            caption: '旧图',
+            sender: 'visitor',
+            at: '2024-05-01T00:00:00.000Z',
+          },
+        ],
+        links: [
+          {
+            id: 'l_100',
+            url: 'https://concurrent.example.com/a',
+            snippet: '并发测试 A',
+            sender: 'visitor',
+            at: '2024-06-01T00:00:00.000Z',
+          },
+          {
+            id: 'l_100',
+            url: 'https://concurrent.example.com/b',
+            snippet: '并发测试 B',
+            sender: 'visitor',
+            at: '2024-06-01T00:00:00.000Z',
+          },
+        ],
+        pmMessageIds: [{ id: 301, topicMsgId: null, sender: 'visitor', at: 1717200000000 }],
+        messages: [
+          {
+            id: 'm_conc_1',
+            sender: 'visitor',
+            text: '并发消息 https://concurrent.example.com/a https://concurrent.example.com/b',
+            mediaTag: '',
+            photoFileId: '',
+            thumbFileId: '',
+            pmMessageId: 301,
+            topicMsgId: null,
+            at: '2024-06-01T00:00:00.000Z',
+          },
+        ],
+      })
+    );
+
+    // Delay KV get slightly so both concurrent callers pass `SELECT 1 FROM migrated_visitors` before either writes
+    const origGet = kv.get.bind(kv);
+    kv.get = async (...args) => {
+      await new Promise((r) => setTimeout(r, 8));
+      return origGet(...args);
+    };
+
+    const [r1, r2] = await Promise.all([migrateVisitor(env, '82001'), migrateVisitor(env, '82001')]);
+    expect(r1.ok).toBe(true);
+    expect(r2.ok).toBe(true);
+
+    // Both `messages` (1 bubble + 1 archive photo = 2) and `message_links` (2 URLs) must have ZERO duplicates
+    expect((await db.prepare(`SELECT COUNT(*) AS cnt FROM messages WHERE uid = '82001'`).first()).cnt).toBe(2);
+    expect((await db.prepare(`SELECT COUNT(*) AS cnt FROM message_links WHERE uid = '82001'`).first()).cnt).toBe(2);
+    expect((await db.prepare(`SELECT COUNT(*) AS cnt FROM migrated_visitors WHERE uid = '82001'`).first()).cnt).toBe(1);
+
+    // Also verify `appendExchange` with duplicate URLs in a single message never throws on idx_links_uniq
+    await getStore(env).appendExchange('82001', {
+      sender: 'visitor',
+      nowMs: 1717300000000,
+      nowIso: new Date(1717300000000).toISOString(),
+      text: 'dup urls',
+      urls: ['https://dup.example.com/x', 'https://dup.example.com/x'],
+      pmMessageId: 302,
+    });
+    const linksAfter = (
+      await db.prepare(`SELECT url FROM message_links WHERE uid = '82001' AND url = 'https://dup.example.com/x'`).all()
+    ).results;
+    expect(linksAfter).toHaveLength(1);
+
+    // Seed one more large visitor and verify `migrateVisitorsBatch` still migrates at least 1 visitor even if queryBudget is tiny
+    const largeMsgs = Array.from({ length: 60 }, (_, idx) => ({
+      id: `m_lg_${idx}`,
+      sender: 'visitor',
+      text: `msg ${idx}`,
+      mediaTag: '',
+      photoFileId: '',
+      thumbFileId: '',
+      pmMessageId: idx + 1,
+      topicMsgId: null,
+      at: new Date(1718000000000 + idx * 1000).toISOString(),
+    }));
+    await kv.put('history:82002', JSON.stringify({ photos: [], links: [], pmMessageIds: [], messages: largeMsgs }));
+    await kv.put('history:82003', JSON.stringify({ photos: [], links: [], pmMessageIds: [], messages: [] }));
+
+    const tightBatch = await migrateVisitorsBatch(env, { batchSize: 20, queryBudget: 1 });
+    expect(tightBatch.ok).toBe(true);
+    expect(tightBatch.batchMigrated).toBe(1);
+    expect(tightBatch.finished).toBe(false);
   });
 });
