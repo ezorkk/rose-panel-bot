@@ -5,6 +5,7 @@ import { haptic, openExternalUrl } from '../lib/telegram.js';
 export const REPO_URL = 'https://github.com/mango0114/rose-panel-bot';
 // Verified against live GitHub README heading anchor: 🚀 极简部署（5 分钟免费上线）
 export const DEPLOY_GUIDE_URL = `${REPO_URL}#${encodeURIComponent('-极简部署5-分钟免费上线')}`;
+export const FEEDBACK_URL = `${REPO_URL}/issues/new/choose`;
 export const CHANGELOG_URL = 'https://github.com/mango0114/rose-panel-bot/blob/main/CHANGELOG.md';
 export const SEEN_VERSION_STORAGE_KEY = 'rose_seen_version';
 export const HIDE_STAR_STRIP_STORAGE_KEY = 'rose_hide_star_strip';
@@ -23,6 +24,11 @@ export const RECENT_RELEASES = [
         tag: '新增',
         tone: 'new',
         text: '面板聊天窗口直接显示静态 / 动态 / 视频贴纸（走短时签名媒体代理，加载失败自动回退文字）',
+      },
+      {
+        tag: '改进',
+        tone: 'imp',
+        text: '面板发消息、撤回与消息刷新全面提速，话题同步副本更简洁；设置页与更新弹窗新增「意见反馈」入口',
       },
     ],
   },
@@ -188,7 +194,7 @@ export function StarSupportBanner({ onDismiss = null, style = undefined }) {
 }
 
 export default function WhatsNewModal({
-  appVersion = '1.8.0',
+  appVersion = '1.9.0',
   previousVersion = '',
   mode = 'auto',
   onClose,
@@ -250,13 +256,28 @@ export default function WhatsNewModal({
         </div>
 
         <div className="whatsnew-foot">
-          <button
-            type="button"
-            className="btn btn-subtle btn-sm"
-            onClick={() => openExternalUrl(CHANGELOG_URL)}
-          >
-            查看完整更新内容
-          </button>
+          <div className="whatsnew-foot-links">
+            <button
+              type="button"
+              className="btn btn-subtle btn-sm"
+              onClick={() => {
+                haptic('light');
+                openExternalUrl(CHANGELOG_URL);
+              }}
+            >
+              完整更新日志
+            </button>
+            <button
+              type="button"
+              className="btn btn-subtle btn-sm"
+              onClick={() => {
+                haptic('light');
+                openExternalUrl(FEEDBACK_URL);
+              }}
+            >
+              💬 意见反馈
+            </button>
+          </div>
           <button
             type="button"
             className="btn btn-primary btn-sm"

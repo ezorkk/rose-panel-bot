@@ -1723,8 +1723,16 @@ select {
   border-top: 1px solid var(--border);
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
+  flex-wrap: wrap;
   gap: 8px;
+}
+
+.whatsnew-foot-links {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 .star-support-strip {

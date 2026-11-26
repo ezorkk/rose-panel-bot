@@ -20,10 +20,11 @@ import {
 } from 'lucide-react';
 import { apiRequest } from '../lib/api.js';
 import { BRAND_SIGNATURE } from '../lib/brand.js';
-import { buildSourceLink, confirmDialog, copyText, openExternalUrl } from '../lib/telegram.js';
+import { buildSourceLink, confirmDialog, copyText, haptic, openExternalUrl } from '../lib/telegram.js';
 import { TgStickerMedia, TicketEmblem } from './Emblems.jsx';
 import {
   CHANGELOG_URL,
+  FEEDBACK_URL,
   HIDE_STAR_STRIP_STORAGE_KEY,
   REPO_URL,
   StarSupportBanner,
@@ -2783,6 +2784,19 @@ export default function SettingsDrawer({
             }
           />
         )}
+
+        <div style={{ marginTop: 10 }}>
+          <button
+            type="button"
+            className="btn btn-subtle btn-sm btn-block"
+            onClick={() => {
+              haptic('light');
+              openExternalUrl(FEEDBACK_URL);
+            }}
+          >
+            💬 意见反馈
+          </button>
+        </div>
       </div>
     </div>
   );
