@@ -12,28 +12,33 @@ export const HIDE_STAR_STRIP_STORAGE_KEY = 'rose_hide_star_strip';
 
 export const RECENT_RELEASES = [
   {
-    version: '1.10.0',
-    url: 'https://github.com/mango0114/rose-panel-bot/releases/tag/v1.10.0',
+    version: '1.11.0',
+    url: 'https://github.com/mango0114/rose-panel-bot/releases/tag/v1.11.0',
     items: [
       {
         tag: '新增',
         tone: 'new',
-        text: '新访客观察期：刚通过人机验证的新访客发送链接、@用户名、联系方式或转发消息时先扣下不转发，静默通知站长在通知按钮或面板内「放行（按序补发）」或「拉黑」，支持链接白名单域名',
+        text: '新访客观察期：刚通过验证的新访客发链接、@用户名、联系方式或转发消息时先暂存不转发，静默通知站长在通知按钮或面板内「放行（按序补发）」或「拉黑」，支持链接白名单域名',
+      },
+      {
+        tag: '新增',
+        tone: 'new',
+        text: 'Komari 探针延迟与丢包显示：节点卡片展示各线路平均延迟与丢包率（悬停或展开可看最低 / 最高 / 最近），卡片顶部显示最低平均延迟（需在 Komari 后台添加延迟监测任务）',
+      },
+      {
+        tag: '新增',
+        tone: 'new',
+        text: '底部导航支持在设置中通过上移 / 下移自定义顺序与默认首页（老配置升级后顺序不变），广告屏蔽关键词新增 6 组短语预设（默认不选，支持单击或整组添加）',
       },
       {
         tag: '改进',
         tone: 'imp',
-        text: '名片首页「站长速览」精简为一行防护/待审核提示条，今日拦截按站长时区计数，累计拦截统计与待审核筛选整合至「访客」页并附带底部导航小红点',
+        text: '名片首页「站长速览」精简为一行防护 / 待审核提示条，累计拦截统计与「待审核」筛选整合至「访客」页并附带底部导航小红点',
       },
       {
-        tag: '新增',
-        tone: 'new',
-        text: '底部导航支持在设置中通过上移/下移自定义顺序，排第一的可见页面即默认页（访客不可见页面自动跳过，深链接优先）',
-      },
-      {
-        tag: '新增',
-        tone: 'new',
-        text: '广告屏蔽关键词新增 6 组广告特有短语预设（默认不选），支持单击开关与整组一键添加',
+        tag: '修复',
+        tone: 'fix',
+        text: '修复面板聊天窗口自动刷新时动态贴纸反复消失重播与图片重复加载的问题',
       },
     ],
   },
@@ -220,7 +225,7 @@ export function StarSupportBanner({ onDismiss = null, style = undefined }) {
 }
 
 export default function WhatsNewModal({
-  appVersion = '1.9.0',
+  appVersion = '1.11.0',
   previousVersion = '',
   mode = 'auto',
   onClose,
