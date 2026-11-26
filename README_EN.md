@@ -26,8 +26,8 @@
 </div>
 
 > - **🔄 Fork First for 1-Click Updates (Important)**: **Always click `Fork` at the top right before importing into Cloudflare Workers** — only Fork-based deployments support **1-click in-panel Fork sync updates** (100% KV data preserved). Release checks work for every deployment, but standalone copies have no GitHub `Sync fork` and must merge upstream manually (see the guide's FAQ).
-> - **🔒 Zero Data Collection Promise**: Zero third-party relays — your Bot Token, config, sites, and visitor archive live **100% inside your own Cloudflare Workers & KV** (external calls occur only when enabled for read-only CAS, CF Turnstile, or public GitHub Release checks).
-> - **🧭 Quick Links**: [🚀 4 Deployment Options (Fork / AI / CLI / VPS)](#-fast-deployment-free-in-5-minutes) · [🔄 Safe Upgrade Guide](#-upgrading-existing-deployments-100-kv-data-preserved) · [🐣 5-Min Guide (ZH)](docs/SETUP_GUIDE.md)
+> - **🔒 Zero Data Collection Promise**: Zero third-party relays — your Bot Token, config, sites, and visitor archive live **100% inside your own Cloudflare Workers & KV / D1** (external calls occur only when enabled for read-only CAS, CF Turnstile, or public GitHub Release checks).
+> - **🧭 Quick Links**: [🎒 4 Things Ready in 1 Min & Fast Deploy](#deploy) · [🔄 Safe Upgrade Guide](#upgrade) · [🐣 5-Min Guide (ZH)](docs/SETUP_GUIDE.md)
 
 ---
 
@@ -94,6 +94,8 @@
 </div>
 </details>
 
+> **🚀 Ready to deploy your own for free on Cloudflare?** → **[Grab the 4 items in 1 min & go live in 4 steps](#deploy)**
+
 ---
 
 ## 🛡️ 4-Layer Anti-Spam Architecture & 4 Verification Modes
@@ -138,23 +140,40 @@ Unused modules stay completely hidden and add zero overhead:
 
 ---
 
+<a id="deploy"></a>
 ## 🚀 Fast Deployment (Free in 5 Minutes)
 
-> **🐣 First Telegram bot?** Follow the **[5-Minute Beginner Guide (ZH)](docs/SETUP_GUIDE.md)** — from getting your first token from `@BotFather` to sending `/bind` in your group.
+> **🐣 First Telegram bot?** Grab the 4 items below first, then follow the 4 steps — or check the **[5-Minute Beginner Guide (ZH)](docs/SETUP_GUIDE.md)**.
 
-### Option 1: Fork + Cloudflare Web Deploy (Recommended ★ · Supports 1-Click In-Panel Updates)
+### 🎒 Before You Start: 4 Values Ready in 1 Minute (Everything Else Auto-Provisions)
 
-1. Click **Fork** at the top right to copy `rose-panel-bot` into your own GitHub account.
-2. Open Cloudflare Dashboard → **Workers & Pages → Create → Workers → Import a repository** and select your fork:
-   - **Build command**: `npm run build`
-   - **Deploy command**: `npx wrangler deploy`
-3. In **Settings → Variables & Bindings**, confirm `TOPIC_MAP` KV is bound (plus recommended D1 binding `DB` pointing to database `rose-panel-bot` — Wrangler v4 auto-provisions it when permitted, or see [manual D1 binding steps](docs/SETUP_GUIDE.md#d1-storage); falls back seamlessly to KV when unbound) and add 4 core variables:
-   - `BOT_TOKEN` (**Secret**) · `WEBHOOK_SECRET` (**Secret**, any random string)
-   - `ADMIN_IDS` (**must be a Text variable, not Secret** — your numeric UID) · `BOT_USERNAME` (**Text**, without `@`)
-4. Visit `https://<your-worker-domain>/setup?secret=<WEBHOOK_SECRET>` once until you see `"ok": true`, then send `/start` to your bot in PM — **Bot DM push + 4-layer anti-spam work immediately** with `ADMIN_IDS` (no group required!). *(Optional, recommended for high-volume inboxes)* Create a private group with **Topics** enabled, add the bot as Administrator, and send **`/bind`** to auto-switch into per-visitor Forum Topics!
-5. *(Recommended)* In `@BotFather`, send `/newapp` with URL `https://<your-worker-domain>/` and a short name matching `APP_SHORT_NAME` (e.g. `panel`) so the panel opens cleanly from groups and topic buttons.
+| Item | Cloudflare Type | Where to Get It | ⚠️ Watch Out |
+| :--- | :---: | :--- | :--- |
+| **`BOT_TOKEN`** | **Secret** | Open **[@BotFather](https://t.me/BotFather)** on Telegram → send `/newbot` (or `/mybots → API Token`) | **Never share publicly or commit to GitHub** |
+| **`BOT_USERNAME`** | **Text** | The bot username you just chose in `@BotFather` (ends with `bot`, e.g. `my_rose_bot`) | **Omit the leading `@`** |
+| **`ADMIN_IDS`** | **Text** | Open **[@userinfobot](https://t.me/userinfobot)** → tap **Start**, copy the **numeric `Id`** | Use **your personal** numeric ID (not the bot's); **must be Text, not Secret** or ⚙️ Settings won't appear |
+| **`WEBHOOK_SECRET`** | **Secret** | **No dashboard lookup needed — make up any password yourself** (e.g. `rose2026pass`) | Use **letters, digits, `-`, `_` only** (no spaces or `& ? #`); needed for `/setup` in Step 4 |
 
-> 💡 **Why Fork instead of a 1-click template button?** Standalone template copies aren't GitHub Forks, so GitHub `Sync fork` and in-panel 1-click Fork sync won't work on them. Forking first takes 1 click and unlocks effortless future upgrades.
+### Option 1: Fork + Cloudflare Web Deploy (Recommended ★ · 4 Steps)
+
+1. **Fork first**: Click **Fork** at the top right to copy `rose-panel-bot` into your GitHub account (**⚠️ always Fork first** — only Forks support 1-click in-panel updates).
+2. **Import into Cloudflare**: Open Cloudflare Dashboard → **Workers & Pages → Create → Workers → Import a repository**, pick your fork, keep **Build command** `npm run build` and **Deploy command** `npx wrangler deploy`, then click **Save and Deploy** (**first deploy auto-creates `TOPIC_MAP` KV and the `rose-panel-bot` D1 database**).
+3. **Add the 4 variables**: Go to Worker **Settings → Variables & Bindings**, add the 4 items from the table above with their exact **Secret / Text** types, and click **Deploy / Save**.
+4. **Activate via `/setup`**: Open once in your browser:
+   ```text
+   https://<your-worker-domain>/setup?secret=<YOUR_WEBHOOK_SECRET>
+   ```
+   Once you see **`"ok": true`**, you're **🎉 live!** Send `/start` to your bot in Telegram PM to enable zero-group DM push and open your personal panel from the bottom-left button.
+
+<details>
+<summary><b>✨ Optional Next Steps (/newapp Direct Links · /bind Topics Group · Manual D1 Binding · Multi-Instance Note)</b></summary>
+
+- **Direct-link Mini App for QR posters & group buttons (Recommended)**: Send `/newapp` to `@BotFather` with URL `https://<your-worker-domain>/` and short name `panel`, then add Text variable `APP_SHORT_NAME = panel`.
+- **Per-visitor Forum Topics (Optional, great for high volume)**: Create a private group with **Topics** enabled → add the bot as Admin (*Manage Topics* + *Delete Messages*) → send **`/bind`** inside the group to auto-switch (send `/unbind` anytime to return to DM push).
+- **Missing `DB` binding?** Wrangler v4 auto-provisions it by default; if `DB` is absent, see [manual D1 binding steps](docs/SETUP_GUIDE.md#d1-storage) (or keep running seamlessly on KV).
+- **⚠️ Multiple instances on one Cloudflare account**: When `database_id` is omitted, Wrangler matches D1 databases by `database_name`. If you deploy a 2nd instance on the same Cloudflare account, change `database_name` in its `wrangler.toml` (e.g. `rose-panel-bot-2`) so instances don't share one database.
+- **Why Fork instead of a 1-click template button?** Standalone template copies aren't GitHub Forks, so GitHub `Sync fork` and in-panel 1-click Fork sync won't work on them.
+</details>
 
 ### Option 2: AI-Guided Modular Deploy (Antigravity / Claude Code / Codex / Cursor)
 
@@ -226,9 +245,11 @@ Then reverse-proxy `127.0.0.1:8787` with Caddy for automatic HTTPS.
 
 ---
 
+<a id="upgrade"></a>
 ## 🔄 Upgrading Existing Deployments (KV Data Preserved & Auto-Migrated to D1)
 
-> **✅ KV data is 100% preserved!** Upgrading only replaces Worker code (`wrangler.toml` enables `keep_vars = true` so plain-text vars stay safe across deploys). Your card, sites, probe, visitors, and group binding stay **100% intact** in KV; once D1 (`DB`) is bound, visitor chat history migrates automatically on demand (or via 1-click batch migration in **⚙️ Settings → 版本更新 → 数据存储**), and deployments without `DB` continue using KV seamlessly. ⚠️ Do not create a new Worker or re-click a 1-click deploy button.
+> **✅ KV data is 100% preserved!** Upgrading only replaces Worker code (`wrangler.toml` enables `keep_vars = true` so plain-text vars stay safe across deploys). Your card, sites, probe, visitors, and group binding stay **100% intact** in KV; once D1 (`DB`) is bound, visitor chat history migrates automatically on demand (or via 1-click batch migration in **⚙️ Settings → 版本更新 → 数据存储**), and deployments without `DB` continue using KV seamlessly.  
+> **⚠️ Two reminders**: (1) Do not create a new Worker or re-click a 1-click deploy button; (2) if running **2+ instances on the same Cloudflare account**, give each repo a unique `database_name` in `wrangler.toml` (e.g. `rose-panel-bot-2`) so they don't share one D1 database.
 
 - **🔀 GitHub Fork Users (Easiest)**: Open **⚙️ Settings → 版本更新** in the Mini App, tap **检查新版本**; after filling **我 Fork 的 GitHub 仓库** (your fork's repo, e.g. `yourname/rose-panel-bot`), use **前往我的 Fork 点 Sync fork** (no token needed), or add a single-repo Fine-grained Token and tap **一键同步 Fork 并触发云端更新** — Cloudflare rebuilds in ~30s.
 - **🤖 Standalone Repo / AI Users**: Send this prompt to your AI assistant:
@@ -250,7 +271,7 @@ Then reverse-proxy `127.0.0.1:8787` with Caddy for automatic HTTPS.
 | `WEBHOOK_SECRET` | Secret | ✅ | Random secret protecting `/`, `/webhook`, and `/setup` |
 | `BOT_USERNAME` | Text | Recommended | Bot username without `@` |
 | `APP_SHORT_NAME` | Text | Recommended | Mini App short name from BotFather `/newapp` (e.g. `panel`) |
-| `SUPERGROUP_ID` | Text | Optional | Forum Topics group ID (**optional**: without a bound group, `ADMIN_IDS` automatically enables Bot DM push; send `/bind` inside a Topics group anytime to switch. Note: DM push uses 1–3 extra KV writes per visitor message, well within Cloudflare's 1,000/day free tier for personal use) |
+| `SUPERGROUP_ID` | Text | Optional | Forum Topics group ID (**optional**: without a bound group, `ADMIN_IDS` automatically enables Bot DM push; send `/bind` inside a Topics group anytime to switch. Extra 1–3 KV writes per visitor message apply only in pure-KV mode without D1) |
 | `TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET` | Text / Secret | Optional | Required only for Cloudflare Turnstile strict verification |
 | `PROBE_PROVIDER` | Text | Optional | `komari` (default) / `nezha` / `nodeget` / `json` |
 | `PROBE_URL` / `PROBE_API_KEY` | Text / Secret | Optional | Probe URL & credential (`KOMARI_URL` / `KOMARI_API_KEY` still supported; also configurable in Mini App) |
