@@ -62,17 +62,20 @@
 
 ---
 
-## 💬 更多实机亮点：`/add` 出题 · `/set` 动态徽章 · 站内版本更新
+## 💬 更多实机亮点：分享海报 · `/add` 出题 · `/set` 动态徽章 · 站内版本更新
 
 <div align="center">
+  <p><b>🪪 一键生成浅/深色二维码名片分享海报 · 长按存图 / 系统分享 / 复制名片链接</b></p>
+  <img src="docs/assets/showcase-share.png" alt="浅色与深色玫瑰瓷名片二维码分享海报" width="96%" />
+  <br /><br />
   <p><b>🎭 私聊 <code>/add</code> 三秒录入贴纸验证题 · 全程面板可视化一键开关</b></p>
   <img src="docs/assets/showcase-antispam.png" alt="一键发静/动态贴纸快捷设置图形验证题与防骚扰验证设置" width="96%" />
   <br /><br />
   <p><b>✨ 私聊 <code>/set</code> 秒换动态贴纸主徽章 · 收藏徽章库与 0 秒开屏同步</b></p>
   <img src="docs/assets/showcase-badges.png" alt="私聊 /set 换动态贴纸主徽章与收藏徽章库" width="96%" />
   <br /><br />
-  <p><b>🔄 Fork 部署 · 新版站内提醒 · 一键同步更新（数据 100% 保留）</b></p>
-  <img src="docs/assets/showcase-updater.png" alt="Fork 部署新版站内提醒与一键同步更新" width="96%" />
+  <p><b>🔄 Fork 部署 · 站内检查新版 / 意见反馈 · 一键同步更新（数据 100% 保留）</b></p>
+  <img src="docs/assets/showcase-updater.png" alt="Fork 部署新版站内检查、意见反馈与一键同步更新" width="96%" />
 </div>
 
 <details>

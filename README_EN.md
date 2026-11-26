@@ -62,17 +62,20 @@
 
 ---
 
-## 💬 More Highlights: `/add` Quizzes · `/set` Animated Emblems · 1-Click Fork Sync
+## 💬 More Highlights: Share Poster · `/add` Quizzes · `/set` Animated Emblems · 1-Click Fork Sync
 
 <div align="center">
+  <p><b>🪪 One-Tap Light & Dark QR Share Posters · Long-Press Save / Native Share / Copy Link</b></p>
+  <img src="docs/assets/showcase-share.png" alt="Light and dark rose-porcelain QR card share posters" width="96%" />
+  <br /><br />
   <p><b>🎭 3-Second Sticker Quizzes via <code>/add</code> · Full Visual Anti-Spam Controls</b></p>
   <img src="docs/assets/showcase-antispam.png" alt="Send any static or animated TG sticker via /add to create custom visual anti-spam quizzes" width="96%" />
   <br /><br />
   <p><b>✨ Animated Sticker Emblems via <code>/set</code> · Saved Collection & 0ms Edge Splash</b></p>
   <img src="docs/assets/showcase-badges.png" alt="Send /set with any sticker or custom emoji to update the animated main emblem" width="96%" />
   <br /><br />
-  <p><b>🔄 Fork Deploy · In-App Release Reminder · 1-Click Fork Sync (100% Data Preserved)</b></p>
-  <img src="docs/assets/showcase-updater.png" alt="In-panel release reminder and one-click Fork sync for Cloudflare deployments" width="96%" />
+  <p><b>🔄 Fork Deploy · In-App Update Check & Feedback · 1-Click Fork Sync (100% Data Preserved)</b></p>
+  <img src="docs/assets/showcase-updater.png" alt="In-panel update check, feedback entry, and one-click Fork sync for Cloudflare deployments" width="96%" />
 </div>
 
 <details>
