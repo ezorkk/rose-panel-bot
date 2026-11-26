@@ -71,7 +71,9 @@ export default function VisitorsTab({
   const [pendingReplies, setPendingReplies] = useState([]);
   const sendQueueRef = useRef(Promise.resolve());
   const pendingSeqRef = useRef(0);
-  const [recallingId, setRecallingId] = useState(null);
+  // Optimistic recall: bubbles being recalled are hidden at once (by pmMessageId) and only come back
+  // if the request fails. Kept as a set so the 6-second history poll can't resurrect them meanwhile.
+  const [recallingIds, setRecallingIds] = useState(() => new Set());
   const chatEndRef = useRef(null);
   const fileInputRef = useRef(null);
   // Race guards: the uid the drawer currently shows, a monotonically increasing history request
@@ -252,33 +254,42 @@ export default function VisitorsTab({
   };
 
   const handleRecallBubble = async (pmMessageId) => {
-    if (!activeVisitor || !pmMessageId || recallingId) return;
+    const id = Number(pmMessageId);
+    if (!activeVisitor || !id || recallingIds.has(id)) return;
     const uid = String(activeVisitor.userId);
     const ok = await confirmDialog('撤回后对方私聊与通知群话题中的这条消息都会被删除，确定撤回吗？');
     if (!ok || activeUidRef.current !== uid) return;
+    const unhide = () =>
+      setRecallingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    haptic('warning');
+    setRecallingIds((prev) => new Set(prev).add(id));
     try {
-      setRecallingId(pmMessageId);
-      haptic('warning');
       historySeqRef.current += 1;
       await apiRequest(`/api/admin/visitors/${encodeURIComponent(uid)}/recall`, {
         method: 'POST',
-        body: { pmMessageId },
+        body: { pmMessageId: id },
       });
       historySeqRef.current += 1;
-      if (activeUidRef.current !== uid) return;
-      setHistoryData((prev) => ({
-        ...prev,
-        messages: (prev.messages || []).filter(
-          (m) => !(m.sender === 'admin' && Number(m.pmMessageId) === Number(pmMessageId))
-        ),
-      }));
-      loadVisitorHistory(uid, { silent: true });
+      if (activeUidRef.current === uid) {
+        setHistoryData((prev) => ({
+          ...prev,
+          messages: (prev.messages || []).filter(
+            (m) => !(m.sender === 'admin' && Number(m.pmMessageId) === id)
+          ),
+        }));
+        loadVisitorHistory(uid, { silent: true });
+        onToast('🗑️ 已撤回发给对方的该条消息');
+      }
       loadList(search, filter);
-      onToast('🗑️ 已撤回发给对方的该条消息');
+      unhide();
     } catch (err) {
-      if (activeUidRef.current === uid) onToast(err.message);
-    } finally {
-      setRecallingId(null);
+      // Bring the bubble back and say why (e.g. past Telegram's 48-hour limit)
+      unhide();
+      if (activeUidRef.current === uid) onToast(err.message || '撤回失败');
     }
   };
 
@@ -598,7 +609,9 @@ export default function VisitorsTab({
                       </div>
                     </div>
                   ) : (
-                    historyData.messages.map((m) => {
+                    historyData.messages
+                      .filter((m) => !(m.sender === 'admin' && recallingIds.has(Number(m.pmMessageId))))
+                      .map((m) => {
                       const isMe = m.sender === 'admin';
                       return (
                         <div key={m.id} className={`chat-row ${isMe ? 'me' : 'them'}`}>
@@ -630,10 +643,9 @@ export default function VisitorsTab({
                               <button
                                 type="button"
                                 className="chat-recall-btn"
-                                disabled={Boolean(recallingId)}
                                 onClick={() => handleRecallBubble(m.pmMessageId)}
                               >
-                                {recallingId === m.pmMessageId ? '撤回中…' : '撤回'}
+                                撤回
                               </button>
                             )}
                           </div>
