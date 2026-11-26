@@ -1468,6 +1468,22 @@ select {
   border-bottom-right-radius: 5px;
 }
 
+.chat-row .chat-bubble.sticker-bubble {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 2px;
+}
+
+.chat-sticker-fallback {
+  padding: 9px 13px;
+  border-radius: 16px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
 .chat-photo {
   display: block;
   max-width: 190px;

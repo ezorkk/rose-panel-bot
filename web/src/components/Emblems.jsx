@@ -61,6 +61,9 @@ export function LottieSticker({ src, size = 60, fallback = '🌸' }) {
   }, [src]);
 
   if (failed) {
+    if (React.isValidElement(fallback)) {
+      return fallback;
+    }
     return (
       <div
         style={{
@@ -81,13 +84,29 @@ export function LottieSticker({ src, size = 60, fallback = '🌸' }) {
 }
 
 /**
- * Renders any single Telegram Sticker (static WebP, video WebM, or animated TGS Lottie)
+ * Renders any single Telegram Sticker (static WebP, video WebM, or animated TGS Lottie).
+ * Accepts either a public `fileId` (for badge emblems) or an explicit signed `src` URL (for private chat stickers).
  */
-export function TgStickerMedia({ fileId, format = 'webp', size = 60, emoji = '🌸', previewOnly = false }) {
+export function TgStickerMedia({
+  fileId = '',
+  src: explicitSrc = '',
+  format = 'webp',
+  size = 60,
+  emoji = '🌸',
+  fallback = null,
+  previewOnly = false,
+}) {
   const [failed, setFailed] = useState(false);
-  const src = `/api/sticker/${encodeURIComponent(fileId)}`;
+  const src = explicitSrc || (fileId ? `/api/sticker/${encodeURIComponent(fileId)}` : '');
 
-  if (!fileId || failed) {
+  useEffect(() => {
+    setFailed(false);
+  }, [src]);
+
+  if (!src || failed) {
+    if (fallback !== null) {
+      return fallback;
+    }
     return (
       <div
         style={{
@@ -105,7 +124,7 @@ export function TgStickerMedia({ fileId, format = 'webp', size = 60, emoji = '�
   }
 
   if (format === 'tgs') {
-    return <LottieSticker src={src} size={size} fallback={emoji || '✨'} />;
+    return <LottieSticker src={src} size={size} fallback={fallback !== null ? fallback : emoji || '✨'} />;
   }
 
   if (format === 'webm') {

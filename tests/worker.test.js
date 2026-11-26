@@ -5848,3 +5848,149 @@ describe('Bidirectional Telegram reaction sync & panel display (v1.9)', () => {
     }
   });
 });
+
+describe('Panel chat sticker rendering & signed media proxy (v1.9)', () => {
+  it('records stickerFileId & stickerFormat (webp/webm/tgs), returns signed /api/media stickerUrl, and serves all 3 formats privately', async () => {
+    const kv = createMemoryKV();
+    const botToken = '123456:STICKER_CHAT_TOKEN';
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001' };
+    const uid = '40001';
+
+    await upsertVisitorProfile(env, { id: 40001, first_name: 'StickerFan' }, { incrementMsg: false });
+
+    const webpId = 'CAACAgIAAxkBAAIB_webp_sticker_001';
+    const webmId = 'CAACAgIAAxkBAAIB_webm_sticker_002';
+    const tgsId = 'CAACAgIAAxkBAAIB_tgs_sticker_003';
+    const adminStickerId = 'CAACAgIAAxkBAAIB_admin_sticker_004';
+
+    await recordVisitorExchange(
+      env,
+      uid,
+      { message_id: 1, sticker: { file_id: webpId, emoji: '😂', is_animated: false, is_video: false } },
+      { sender: 'visitor', pmMessageId: 1 }
+    );
+    await recordVisitorExchange(
+      env,
+      uid,
+      { message_id: 2, sticker: { file_id: webmId, emoji: '🔥', is_animated: false, is_video: true } },
+      { sender: 'visitor', pmMessageId: 2 }
+    );
+    await recordVisitorExchange(
+      env,
+      uid,
+      { message_id: 3, sticker: { file_id: tgsId, emoji: '🌸', is_animated: true, is_video: false } },
+      { sender: 'visitor', pmMessageId: 3 }
+    );
+    await recordVisitorExchange(
+      env,
+      uid,
+      { message_id: 4, sticker: { file_id: adminStickerId, emoji: '👍', is_animated: false, is_video: false } },
+      { sender: 'admin', pmMessageId: 4 }
+    );
+
+    const rawHist = await getVisitorHistory(env, uid);
+    expect(rawHist.messages).toHaveLength(4);
+    expect(rawHist.messages[0]).toMatchObject({ stickerFileId: webpId, stickerFormat: 'webp', mediaTag: '[贴纸 😂]' });
+    expect(rawHist.messages[1]).toMatchObject({ stickerFileId: webmId, stickerFormat: 'webm', mediaTag: '[贴纸 🔥]' });
+    expect(rawHist.messages[2]).toMatchObject({ stickerFileId: tgsId, stickerFormat: 'tgs', mediaTag: '[贴纸 🌸]' });
+    expect(rawHist.messages[3]).toMatchObject({
+      sender: 'admin',
+      stickerFileId: adminStickerId,
+      stickerFormat: 'webp',
+      mediaTag: '[贴纸 👍]',
+    });
+
+    // History API returns HMAC-signed /api/media/... URLs (NEVER public /api/sticker/...)
+    const adminInit = await signInitData(
+      { user: JSON.stringify({ id: 10001, first_name: 'Owner' }), auth_date: Math.floor(Date.now() / 1000) },
+      botToken
+    );
+    const histRes = await worker.fetch(
+      new Request(`https://panel.test/api/admin/visitors/${uid}/history`, {
+        headers: { 'X-Telegram-Init-Data': adminInit },
+      }),
+      env
+    );
+    expect(histRes.status).toBe(200);
+    const histJson = await histRes.json();
+    expect(histJson.messages).toHaveLength(4);
+
+    for (const [idx, expectedFormat, expectedId] of [
+      [0, 'webp', webpId],
+      [1, 'webm', webmId],
+      [2, 'tgs', tgsId],
+      [3, 'webp', adminStickerId],
+    ]) {
+      const m = histJson.messages[idx];
+      expect(m.stickerFormat).toBe(expectedFormat);
+      expect(m.stickerUrl).toMatch(/^\/api\/media\/[^?]+\?exp=\d+&sig=[0-9a-f]+$/);
+      expect(m.stickerUrl).not.toContain('/api/sticker/');
+      const u = new URL(`https://panel.test${m.stickerUrl}`);
+      expect(await verifyMediaToken(expectedId, u.searchParams.get('exp'), u.searchParams.get('sig'), botToken)).toBe(
+        true
+      );
+    }
+
+    // Signed media proxy serves .tgs (gzip-decompressed Lottie JSON), .webm (video/webm), and .webp (image/webp) privately
+    const sampleLottie = JSON.stringify({ v: '5.5.7', fr: 60, layers: [] });
+    const gzippedTgsBytes = await new Response(
+      new Blob([sampleLottie]).stream().pipeThrough(new CompressionStream('gzip'))
+    ).arrayBuffer();
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, opts) => {
+      const urlStr = String(url);
+      if (urlStr.endsWith('/getFile')) {
+        const body = JSON.parse(opts.body);
+        const pathMap = {
+          [webpId]: 'stickers/s1.webp',
+          [webmId]: 'stickers/s2.webm',
+          [tgsId]: 'stickers/s3.tgs',
+        };
+        return new Response(JSON.stringify({ ok: true, result: { file_path: pathMap[body.file_id] } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (urlStr.endsWith('stickers/s1.webp')) {
+        return new Response(new Uint8Array([0x52, 0x49, 0x46, 0x46]), { status: 200 });
+      }
+      if (urlStr.endsWith('stickers/s2.webm')) {
+        return new Response(new Uint8Array([0x1a, 0x45, 0xdf, 0xa3]), { status: 200 });
+      }
+      if (urlStr.endsWith('stickers/s3.tgs')) {
+        return new Response(gzippedTgsBytes, { status: 200 });
+      }
+      return new Response(null, { status: 404 });
+    });
+
+    try {
+      // 1. WebP
+      const webpRes = await worker.fetch(new Request(`https://panel.test${histJson.messages[0].stickerUrl}`), env);
+      expect(webpRes.status).toBe(200);
+      expect(webpRes.headers.get('content-type')).toBe('image/webp');
+      expect(webpRes.headers.get('cache-control')).toContain('private');
+
+      // 2. WebM video sticker
+      const webmRes = await worker.fetch(new Request(`https://panel.test${histJson.messages[1].stickerUrl}`), env);
+      expect(webmRes.status).toBe(200);
+      expect(webmRes.headers.get('content-type')).toBe('video/webm');
+      expect(webmRes.headers.get('cache-control')).toContain('private');
+
+      // 3. TGS animated Lottie sticker (auto-decompressed to JSON)
+      const tgsRes = await worker.fetch(new Request(`https://panel.test${histJson.messages[2].stickerUrl}`), env);
+      expect(tgsRes.status).toBe(200);
+      expect(tgsRes.headers.get('content-type')).toContain('application/json');
+      expect(tgsRes.headers.get('cache-control')).toContain('private');
+      expect(await tgsRes.json()).toEqual({ v: '5.5.7', fr: 60, layers: [] });
+
+      // 4. Tampered signature is rejected with 403
+      const badRes = await worker.fetch(
+        new Request(`https://panel.test/api/media/${encodeURIComponent(tgsId)}?exp=9999999999&sig=deadbeef`),
+        env
+      );
+      expect(badRes.status).toBe(403);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+});

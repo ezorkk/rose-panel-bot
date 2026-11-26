@@ -292,7 +292,14 @@ export async function handleApiRequest(request, env, url, ctx = null) {
         ),
         Promise.all(
           (history.messages || []).map(async (m) => {
-            const urls = m.photoFileId ? await signPhotoIds(m.photoFileId, m.thumbFileId) : { url: '', thumbUrl: '' };
+            const [urls, stickerSigned] = await Promise.all([
+              m.photoFileId ? signPhotoIds(m.photoFileId, m.thumbFileId) : Promise.resolve({ url: '', thumbUrl: '' }),
+              m.stickerFileId && env.BOT_TOKEN
+                ? signMediaToken(m.stickerFileId, env.BOT_TOKEN, 1800).then(
+                    (tok) => `/api/media/${encodeURIComponent(m.stickerFileId)}?exp=${tok.exp}&sig=${tok.sig}`
+                  )
+                : Promise.resolve(''),
+            ]);
             return {
               id: m.id,
               sender: m.sender || 'visitor',
@@ -302,6 +309,9 @@ export async function handleApiRequest(request, env, url, ctx = null) {
               at: m.at,
               photoUrl: urls.url,
               thumbUrl: urls.thumbUrl,
+              ...(stickerSigned
+                ? { stickerUrl: stickerSigned, stickerFormat: m.stickerFormat || 'webp' }
+                : {}),
               ...(m.visitorReaction ? { visitorReaction: m.visitorReaction } : {}),
               ...(m.ownerReaction ? { ownerReaction: m.ownerReaction } : {}),
             };

@@ -359,6 +359,12 @@ export async function recordVisitorExchange(env, userId, msg, options = {}) {
   }
 
   const rawMsgText = String(msg?.text || msg?.caption || '').trim();
+  const stickerInfo = msg?.sticker?.file_id
+    ? {
+        fileId: String(msg.sticker.file_id),
+        format: msg.sticker.is_animated ? 'tgs' : msg.sticker.is_video ? 'webm' : 'webp',
+      }
+    : null;
   const mediaTag = !photo
     ? msg?.video
       ? '[视频]'
@@ -372,7 +378,7 @@ export async function recordVisitorExchange(env, userId, msg, options = {}) {
     : '';
 
   let addedMessage = null;
-  if (rawMsgText || photo || mediaTag) {
+  if (rawMsgText || photo || mediaTag || stickerInfo) {
     addedMessage = {
       id: `m_${nowMs}_${Math.floor(Math.random() * 10000)}`,
       sender,
@@ -380,6 +386,7 @@ export async function recordVisitorExchange(env, userId, msg, options = {}) {
       mediaTag,
       photoFileId: photo?.fileId || '',
       thumbFileId: photo?.thumbFileId || '',
+      ...(stickerInfo ? { stickerFileId: stickerInfo.fileId, stickerFormat: stickerInfo.format } : {}),
       pmMessageId: numericPmId,
       topicMsgId: numericTopicId,
       at: nowIso,
