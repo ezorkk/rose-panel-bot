@@ -3,6 +3,8 @@ import { ExternalLink, Sparkles, Star, X } from 'lucide-react';
 import { haptic, openExternalUrl } from '../lib/telegram.js';
 
 export const REPO_URL = 'https://github.com/mango0114/rose-panel-bot';
+// Verified against live GitHub README heading anchor: 🚀 极简部署（5 分钟免费上线）
+export const DEPLOY_GUIDE_URL = `${REPO_URL}#${encodeURIComponent('-极简部署5-分钟免费上线')}`;
 export const CHANGELOG_URL = 'https://github.com/mango0114/rose-panel-bot/blob/main/CHANGELOG.md';
 export const SEEN_VERSION_STORAGE_KEY = 'rose_seen_version';
 export const HIDE_STAR_STRIP_STORAGE_KEY = 'rose_hide_star_strip';
@@ -31,6 +33,11 @@ export const RECENT_RELEASES = [
         tag: '新增',
         tone: 'new',
         text: '按人去重的「本月访客数」统计（站长在访客页查看本月/上月人数，可按需开启在名片底部公开显示，默认关闭）',
+      },
+      {
+        tag: '新增',
+        tone: 'new',
+        text: '名片底部新增 RosePanel 小字署名和「想要同款？」引导，可在设置里关闭',
       },
     ],
   },

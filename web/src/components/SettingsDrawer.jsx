@@ -19,6 +19,7 @@ import {
   X,
 } from 'lucide-react';
 import { apiRequest } from '../lib/api.js';
+import { BRAND_SIGNATURE } from '../lib/brand.js';
 import { buildSourceLink, confirmDialog, copyText, openExternalUrl } from '../lib/telegram.js';
 import { TgStickerMedia, TicketEmblem } from './Emblems.jsx';
 import {
@@ -900,6 +901,48 @@ export default function SettingsDrawer({
                 >
                   <span className="switch-knob" />
                 </button>
+              </div>
+
+              <div
+                style={{
+                  marginTop: 12,
+                  paddingTop: 12,
+                  borderTop: '1px solid var(--border)',
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 12,
+                  }}
+                >
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>在名片底部显示 RosePanel 署名</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3, lineHeight: 1.5 }}>
+                      署名能帮助更多人发现 RosePanel，感谢你的支持 🌹
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={draft.profile.showPoweredBy !== false}
+                    className={`switch ${draft.profile.showPoweredBy !== false ? 'on' : ''}`}
+                    onClick={() => updateField('profile', 'showPoweredBy', !(draft.profile.showPoweredBy !== false))}
+                  >
+                    <span className="switch-knob" />
+                  </button>
+                </div>
+
+                {draft.profile.showPoweredBy !== false && (
+                  <div className="powered-by-preview">
+                    <span className="powered-by-preview-text">
+                      {BRAND_SIGNATURE} · <span className="card-powered-by-cta">想要同款？</span>
+                    </span>
+                    <span className="powered-by-preview-badge">访客可见</span>
+                  </div>
+                )}
               </div>
 
               <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--border)' }}>

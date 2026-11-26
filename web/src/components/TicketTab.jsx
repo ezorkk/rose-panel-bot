@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { Suspense, lazy, useState } from 'react';
 import {
   Award,
   Check,
@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { Avatar, StubEmblem, TicketEmblem } from './Emblems.jsx';
 import { apiRequest, formatTimeAgo } from '../lib/api.js';
+import { BRAND_SIGNATURE } from '../lib/brand.js';
 import {
   buildSourceLink,
   closeMiniApp,
@@ -31,6 +32,8 @@ import {
   isOpenedFromGroup,
   openExternalUrl,
 } from '../lib/telegram.js';
+
+const GetSameCardModal = lazy(() => import('./GetSameCardModal.jsx'));
 
 export default function TicketTab({
   data,
@@ -96,6 +99,7 @@ export default function TicketTab({
   const [posterLoading, setPosterLoading] = useState(false);
   const [posterError, setPosterError] = useState('');
   const [posterData, setPosterData] = useState(null);
+  const [showGetSame, setShowGetSame] = useState(false);
 
   const resolvedShareUrl =
     String(config.shareUrl || '').trim() ||
@@ -166,9 +170,36 @@ export default function TicketTab({
       ? config.visitStats.thisMonth
       : null;
 
+  const showPoweredBy = !isAdmin && profile.showPoweredBy !== false;
+
   const renderVisitCounter = () =>
     publicMonthlyVisits !== null && (
       <div className="card-visit-counter">👀 本月访客 {publicMonthlyVisits} 人</div>
+    );
+
+  const renderPoweredBy = () =>
+    showPoweredBy && (
+      <div className="card-powered-by">
+        <button
+          type="button"
+          className="card-powered-by-btn"
+          onClick={() => {
+            haptic('light');
+            setShowGetSame(true);
+          }}
+        >
+          <span>{BRAND_SIGNATURE}</span>
+          <span aria-hidden="true">·</span>
+          <span className="card-powered-by-cta">想要同款？</span>
+        </button>
+      </div>
+    );
+
+  const renderGetSameModal = () =>
+    showGetSame && (
+      <Suspense fallback={null}>
+        <GetSameCardModal onClose={() => setShowGetSame(false)} onToast={onToast} />
+      </Suspense>
     );
 
   const renderShareSheet = () =>
@@ -527,7 +558,9 @@ export default function TicketTab({
         </div>
 
         {renderVisitCounter()}
+        {renderPoweredBy()}
         {renderShareSheet()}
+        {renderGetSameModal()}
 
         {/* Levels Sheet */}
         {showLevels && (
@@ -858,7 +891,9 @@ export default function TicketTab({
       )}
 
       {renderVisitCounter()}
+      {renderPoweredBy()}
       {renderShareSheet()}
+      {renderGetSameModal()}
     </>
   );
 }

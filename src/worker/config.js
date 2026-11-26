@@ -90,6 +90,7 @@ export const DEFAULT_CONFIG = {
     notice: '',
     tags: '',
     showVisitCounter: false, // 是否在名片上公开显示本月访客数，默认不公开
+    showPoweredBy: true, // 名片底部是否显示「Made with RosePanel · 想要同款？」，默认显示
     noteTitle: '来信礼仪',
     noteLines:
       '初次私聊请直接说明来意，不用只发「在吗」\n欢迎技术交流、友链与合作，谢绝广告推销\n看到消息后会尽快回复，请稍作等待 🌙',
@@ -359,6 +360,8 @@ export function mergeConfig(base, override) {
     cloned.profile.splash = normalizeSplash(cloned.profile.splash);
     cloned.profile.avatarMode = resolveAvatarMode(cloned.profile.avatarMode, cloned.profile.avatarUrl);
     cloned.profile.showVisitCounter = Boolean(cloned.profile.showVisitCounter);
+    cloned.profile.showPoweredBy =
+      cloned.profile.showPoweredBy === undefined ? true : Boolean(cloned.profile.showPoweredBy);
     cloned.probe.visibility = cloned.probe.visibility === 'private' ? 'private' : 'public';
     cloned.probe.provider = PROBE_PROVIDER_IDS.includes(cloned.probe.provider) ? cloned.probe.provider : 'komari';
     cloned.probe.alerts = normalizeProbeAlerts(DEFAULT_PROBE_ALERTS, cloned.probe.alerts);
@@ -391,6 +394,11 @@ export function mergeConfig(base, override) {
   mergedProfile.showVisitCounter = Boolean(
     override.profile?.showVisitCounter ?? base.profile?.showVisitCounter ?? false
   );
+  const rawShowPoweredBy =
+    override.profile?.showPoweredBy !== undefined
+      ? override.profile.showPoweredBy
+      : base.profile?.showPoweredBy;
+  mergedProfile.showPoweredBy = rawShowPoweredBy === undefined ? true : Boolean(rawShowPoweredBy);
   return {
     profile: mergedProfile,
     sites: rawSites.map(normalizeSite),
@@ -512,6 +520,8 @@ export async function savePanelConfig(env, nextConfig) {
   merged.profile.badgeTitle = String(merged.profile.badgeTitle ?? '').trim().slice(0, 32);
   merged.profile.joinedText = String(merged.profile.joinedText ?? '').trim().slice(0, 48);
   merged.profile.showVisitCounter = Boolean(merged.profile.showVisitCounter);
+  merged.profile.showPoweredBy =
+    merged.profile.showPoweredBy === undefined ? true : Boolean(merged.profile.showPoweredBy);
 
   // Clamp numeric settings
   merged.probe.cacheTtlSeconds = Math.min(Math.max(Number(merged.probe.cacheTtlSeconds) || 15, 5), 300);
@@ -605,6 +615,7 @@ export function sanitizePublicConfig(config, env, isAdmin = false, requestOrigin
   return {
     profile: {
       ...config.profile,
+      showPoweredBy: config.profile?.showPoweredBy === undefined ? true : Boolean(config.profile.showPoweredBy),
       emblem: activeEmblem,
       splash: normalizeSplash(config.profile.splash),
     },

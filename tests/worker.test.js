@@ -4837,3 +4837,64 @@ describe('Monthly unique visitor counter (v1.8)', () => {
     expect(adminOn.visitStats).toEqual({ thisMonth: 43, lastMonth: 31 });
   });
 });
+
+describe('Card footer signature & Get-Same-Card config (v1.8)', () => {
+  it('defaults showPoweredBy to true in public config', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv };
+    const cfg = await loadPanelConfig(env);
+    expect(cfg.profile.showPoweredBy).toBe(true);
+
+    const pub = sanitizePublicConfig(cfg, env, false);
+    expect(pub.profile.showPoweredBy).toBe(true);
+  });
+
+  it('persists showPoweredBy: false and normalizes non-boolean values to strict booleans', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv };
+
+    // Disable explicitly
+    await savePanelConfig(env, { profile: { showPoweredBy: false } });
+    let loaded = await loadPanelConfig(env);
+    expect(loaded.profile.showPoweredBy).toBe(false);
+    expect(sanitizePublicConfig(loaded, env, false).profile.showPoweredBy).toBe(false);
+
+    // Subsequent unrelated profile edit preserves showPoweredBy: false
+    await savePanelConfig(env, { profile: { displayName: 'KeepHidden' } });
+    loaded = await loadPanelConfig(env);
+    expect(loaded.profile.showPoweredBy).toBe(false);
+
+    // Non-boolean truthy value normalizes to boolean true
+    await savePanelConfig(env, { profile: { showPoweredBy: 'yes' } });
+    loaded = await loadPanelConfig(env);
+    expect(loaded.profile.showPoweredBy).toBe(true);
+    expect(typeof sanitizePublicConfig(loaded, env, false).profile.showPoweredBy).toBe('boolean');
+
+    // Non-boolean falsy values (0, '', null) normalize to boolean false
+    for (const raw of [0, '', null]) {
+      await savePanelConfig(env, { profile: { showPoweredBy: raw } });
+      loaded = await loadPanelConfig(env);
+      expect(loaded.profile.showPoweredBy).toBe(false);
+      expect(sanitizePublicConfig(loaded, env, false).profile.showPoweredBy).toBe(false);
+    }
+  });
+
+  it('defaults showPoweredBy to true when loading legacy KV config without the field', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv };
+    await kv.put(
+      'config:panel',
+      JSON.stringify({
+        profile: {
+          displayName: 'LegacyCard',
+          tagline: 'From v1.7',
+        },
+      })
+    );
+
+    const loaded = await loadPanelConfig(env);
+    expect(loaded.profile.displayName).toBe('LegacyCard');
+    expect(loaded.profile.showPoweredBy).toBe(true);
+    expect(sanitizePublicConfig(loaded, env, false).profile.showPoweredBy).toBe(true);
+  });
+});
