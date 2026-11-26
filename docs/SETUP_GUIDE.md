@@ -75,6 +75,10 @@ flowchart TD
 4. **访问 `/setup` 激活**：浏览器打开 `https://<你的域名>/setup?secret=<WEBHOOK_SECRET>`，看到 **`"ok": true`** 即 **🎉 正式上线！** 给 Bot 发一次 `/start` 即可免建群收发私信、打开个人面板。
    *(可选：高频用户建开启「话题」的私密群、拉 Bot 当管理员并群内发 `/bind` 自动切话题模式；同账号多实例注意改 `wrangler.toml` 的 `database_name`。)*
 
+> **已有其他 TG 私聊机器人（如 `nfd`、`telegram_private_chatbot`）？**  
+> 无需重新申请 Bot 或新建通知群，直接按上方老手通道操作（跳过小白第 1、2 步）：新建一个 Worker（保留旧 Worker 以便随时回退），沿用原 `BOT_TOKEN`、`BOT_USERNAME`、`ADMIN_IDS` 并自设 `WEBHOOK_SECRET`，访问 `/setup` 完成切换后在原话题群发 `/bind` 即可接管；如需切回旧机器人，重新访问旧程序的 `/setup` 即可。  
+> *（从 `telegram_private_chatbot` 迁移可将 `TOPIC_MAP` 绑定回原 KV，保留原有黑名单与话题映射。）*
+
 ---
 
 ## 🐣 小白零基础通道（还没有机器人或 Cloudflare）

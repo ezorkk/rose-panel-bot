@@ -74,6 +74,10 @@ flowchart TD
 3. 瀏覽器開啟 `https://<你的網域>/setup?secret=<WEBHOOK_SECRET>`，看到 `"ok": true` 即啟用成功。
 4. 新建開啟 **「主題 (Topics)」** 的私密群組、把機器人設為管理員（勾選管理主題 & 刪除訊息），群內傳一句 **`/bind`** 秒完成通知群綁定！
 
+> **已有其他 TG 私訊機器人（如 `nfd`、`telegram_private_chatbot`）？**  
+> 無需重新申請 Bot 或新建群組，直接依上方老手通道部署（略過新手第 1、2 步）：新建一個 Worker（保留舊 Worker 以便隨時退回），沿用原 `BOT_TOKEN`、`BOT_USERNAME`、`ADMIN_IDS` 並自設 `WEBHOOK_SECRET`，開啟 `/setup` 切換後在原主題群傳 `/bind` 即可接管；如需退回舊機器人，重新開啟舊程式的 `/setup` 即可。  
+> *（從 `telegram_private_chatbot` 遷移可將 `TOPIC_MAP` 綁定回原 KV，保留原有黑名單與主題對照。）*
+
 ---
 
 ## 🐣 新手零基礎通道（還沒有機器人或 Cloudflare）

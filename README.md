@@ -170,6 +170,7 @@ flowchart LR
 
 - **让分享海报二维码与群内按钮直达面板（推荐）**：去 `@BotFather` 发 `/newapp`，URL 填 `https://<你的Worker域名>/`，短名填 `panel`（并在 Cloudflare 填 Text 变量 `APP_SHORT_NAME = panel`）。
 - **高频私信分独立话题（可选）**：新建开启 **「话题 (Topics)」** 的私密群 → 拉 Bot 当管理员（勾选管理话题 & 删除消息）→ 群内发一句 **`/bind`** 即可自动切换（随时 `/unbind` 退回私聊直推）。
+- **已有其他 TG 私聊机器人（如 `nfd` / `telegram_private_chatbot`）**：无需重申 Bot 或建新群，新建 Worker 沿用原 `BOT_TOKEN` / `ADMIN_IDS` 并自设 `WEBHOOK_SECRET`，访问 `/setup` 后在原群发 `/bind` 即可接管（保留旧 Worker 可随时重访旧 `/setup` 回退；`telegram_private_chatbot` 用户可绑定原 `TOPIC_MAP` KV 保留黑名单与话题映射）。
 - **如果 Bindings 里没看到 `DB` 或 `TOPIC_MAP`**：Wrangler v4 默认会自动创建；若列表里缺 `DB`，可按 [手动绑定 D1 步骤](docs/SETUP_GUIDE.md#d1-storage) 30 秒补绑（不绑也会自动走 KV，完全不影响使用）。
 - **⚠️ 同账号部署多个实例**：Wrangler 未写 `database_id` 时会按 `database_name` 关联同名 D1 库，同一 Cloudflare 账号下若部署第 2 个实例，请把该仓库 `wrangler.toml` 中的 `database_name` 改为不同名字（如 `rose-panel-bot-2`）。
 - **为什么不建议用 Cloudflare 一键部署按钮？** 一键按钮建的是独立副本（非 Fork），后续没有 `Sync fork` 也不能在面板里一键同步更新；先点右上角 Fork 再导入只需多点一下，以后永久省心。
