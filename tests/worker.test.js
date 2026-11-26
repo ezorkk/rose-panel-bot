@@ -120,6 +120,14 @@ import {
   buildSourceLink as buildClientSourceLink,
   normalizeSourceParam as normalizeClientSourceParam,
 } from '../web/src/lib/telegram.js';
+import {
+  SCHEMA_VERSION,
+  cleanupExpiredMaps,
+  ensureSchema,
+  getStore,
+  shouldRunDailyCleanup,
+} from '../src/worker/store/index.js';
+import { createD1Shim } from './helpers/d1Shim.js';
 
 // Minimal in-memory Cloudflare KV mock
 function createMemoryKV() {
@@ -7370,5 +7378,162 @@ describe('Komari probe latency & packet loss display (v1.11)', () => {
     } finally {
       globalThis.fetch = origFetch;
     }
+  });
+});
+
+describe('Cloudflare D1 storage layer, schema idempotency, map fallback & daily cleanup (v2.0 Stage 1)', () => {
+  it('initializes schema idempotently, records schema_version, caches per isolate, and preserves data on forced re-run', async () => {
+    const db = createD1Shim();
+    const env = { TOPIC_MAP: createMemoryKV(), DB: db };
+
+    const v1 = await ensureSchema(env);
+    expect(v1).toBe(SCHEMA_VERSION);
+    expect(db._stats.batches).toBe(1);
+
+    const versionVal = await db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).first('value');
+    expect(versionVal).toBe('1');
+
+    const tablesRes = await db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+      .all();
+    expect(tablesRes.results.map((r) => r.name)).toEqual([
+      'dm_map',
+      'message_links',
+      'messages',
+      'meta',
+      'migrated_visitors',
+      'topic_map',
+    ]);
+
+    // Second call on the same DB binding uses the per-isolate Promise cache (0 extra batches)
+    await ensureSchema(env);
+    expect(db._stats.batches).toBe(1);
+
+    // Insert a message, then force-rerun DDL (simulating a fresh isolate cold start against an existing DB)
+    await getStore(env).appendExchange('88001', {
+      sender: 'visitor',
+      nowMs: 1700000000000,
+      nowIso: new Date(1700000000000).toISOString(),
+      text: 'hello d1',
+      pmMessageId: 101,
+    });
+    const batchesBeforeForce = db._stats.batches;
+    const v2 = await ensureSchema(env, { force: true });
+    expect(v2).toBe(SCHEMA_VERSION);
+    expect(db._stats.batches).toBe(batchesBeforeForce + 1);
+
+    const hist = await getStore(env).getHistory('88001');
+    expect(hist.messages).toHaveLength(1);
+    expect(hist.messages[0].text).toBe('hello d1');
+    expect(await db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).first('value')).toBe('1');
+  });
+
+  it('retains >60 messages in D1 without writing history:* to KV while returning newest 60 by default', async () => {
+    const kv = createMemoryKV();
+    const db = createD1Shim();
+    const env = { TOPIC_MAP: kv, DB: db };
+
+    const baseMs = 1700000000000;
+    for (let i = 1; i <= 75; i += 1) {
+      await recordVisitorExchange(
+        env,
+        '88002',
+        { message_id: i, text: `msg #${i}` },
+        { sender: i % 2 === 0 ? 'admin' : 'visitor', pmMessageId: i, preview: `msg #${i}` }
+      );
+    }
+
+    // D1 mode never writes `history:88002` to KV
+    expect(await kv.get('history:88002')).toBeNull();
+
+    // Total rows in D1 `messages` is all 75 (not truncated at 60)
+    const countRow = await db.prepare(`SELECT COUNT(*) AS cnt FROM messages WHERE uid = ?`).bind('88002').first();
+    expect(countRow.cnt).toBe(75);
+
+    // Default getVisitorHistory returns newest 60 in oldest->newest order (#16 .. #75)
+    const defaultHist = await getVisitorHistory(env, '88002');
+    expect(defaultHist.messages).toHaveLength(60);
+    expect(defaultHist.messages[0].text).toBe('msg #16');
+    expect(defaultHist.messages[59].text).toBe('msg #75');
+
+    // Explicit higher limit retrieves all 75
+    const fullHist = await getVisitorHistory(env, '88002', { limit: 100 });
+    expect(fullHist.messages).toHaveLength(75);
+    expect(fullHist.messages[0].text).toBe('msg #1');
+    expect(fullHist.messages[74].text).toBe('msg #75');
+  });
+
+  it('falls back to KV for legacy tmsg:* and dmmap:* entries on D1 miss and returns null when absent in both', async () => {
+    const kv = createMemoryKV();
+    const db = createD1Shim();
+    const env = { TOPIC_MAP: kv, DB: db };
+    const store = getStore(env);
+
+    // Seed pre-upgrade mappings in KV only
+    await kv.put(`${TOPIC_MSG_MAP_PREFIX}901`, JSON.stringify({ g: '-100555', u: '70001', p: 42 }));
+    await kv.put(`${DM_MAP_PREFIX}801`, JSON.stringify({ u: '70002', p: 55 }));
+    await kv.put(`${DM_MAP_PREFIX}802`, '70003');
+
+    // D1 miss -> KV fallback succeeds
+    expect(await store.getTopicMap('-100555', 901)).toEqual({ uid: '70001', pmMessageId: 42 });
+    // Group mismatch on KV fallback still rejected
+    expect(await store.getTopicMap('-100999', 901)).toBeNull();
+
+    expect(await store.getDmMap(801)).toEqual({ uid: '70002', pmMessageId: 55 });
+    expect(await store.getDmMap(802)).toEqual({ uid: '70003', pmMessageId: null });
+
+    // Neither D1 nor KV has entry -> returns null cleanly
+    expect(await store.getTopicMap('-100555', 9999)).toBeNull();
+    expect(await store.getDmMap(9999)).toBeNull();
+  });
+
+  it('purges only expired topic_map (>30d) and dm_map (>7d) rows once daily on scheduled cron even with probe alerts off', async () => {
+    const kv = createMemoryKV();
+    const db = createD1Shim();
+    const env = { TOPIC_MAP: kv, DB: db };
+    await ensureSchema(env);
+
+    const dayMs = 86400 * 1000;
+    const midnightUtc = Date.UTC(2026, 5, 15, 0, 2, 0); // 00:02 UTC -> runs daily cleanup
+    const fivePastUtc = Date.UTC(2026, 5, 15, 0, 5, 0); // 00:05 UTC -> skips daily cleanup
+
+    expect(shouldRunDailyCleanup(midnightUtc)).toBe(true);
+    expect(shouldRunDailyCleanup(fivePastUtc)).toBe(false);
+
+    // Insert 1 expired (31d) + 1 fresh (29d) topic_map row, and 1 expired (8d) + 1 fresh (6d) dm_map row
+    await db.batch([
+      db
+        .prepare(`INSERT INTO topic_map (group_id, topic_msg_id, uid, pm_message_id, created_at) VALUES (?, ?, ?, ?, ?)`)
+        .bind('-1001', 10, '5001', 100, midnightUtc - 31 * dayMs),
+      db
+        .prepare(`INSERT INTO topic_map (group_id, topic_msg_id, uid, pm_message_id, created_at) VALUES (?, ?, ?, ?, ?)`)
+        .bind('-1001', 11, '5001', 101, midnightUtc - 29 * dayMs),
+      db
+        .prepare(`INSERT INTO dm_map (owner_msg_id, uid, pm_message_id, created_at) VALUES (?, ?, ?, ?)`)
+        .bind(20, '5002', 200, midnightUtc - 8 * dayMs),
+      db
+        .prepare(`INSERT INTO dm_map (owner_msg_id, uid, pm_message_id, created_at) VALUES (?, ?, ?, ?)`)
+        .bind(21, '5002', null, midnightUtc - 6 * dayMs),
+    ]);
+
+    const kvPutSpy = vi.spyOn(kv, 'put');
+
+    // At 00:05 UTC, scheduled cron skips map cleanup
+    await worker.scheduled({ scheduledTime: fivePastUtc }, env, null);
+    expect((await db.prepare(`SELECT COUNT(*) AS cnt FROM topic_map`).first()).cnt).toBe(2);
+    expect((await db.prepare(`SELECT COUNT(*) AS cnt FROM dm_map`).first()).cnt).toBe(2);
+
+    // At 00:02 UTC (with probe alerts disabled by default), scheduled cron deletes ONLY expired rows and writes 0 KV keys
+    await worker.scheduled({ scheduledTime: midnightUtc }, env, null);
+    const remainingTopics = (await db.prepare(`SELECT topic_msg_id FROM topic_map`).all()).results;
+    const remainingDms = (await db.prepare(`SELECT owner_msg_id FROM dm_map`).all()).results;
+    expect(remainingTopics.map((r) => r.topic_msg_id)).toEqual([11]);
+    expect(remainingDms.map((r) => r.owner_msg_id)).toEqual([21]);
+    expect(kvPutSpy).not.toHaveBeenCalled();
+
+    // Without env.DB, scheduled cron & cleanupExpiredMaps skip cleanly
+    const noDbRes = await cleanupExpiredMaps({ TOPIC_MAP: kv }, midnightUtc);
+    expect(noDbRes).toEqual({ skipped: true, reason: 'no_d1' });
+    await expect(worker.scheduled({ scheduledTime: midnightUtc }, { TOPIC_MAP: kv }, null)).resolves.toBeUndefined();
   });
 });

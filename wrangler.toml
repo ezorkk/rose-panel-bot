@@ -15,6 +15,13 @@ run_worker_first = ["/", "/api/*", "/webhook", "/setup", "/health", "/verify", "
 binding = "TOPIC_MAP"
 # id = "your-existing-kv-namespace-id"
 
+# Wrangler v4 支持自动创建并绑定同名 D1 数据库（rose-panel-bot）；
+# 如在 Cloudflare Dashboard 手动创建，请命名为 rose-panel-bot 并绑定为 DB（未绑定时自动回退使用 KV）
+[[d1_databases]]
+binding = "DB"
+database_name = "rose-panel-bot"
+# database_id 不写，交给 Wrangler 自动创建或关联同名数据库
+
 # 可选环境变量（敏感信息请使用 wrangler secret put 或在 Cloudflare 后台作为 Secret 添加）：
 # - BOT_TOKEN          (必填 Secret) Telegram Bot Token
 # - BOT_USERNAME       (推荐) Bot 用户名（不含 @，例如 my_panel_bot）

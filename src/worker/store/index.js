@@ -1,8 +1,17 @@
 // Storage factory for Stage 1 (v2.0):
-//   - When `env.DB` is bound -> Cloudflare D1 implementation ( added in d1Store.js )
-//   - Otherwise              -> Workers KV implementation (100% identical to v1.11.0)
+//   - When `env.DB` is bound -> Cloudflare D1 implementation (`d1Store.js`)
+//   - Otherwise              -> Workers KV implementation (`kvStore.js`, 100% identical to v1.11.0)
 
+import { SCHEMA_VERSION, ensureSchema } from './d1Schema.js';
+import { cleanupExpiredMaps, createD1Store, shouldRunDailyCleanup } from './d1Store.js';
 import { createKvStore } from './kvStore.js';
+
+export {
+  SCHEMA_VERSION,
+  cleanupExpiredMaps,
+  ensureSchema,
+  shouldRunDailyCleanup,
+};
 
 export {
   DM_MAP_PREFIX,
@@ -17,5 +26,8 @@ export {
 } from './kvStore.js';
 
 export function getStore(env) {
+  if (env?.DB) {
+    return createD1Store(env);
+  }
   return createKvStore(env);
 }

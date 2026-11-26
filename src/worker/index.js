@@ -13,6 +13,7 @@ import {
 } from './bot.js';
 import { loadPanelConfig, resolveSupergroupId, safeGetJSON, savePanelConfig } from './config.js';
 import { serveEmbeddedAsset } from './embedded-assets.js';
+import { cleanupExpiredMaps, shouldRunDailyCleanup } from './store/index.js';
 import { WEBHOOK_ALLOWED_UPDATES, escapeHtml, tgCall } from './telegram.js';
 import { renderTurnstileVerifyPage, verifyTurnstileToken } from './turnstile.js';
 
@@ -177,6 +178,7 @@ export default {
         service: 'rose-panel-bot',
         hasToken: Boolean(env.BOT_TOKEN),
         hasKv: Boolean(env.TOPIC_MAP),
+        hasD1: Boolean(env.DB),
         hasSupergroup: Boolean(supergroupId),
       });
     }
@@ -297,9 +299,20 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    const work = runProbeAlerts(env, event?.scheduledTime ?? Date.now()).catch((err) => {
-      console.error('Probe alerts cron error:', err);
-    });
+    const scheduledTime = event?.scheduledTime ?? Date.now();
+    const tasks = [
+      runProbeAlerts(env, scheduledTime).catch((err) => {
+        console.error('Probe alerts cron error:', err);
+      }),
+    ];
+    if (env?.DB && shouldRunDailyCleanup(scheduledTime)) {
+      tasks.push(
+        cleanupExpiredMaps(env, scheduledTime).catch((err) => {
+          console.error('D1 map cleanup cron error:', err);
+        })
+      );
+    }
+    const work = Promise.all(tasks);
     if (ctx?.waitUntil) {
       ctx.waitUntil(work);
     } else {
