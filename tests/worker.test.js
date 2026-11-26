@@ -5,6 +5,7 @@ import {
   evaluateProbeAlerts,
   formatAlertMessage,
   runProbeAlerts,
+  sendAlertNotification,
 } from '../src/worker/alerts.js';
 import { assessIncomingRisk, checkCasBlacklist, normalizeAntiSpamText } from '../src/worker/antispam.js';
 import { signMediaToken, verifyMediaToken, verifyTelegramInitData } from '../src/worker/auth.js';
@@ -3846,7 +3847,7 @@ describe('Probe offline & resource alerts (v1.8)', () => {
     });
   });
 
-  it('never alerts on first-seen offline nodes and completely skips muted nodes and prunes deleted nodes', async () => {
+  it('never alerts on first-seen offline nodes, skips muted nodes, and treats vanished nodes as offline until pruned', async () => {
     const kv = createMemoryKV();
     const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:FIRST_MUTE', ADMIN_IDS: '10001' };
     await savePanelConfig(env, {
@@ -3870,23 +3871,40 @@ describe('Probe offline & resource alerts (v1.8)', () => {
       await runProbeAlerts(env, t0);
       expect(tgCalls).toHaveLength(0);
 
-      // Round 2: already-offline stays offline (still no alert), muted node goes offline (skipped!), TempBox deleted
+      // Round 2: already-offline stays offline (still no alert), muted node goes offline (skipped!),
+      // TempBox vanishes from the probe list -> counted as offline (some probes drop offline nodes)
       nodes = [
         { id: 'n-already-off', name: 'OldDead', online: false },
         { id: 'n-muted', name: 'MutedBox', online: false },
       ];
       await runProbeAlerts(env, t0 + 5 * 60000);
-      expect(tgCalls).toHaveLength(0);
+      expect(tgCalls).toHaveLength(1);
+      expect(tgCalls[0].body.text).toContain('TempBox');
+      expect(tgCalls[0].body.text).toContain('已不再返回');
 
       const saved = await kv.get(ALERT_STATE_KEY, { type: 'json' });
       expect(saved.nodes['n-muted']).toBeUndefined();
-      expect(saved.nodes['n-temp']).toBeUndefined();
+      expect(saved.nodes['n-temp'].online).toBe(false);
+      expect(saved.nodes['n-temp'].absentSince).toBe(t0 + 5 * 60000);
       expect(saved.nodes['n-already-off'].online).toBe(false);
 
-      // Round 3: OldDead comes online for the first time -> NO spurious recovery notice
+      // Round 3: OldDead comes online for the first time -> NO spurious recovery notice;
+      // TempBox still absent -> already notified, no duplicate
+      tgCalls.length = 0;
       nodes = [{ id: 'n-already-off', name: 'OldDead', online: true }];
       await runProbeAlerts(env, t0 + 10 * 60000);
       expect(tgCalls).toHaveLength(0);
+
+      // A steady absent node writes nothing; after 24h absent it is pruned silently
+      const putSpy = vi.spyOn(kv, 'put');
+      await runProbeAlerts(env, t0 + 15 * 60000);
+      expect(putSpy.mock.calls.filter((c) => c[0] === ALERT_STATE_KEY)).toHaveLength(0);
+      putSpy.mockRestore();
+
+      await runProbeAlerts(env, t0 + 5 * 60000 + 24 * 60 * 60000);
+      expect(tgCalls).toHaveLength(0);
+      const pruned = await kv.get(ALERT_STATE_KEY, { type: 'json' });
+      expect(pruned.nodes['n-temp']).toBeUndefined();
     });
   });
 
@@ -4043,7 +4061,7 @@ describe('Probe offline & resource alerts (v1.8)', () => {
       allOnline = false;
       await runProbeAlerts(env, t0 + 5 * 60000);
       expect(tgCalls.filter((c) => c.method === 'createForumTopic')).toHaveLength(1);
-      expect(await kv.get(ALERT_TOPIC_ID_KEY)).toBe('901');
+      expect(await kv.get(ALERT_TOPIC_ID_KEY, { type: 'json' })).toEqual({ chatId: '-100555999', threadId: 901 });
       const sentAlerts = tgCalls.filter((c) => c.method === 'sendMessage');
       expect(sentAlerts).toHaveLength(1);
       expect(sentAlerts[0].body.message_thread_id).toBe(901);
@@ -4058,7 +4076,7 @@ describe('Probe offline & resource alerts (v1.8)', () => {
       allOnline = true;
       await runProbeAlerts(env, t0 + 10 * 60000);
       expect(tgCalls.filter((c) => c.method === 'createForumTopic')).toHaveLength(1);
-      expect(await kv.get(ALERT_TOPIC_ID_KEY)).toBe('902');
+      expect(await kv.get(ALERT_TOPIC_ID_KEY, { type: 'json' })).toEqual({ chatId: '-100555999', threadId: 902 });
 
       // POST /api/admin/probe/alert-test: blocks guest (403), allows admin up to 3/min then 429
       const now = Math.floor(Date.now() / 1000);
@@ -4139,6 +4157,104 @@ describe('Probe offline & resource alerts (v1.8)', () => {
     expect(adminCfg.probe.alerts.enabled).toBe(true);
     expect(formatAlertMessage([]).text).toBe('');
     expect(evaluateProbeAlerts(null, { protocol: 'json', nodes: [] }, saved.probe.alerts, 0).events).toEqual([]);
+  });
+
+  it('does not reuse a cached alert topic after rebinding to a different group', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:REBIND', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100111' };
+    // Group A's alert topic was thread 57; the owner then rebinds to group B (where 57 is a visitor topic)
+    await kv.put(ALERT_TOPIC_ID_KEY, JSON.stringify({ chatId: '-100111', threadId: 57 }));
+    await kv.put('config:supergroup_id', '-100222');
+
+    const { tgCalls, fetchMock } = setupMockNet();
+    await withFetch(fetchMock, async () => {
+      const res = await sendAlertNotification(env, 'test');
+      expect(res.ok).toBe(true);
+      expect(tgCalls.filter((c) => c.method === 'createForumTopic')).toHaveLength(1);
+      expect(tgCalls.find((c) => c.method === 'createForumTopic').body.chat_id).toBe('-100222');
+      const sent = tgCalls.find((c) => c.method === 'sendMessage');
+      expect(sent.body.chat_id).toBe('-100222');
+      expect(sent.body.message_thread_id).toBe(901);
+      expect(await kv.get(ALERT_TOPIC_ID_KEY, { type: 'json' })).toEqual({ chatId: '-100222', threadId: 901 });
+
+      // Same group again -> cached topic reused, no new topic
+      tgCalls.length = 0;
+      await sendAlertNotification(env, 'again');
+      expect(tgCalls.filter((c) => c.method === 'createForumTopic')).toHaveLength(0);
+      expect(tgCalls.find((c) => c.method === 'sendMessage').body.message_thread_id).toBe(901);
+    });
+  });
+
+  it('treats a sudden empty node list as a probe failure instead of mass offline alerts', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:EMPTY', ADMIN_IDS: '10001' };
+    await savePanelConfig(env, {
+      probe: {
+        provider: 'json',
+        url: 'https://probe.test/stats.json',
+        alerts: { enabled: true, intervalMinutes: 5, confirmChecks: 1 },
+      },
+    });
+
+    let nodes = [
+      { id: 'a', name: 'A', online: true },
+      { id: 'b', name: 'B', online: true },
+    ];
+    const { tgCalls, fetchMock } = setupMockNet({ probeResponder: () => jsonNodesRes(nodes) });
+    const t0 = Date.parse('2026-11-26T10:00:00Z');
+    await withFetch(fetchMock, async () => {
+      await runProbeAlerts(env, t0);
+      nodes = [];
+      await runProbeAlerts(env, t0 + 5 * 60000);
+      const sent = tgCalls.filter((c) => c.method === 'sendMessage');
+      expect(sent).toHaveLength(1);
+      expect(sent[0].body.text).toContain('探针未返回任何节点');
+      expect(sent[0].body.text).not.toContain('节点掉线');
+
+      // Nodes come back -> probe recovery notice, node state was preserved (no spurious per-node alerts)
+      tgCalls.length = 0;
+      nodes = [
+        { id: 'a', name: 'A', online: true },
+        { id: 'b', name: 'B', online: true },
+      ];
+      await runProbeAlerts(env, t0 + 10 * 60000);
+      const recovered = tgCalls.filter((c) => c.method === 'sendMessage');
+      expect(recovered).toHaveLength(1);
+      expect(recovered[0].body.text).toContain('探针已恢复连接');
+    });
+  });
+
+  it('keeps the existing siteOrigin when settings are saved from another origin (e.g. a preview URL)', async () => {
+    const kv = createMemoryKV();
+    const botToken = '123:ORIGIN';
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001', BOT_USERNAME: 'RoseTest_bot' };
+    const now = Math.floor(Date.now() / 1000);
+    const adminInit = await signInitData(
+      { auth_date: String(now), user: JSON.stringify({ id: 10001, first_name: 'Owner' }) },
+      botToken
+    );
+    const { fetchMock } = setupMockNet();
+    const save = (origin) =>
+      worker.fetch(
+        new Request(`${origin}/api/admin/config`, {
+          method: 'PUT',
+          headers: { 'X-Telegram-Init-Data': adminInit, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ profile: { tagline: `saved from ${origin}` } }),
+        }),
+        env
+      );
+
+    await withFetch(fetchMock, async () => {
+      // Unknown siteOrigin -> filled from the first HTTPS origin
+      expect((await save('https://panel.example.com')).status).toBe(200);
+      expect((await loadPanelConfig(env)).siteOrigin).toBe('https://panel.example.com');
+
+      // Saving from a preview deployment must not overwrite it
+      expect((await save('https://feat-x-rose.example.workers.dev')).status).toBe(200);
+      const cfg = await loadPanelConfig(env);
+      expect(cfg.profile.tagline).toBe('saved from https://feat-x-rose.example.workers.dev');
+      expect(cfg.siteOrigin).toBe('https://panel.example.com');
+    });
   });
 });
 

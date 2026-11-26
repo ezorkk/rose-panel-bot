@@ -17,6 +17,8 @@ export const ALERT_STATE_KEY = 'alert:state';
 export const ALERT_TOPIC_ID_KEY = 'alert:topic_id';
 const ALERT_TOPIC_NAME = '🔔 探针告警';
 const MAX_ALERT_LINES = 10;
+// Forget a node 24h after the probe stops returning it (treated as deleted from the probe).
+export const ABSENT_PRUNE_MS = 24 * 60 * 60 * 1000;
 
 const RESOURCE_METRICS = [
   { key: 'cpu', label: 'CPU', field: 'cpuUsage' },
@@ -76,8 +78,19 @@ export function evaluateProbeAlerts(prevRaw, probeStatus, rawAlertsConfig, nowMs
   const confirmChecks = alerts.confirmChecks;
   const events = [];
 
-  // 1. Probe endpoint itself is unreachable: track probeDown only; do NOT evaluate any nodes.
-  if (probeStatus?.protocol === 'error') {
+  const liveNodes = Array.isArray(probeStatus?.nodes) ? probeStatus.nodes : [];
+  const hadKnownNodes = Object.keys(prevState.nodes).length > 0;
+
+  // 1. Probe endpoint itself is unreachable — or suddenly reports zero nodes after previously
+  //    reporting some (auth expiry, broken API) — track probeDown only; do NOT evaluate any nodes,
+  //    so one probe outage never fans out into "every node is offline".
+  const probeErrorText =
+    probeStatus?.protocol === 'error'
+      ? String(probeStatus.error || '连接失败')
+      : liveNodes.length === 0 && hadKnownNodes
+        ? '探针未返回任何节点'
+        : '';
+  if (probeErrorText) {
     const prevPd = prevState.probeDown;
     const misses = Math.min(prevPd.misses + 1, confirmChecks);
     const since = prevPd.since ?? nowMs;
@@ -85,7 +98,7 @@ export function evaluateProbeAlerts(prevRaw, probeStatus, rawAlertsConfig, nowMs
 
     if (!notified && misses >= confirmChecks) {
       notified = true;
-      const errDetail = String(probeStatus.error || '连接失败').slice(0, 240);
+      const errDetail = probeErrorText.slice(0, 240);
       events.push({
         kind: 'probe_down',
         silent: false,
@@ -116,10 +129,11 @@ export function evaluateProbeAlerts(prevRaw, probeStatus, rawAlertsConfig, nowMs
   const resCfg = alerts.resource || DEFAULT_PROBE_ALERTS.resource;
   const resEnabled = Boolean(resCfg.enabled);
   const sustainChecks = resCfg.sustainChecks;
-  const liveNodes = Array.isArray(probeStatus?.nodes) ? probeStatus.nodes : [];
+  const seenUuids = new Set();
 
   for (const node of liveNodes) {
     const uuid = String(node?.uuid || '').trim();
+    if (uuid) seenUuids.add(uuid);
     if (!uuid || mutedSet.has(uuid)) continue;
 
     const name = String(node.name || uuid);
@@ -224,6 +238,48 @@ export function evaluateProbeAlerts(prevRaw, probeStatus, rawAlertsConfig, nowMs
     };
   }
 
+  // 3. Known nodes the probe no longer returns. Some probes (e.g. ServerStatus-style JSON) drop
+  //    offline machines from the list instead of reporting online:false, so absence counts as
+  //    offline. State is pruned only after ABSENT_PRUNE_MS. `absentSince` is fixed when the node
+  //    first disappears, so a steady absent node causes no further KV writes.
+  for (const [uuid, prev] of Object.entries(prevState.nodes)) {
+    if (seenUuids.has(uuid) || mutedSet.has(uuid) || !prev || typeof prev !== 'object') continue;
+    const absentSince = Number.isFinite(Number(prev.absentSince)) && Number(prev.absentSince) > 0
+      ? Number(prev.absentSince)
+      : nowMs;
+    if (nowMs - absentSince >= ABSENT_PRUNE_MS) continue;
+
+    const name = String(prev.name || uuid);
+    const wasBaselineOffline = !prev.online && Number(prev.misses || 0) === 0 && !prev.notifiedOffline;
+    let misses = Number(prev.misses) || 0;
+    let notifiedOffline = Boolean(prev.notifiedOffline);
+    let offlineSince = prev.offlineSince ?? null;
+
+    if (!wasBaselineOffline) {
+      misses = Math.min(misses + 1, confirmChecks);
+      offlineSince = offlineSince ?? nowMs;
+      if (!notifiedOffline && misses >= confirmChecks) {
+        notifiedOffline = true;
+        events.push({
+          kind: 'node_offline',
+          silent: false,
+          text: `🔴 节点掉线：${name}（探针已不再返回该节点，约 ${formatDuration(nowMs - offlineSince)}）`,
+        });
+      }
+    }
+
+    nextNodes[uuid] = {
+      name,
+      online: false,
+      misses,
+      notifiedOffline,
+      offlineSince,
+      breach: zeroBreach(),
+      notifiedBreach: zeroNotifiedBreach(),
+      absentSince,
+    };
+  }
+
   return {
     nextState: {
       probeDown: { misses: 0, notified: false, since: null },
@@ -288,11 +344,16 @@ function buildAlertPanelMarkup(env, origin, config, isGroup) {
   return undefined;
 }
 
+// The cache stores `{ chatId, threadId }`. Forum thread IDs are per-chat message IDs, so a thread ID
+// cached for one group can exist in another group as an unrelated (e.g. visitor) topic; only reuse
+// it when it belongs to the currently bound group.
 async function ensureAlertTopic(env, supergroupId) {
+  const chatId = String(supergroupId);
   if (env?.TOPIC_MAP) {
-    const cached = await env.TOPIC_MAP.get(ALERT_TOPIC_ID_KEY);
-    if (cached && /^\d+$/.test(String(cached).trim())) {
-      return Number(String(cached).trim());
+    const cached = await safeGetJSON(env.TOPIC_MAP, ALERT_TOPIC_ID_KEY, null);
+    const cachedThread = Number(cached?.threadId);
+    if (cached && String(cached.chatId) === chatId && Number.isInteger(cachedThread) && cachedThread > 0) {
+      return cachedThread;
     }
   }
   const created = await tgCall(env, 'createForumTopic', {
@@ -302,7 +363,7 @@ async function ensureAlertTopic(env, supergroupId) {
   });
   const threadId = Number(created?.result?.message_thread_id);
   if (env?.TOPIC_MAP && Number.isFinite(threadId) && threadId > 0) {
-    await env.TOPIC_MAP.put(ALERT_TOPIC_ID_KEY, String(threadId));
+    await safePutJSON(env.TOPIC_MAP, ALERT_TOPIC_ID_KEY, { chatId, threadId });
   }
   return threadId;
 }

@@ -498,7 +498,10 @@ export async function handleApiRequest(request, env, url, ctx = null) {
         const uname = await resolveBotUsername(env, config);
         if (uname) body.botUsername = uname;
       }
-      if (/^https:\/\//i.test(url.origin) && config.siteOrigin !== url.origin) {
+      // Only fill siteOrigin when it is still unknown. Saving from a Workers Builds preview URL or the
+      // workers.dev host must not replace the canonical domain (previews share production KV);
+      // /setup is the explicit place that (re)sets it.
+      if (/^https:\/\//i.test(url.origin) && !config.siteOrigin) {
         body.siteOrigin = url.origin;
       }
       const saved = await savePanelConfig(env, body);
