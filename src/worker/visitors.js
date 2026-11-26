@@ -149,6 +149,8 @@ export async function recordVisitorExchange(env, userId, msg, options = {}) {
   const {
     sender = 'visitor', // 'visitor' | 'admin'
     pmMessageId = null,
+    topicMsgId = undefined,
+    dmMsgId = null,
     incrementCount = true,
     preview = '',
   } = options;
@@ -193,15 +195,21 @@ export async function recordVisitorExchange(env, userId, msg, options = {}) {
   }
 
   const numericPmId = pmMessageId && Number.isFinite(Number(pmMessageId)) ? Number(pmMessageId) : null;
-  const numericTopicId = msg?.message_id && Number.isFinite(Number(msg.message_id)) ? Number(msg.message_id) : null;
+  const rawTopicId = topicMsgId !== undefined ? topicMsgId : msg?.message_id;
+  const numericTopicId = rawTopicId && Number.isFinite(Number(rawTopicId)) ? Number(rawTopicId) : null;
+  const numericDmId = dmMsgId && Number.isFinite(Number(dmMsgId)) ? Number(dmMsgId) : null;
 
   if (numericPmId) {
-    history.pmMessageIds.unshift({
+    const entry = {
       id: numericPmId,
       topicMsgId: numericTopicId,
       sender,
       at: nowMs,
-    });
+    };
+    if (numericDmId) {
+      entry.dmMsgId = numericDmId;
+    }
+    history.pmMessageIds.unshift(entry);
     history.pmMessageIds = history.pmMessageIds.slice(0, MAX_PM_IDS);
   }
 
@@ -652,7 +660,8 @@ export async function recallAdminVisitorMessage(
   userId,
   replyToTopicMsgId = null,
   tgCallFn = null,
-  explicitPmMessageId = null
+  explicitPmMessageId = null,
+  options = {}
 ) {
   const uid = String(userId || '');
   if (!env.TOPIC_MAP || !/^\d+$/.test(uid) || typeof tgCallFn !== 'function') {
@@ -666,18 +675,31 @@ export async function recallAdminVisitorMessage(
     messages: [],
   };
   const list = Array.isArray(history.pmMessageIds) ? history.pmMessageIds : [];
-  const idx = explicitPmMessageId
-    ? list.findIndex((m) => Number(m?.id) === Number(explicitPmMessageId) && m?.sender !== 'visitor')
-    : replyToTopicMsgId
-      ? list.findIndex((m) => Number(m?.topicMsgId) === Number(replyToTopicMsgId) && m?.sender !== 'visitor')
-      : list.findIndex((m) => m?.sender === 'admin');
+  const hasDmTarget = Boolean(options && Object.prototype.hasOwnProperty.call(options, 'replyToDmMsgId'));
+  const dmTargetId = hasDmTarget ? Number(options.replyToDmMsgId) : null;
+
+  let idx = -1;
+  if (explicitPmMessageId) {
+    idx = list.findIndex((m) => Number(m?.id) === Number(explicitPmMessageId) && m?.sender !== 'visitor');
+  } else if (hasDmTarget) {
+    // DM inbox mode: strictly match the replied-to owner DM message; NEVER fall back to "most recent".
+    idx =
+      Number.isFinite(dmTargetId) && dmTargetId > 0
+        ? list.findIndex((m) => Number(m?.dmMsgId) === dmTargetId && m?.sender !== 'visitor')
+        : -1;
+  } else if (replyToTopicMsgId) {
+    idx = list.findIndex((m) => Number(m?.topicMsgId) === Number(replyToTopicMsgId) && m?.sender !== 'visitor');
+  } else {
+    idx = list.findIndex((m) => m?.sender === 'admin');
+  }
 
   if (idx === -1) {
     return {
       ok: false,
-      error: replyToTopicMsgId
-        ? '未找到该条消息对应的私聊记录（仅支持撤回站长发出的近期消息）'
-        : '暂无可撤回的站长近期回复记录',
+      error:
+        replyToTopicMsgId || hasDmTarget
+          ? '未找到该条消息对应的私聊记录（仅支持撤回站长发出的近期消息）'
+          : '暂无可撤回的站长近期回复记录',
     };
   }
 

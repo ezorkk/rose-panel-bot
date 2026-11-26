@@ -7,6 +7,7 @@ import {
   generateInlineChallenge,
   generateStickerChallenge,
   handleTelegramUpdate,
+  initiateChatFromMiniApp,
   matchKeywordReply,
   parseStickerQuizInput,
 } from '../src/worker/bot.js';
@@ -17,6 +18,13 @@ import {
   resolveSupergroupId,
   savePanelConfig,
 } from '../src/worker/config.js';
+import {
+  DM_LAST_HEADER_KEY,
+  DM_MAP_PREFIX,
+  DM_OWNER_UNREACHABLE_KEY,
+  getOwnerChatId,
+  resolveInboxMode,
+} from '../src/worker/inbox.js';
 import worker from '../src/worker/index.js';
 import { fetchKomariStatus, normalizeNodeMetrics } from '../src/worker/komari.js';
 import { normalizeStickerObject, parseStickerPackName } from '../src/worker/telegram.js';
@@ -2015,9 +2023,9 @@ describe('v1.5.0 edge cases: caption limits, fallbacks, welcome toggles & pendin
     expect(markup.body.reply_markup?.inline_keyboard?.length).toBeGreaterThan(0);
   });
 
-  it('honors the welcome toggles before a notification group is bound, and handles /start with a payload', async () => {
+  it('honors the welcome toggles when inbox is off (no group or ADMIN_IDS), and handles /start with a payload', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '999000:EDGE', ADMIN_IDS: '10001' };
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '999000:EDGE' };
     const { calls, fetchMock } = mockTelegram();
     const privateMsg = (text) => ({
       message: { message_id: 3, from: { id: 818181, first_name: 'Dan' }, chat: { id: 818181, type: 'private' }, text },
@@ -2775,5 +2783,839 @@ describe('Mini App in-panel visitor chat log, direct text/photo reply & recall',
     } finally {
       globalThis.fetch = origFetch;
     }
+  });
+});
+
+describe('Bot DM direct push inbox (dm-inbox)', () => {
+  function createMockTg({ failOwnerPush = false, nextMsgStart = 1000 } = {}) {
+    let nextId = nextMsgStart;
+    const calls = [];
+    const state = { failOwnerPush };
+    const fetchMock = vi.fn(async (url, init) => {
+      if (String(url).includes('api.cas.chat')) {
+        return new Response(JSON.stringify({ ok: false }), { status: 200 });
+      }
+      const method = String(url).split('/').pop();
+      const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
+      calls.push({ method, body });
+      if (state.failOwnerPush && Number(body.chat_id) === 10001 && (method === 'sendMessage' || method === 'copyMessage')) {
+        return new Response(
+          JSON.stringify({ ok: false, error_code: 403, description: "Forbidden: bot can't initiate conversation with a user" }),
+          { status: 403 }
+        );
+      }
+      if (method === 'createForumTopic') {
+        return new Response(JSON.stringify({ ok: true, result: { message_thread_id: 321 } }), { status: 200 });
+      }
+      if (method === 'sendMessage' || method === 'copyMessage') {
+        nextId += 1;
+        return new Response(JSON.stringify({ ok: true, result: { message_id: nextId } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+    });
+    return { calls, fetchMock, state };
+  }
+
+  async function withFetch(fetchMock, fn) {
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = fetchMock;
+    try {
+      await fn();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  }
+
+  it('resolves inbox mode accurately across topic, dm, and off configurations', async () => {
+    const kv = createMemoryKV();
+    expect(await resolveInboxMode({ TOPIC_MAP: kv })).toBe('off');
+    expect(getOwnerChatId({ TOPIC_MAP: kv })).toBe('');
+
+    expect(await resolveInboxMode({ TOPIC_MAP: kv, ADMIN_IDS: '10001, 10002' })).toBe('dm');
+    expect(getOwnerChatId({ TOPIC_MAP: kv, ADMIN_IDS: '10001, 10002' })).toBe('10001');
+
+    expect(await resolveInboxMode({ TOPIC_MAP: kv, ADMIN_IDS: '10001', SUPERGROUP_ID: '-100123' })).toBe('topic');
+
+    // KV-bound supergroup also selects topic mode immediately
+    await kv.put('config:supergroup_id', '-100456');
+    expect(await resolveInboxMode({ TOPIC_MAP: kv, ADMIN_IDS: '10001' })).toBe('topic');
+  });
+
+  it('pushes visitor card on demand (10min / visitor switch), copies message verbatim, and records dmmap & archive', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:DM_PUSH', ADMIN_IDS: '10001,10002' };
+    await kv.put('verified:20001', 'emoji:v1');
+    await kv.put('verified:20002', 'emoji:v1');
+
+    const { calls, fetchMock } = createMockTg({ nextMsgStart: 500 });
+
+    await withFetch(fetchMock, async () => {
+      // 1. Visitor A first message -> sends header card (501) + copies message (502), both mapped in dmmap
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 11,
+            from: { id: 20001, first_name: 'Alice', username: 'alice_dev' },
+            chat: { id: 20001, type: 'private' },
+            text: '你好，咨询一下 https://example.com',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+
+      const headerCall = calls.find((c) => c.method === 'sendMessage' && c.body.chat_id === 10001);
+      const copyCall = calls.find((c) => c.method === 'copyMessage' && c.body.chat_id === 10001);
+      expect(headerCall).toBeTruthy();
+      expect(headerCall.body.text).toContain('Alice');
+      expect(headerCall.body.text).toContain('@alice_dev');
+      expect(headerCall.body.text).toContain('20001');
+      expect(headerCall.body.reply_markup.inline_keyboard[0][0].web_app.url).toBe(
+        'https://panel.test/?tab=visitors&uid=20001'
+      );
+      expect(copyCall).toBeTruthy();
+      expect(copyCall.body.from_chat_id).toBe(20001);
+      expect(copyCall.body.message_id).toBe(11);
+      // Must NOT push to second admin 10002
+      expect(calls.some((c) => Number(c.body.chat_id) === 10002)).toBe(false);
+      // Both header card and copied message mapped to visitor 20001
+      expect(await kv.get(`${DM_MAP_PREFIX}501`)).toBe('20001');
+      expect(await kv.get(`${DM_MAP_PREFIX}502`)).toBe('20001');
+
+      // Visitor profile & archive saved cleanly without thread_id
+      const detail = await getVisitorDetail(env, '20001');
+      expect(detail.thread_id).toBeNull();
+      expect(detail.topicLink).toBe('');
+      expect(detail.visitor_msg_count).toBe(1);
+      expect(detail.link_count).toBe(1);
+
+      // 2. Same visitor sends again within 10 minutes -> NO duplicate header card, only copyMessage + dmmap
+      calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 12,
+            from: { id: 20001, first_name: 'Alice', username: 'alice_dev' },
+            chat: { id: 20001, type: 'private' },
+            text: '补充一条消息',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(calls.filter((c) => c.method === 'sendMessage' && c.body.chat_id === 10001)).toHaveLength(0);
+      expect(calls.filter((c) => c.method === 'copyMessage' && c.body.chat_id === 10001)).toHaveLength(1);
+      expect(await kv.get(`${DM_MAP_PREFIX}503`)).toBe('20001');
+
+      // 3. Same visitor sends after >10 minutes -> re-sends header card
+      await kv.put(DM_LAST_HEADER_KEY, JSON.stringify({ uid: '20001', at: Date.now() - 11 * 60 * 1000 }));
+      calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 13,
+            from: { id: 20001, first_name: 'Alice', username: 'alice_dev' },
+            chat: { id: 20001, type: 'private' },
+            text: '过了十一分钟再来问一句',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(calls.filter((c) => c.method === 'sendMessage' && c.body.chat_id === 10001)).toHaveLength(1);
+      expect(calls.filter((c) => c.method === 'copyMessage' && c.body.chat_id === 10001)).toHaveLength(1);
+
+      // 4. Different visitor B sends a message -> sends a new header card for visitor B
+      calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 21,
+            from: { id: 20002, first_name: 'Bob' },
+            chat: { id: 20002, type: 'private' },
+            text: '你好我是 Bob',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      const bobHeader = calls.find((c) => c.method === 'sendMessage' && c.body.chat_id === 10001);
+      expect(bobHeader).toBeTruthy();
+      expect(bobHeader.body.text).toContain('Bob');
+      expect(bobHeader.body.text).toContain('20002');
+      expect(calls.some((c) => c.method === 'copyMessage' && c.body.chat_id === 10001 && c.body.from_chat_id === 20002)).toBe(
+        true
+      );
+    });
+  });
+
+  it('delivers owner quote-replies to visitor, records admin exchange, and chains replies to own reply', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:DM_REPLY', ADMIN_IDS: '10001' };
+    await kv.put(`${DM_MAP_PREFIX}502`, '20001');
+    await upsertVisitorProfile(env, { id: 20001, first_name: 'Alice' }, { incrementMsg: false });
+
+    const { calls, fetchMock } = createMockTg({ nextMsgStart: 800 });
+
+    await withFetch(fetchMock, async () => {
+      // 1. Owner quotes pushed message 502 -> copies to visitor 20001 (gets pmMessageId 801)
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 601,
+            from: { id: 10001, first_name: 'Owner' },
+            chat: { id: 10001, type: 'private' },
+            reply_to_message: { message_id: 502 },
+            text: '收到啦，马上看！',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+
+      expect(
+        calls.some(
+          (c) =>
+            c.method === 'copyMessage' &&
+            c.body.chat_id === 20001 &&
+            c.body.from_chat_id === 10001 &&
+            c.body.message_id === 601
+        )
+      ).toBe(true);
+      // Owner's own reply is also mapped in dmmap
+      expect(await kv.get(`${DM_MAP_PREFIX}601`)).toBe('20001');
+
+      const hist = await getVisitorHistory(env, '20001');
+      expect(hist.messages).toHaveLength(1);
+      expect(hist.messages[0].sender).toBe('admin');
+      expect(hist.messages[0].text).toBe('收到啦，马上看！');
+      expect(hist.pmMessageIds[0]).toMatchObject({ id: 801, topicMsgId: null, dmMsgId: 601, sender: 'admin' });
+
+      // 2. Owner quotes their OWN reply 601 to send a follow-up -> reaches 20001 too
+      calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 602,
+            from: { id: 10001, first_name: 'Owner' },
+            chat: { id: 10001, type: 'private' },
+            reply_to_message: { message_id: 601 },
+            text: '再补充一个链接',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(calls.some((c) => c.method === 'copyMessage' && c.body.chat_id === 20001 && c.body.message_id === 602)).toBe(
+        true
+      );
+    });
+  });
+
+  it('never guesses recipient when owner does not quote or quotes unknown message, and hints only once per 24h', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:DM_HINT', ADMIN_IDS: '10001' };
+    await upsertVisitorProfile(env, { id: 20001, first_name: 'Alice' }, { incrementMsg: true });
+    await kv.put(DM_LAST_HEADER_KEY, JSON.stringify({ uid: '20001', at: Date.now() }));
+
+    const { calls, fetchMock } = createMockTg();
+
+    await withFetch(fetchMock, async () => {
+      // 1. Owner sends plain message without replying -> hints once, zero messages sent to any visitor
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 701,
+            from: { id: 10001, first_name: 'Owner' },
+            chat: { id: 10001, type: 'private' },
+            text: '随便发一句',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(calls.some((c) => c.method === 'copyMessage')).toBe(false);
+      expect(calls.some((c) => Number(c.body.chat_id) === 20001)).toBe(false);
+      expect(calls.filter((c) => c.method === 'sendMessage' && c.body.chat_id === 10001)).toHaveLength(1);
+      expect(calls[0].body.text).toContain('引用回复');
+      expect(await kv.get('hint:dm_reply:10001')).toBe('1');
+
+      // 2. Owner quotes an unmapped message ID within 24h -> NO duplicate hint, ZERO visitor calls
+      calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 702,
+            from: { id: 10001, first_name: 'Owner' },
+            chat: { id: 10001, type: 'private' },
+            reply_to_message: { message_id: 999999 },
+            text: '回复一条过期消息',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(calls).toHaveLength(0);
+    });
+  });
+
+  it('supports /ban, /info, and strict /del in DM mode without falling back to most recent reply', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:DM_CMD', ADMIN_IDS: '10001' };
+    await upsertVisitorProfile(env, { id: 20001, first_name: 'Alice', username: 'alice_tg' }, { incrementMsg: false });
+    await kv.put(`${DM_MAP_PREFIX}502`, '20001'); // pushed visitor msg
+    await kv.put(`${DM_MAP_PREFIX}601`, '20001'); // owner reply #1
+    await kv.put(`${DM_MAP_PREFIX}602`, '20001'); // owner reply #2
+    await recordVisitorExchange(
+      env,
+      '20001',
+      { text: '第一条回复' },
+      { sender: 'admin', pmMessageId: 801, topicMsgId: null, dmMsgId: 601, preview: '第一条回复' }
+    );
+    await recordVisitorExchange(
+      env,
+      '20001',
+      { text: '第二条回复' },
+      { sender: 'admin', pmMessageId: 802, topicMsgId: null, dmMsgId: 602, preview: '第二条回复' }
+    );
+
+    const { calls, fetchMock } = createMockTg();
+
+    await withFetch(fetchMock, async () => {
+      // 1. /info quoting pushed msg 502 -> sends visitor card WITHOUT message_thread_id
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 710,
+            from: { id: 10001, first_name: 'Owner' },
+            chat: { id: 10001, type: 'private' },
+            reply_to_message: { message_id: 502 },
+            text: '/info',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      const infoCall = calls.find((c) => c.method === 'sendMessage' && c.body.chat_id === 10001);
+      expect(infoCall).toBeTruthy();
+      expect(infoCall.body.message_thread_id).toBeUndefined();
+      expect(infoCall.body.text).toContain('Alice');
+      expect(infoCall.body.reply_markup.inline_keyboard[0][0].web_app.url).toContain('tab=visitors&uid=20001');
+
+      // 2. /del quoting visitor's pushed message 502 -> MUST error and MUST NOT delete recent admin reply 802!
+      calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 711,
+            from: { id: 10001, first_name: 'Owner' },
+            chat: { id: 10001, type: 'private' },
+            reply_to_message: { message_id: 502 },
+            text: '/del',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(calls.some((c) => c.method === 'deleteMessage')).toBe(false);
+      expect(calls.some((c) => c.method === 'sendMessage' && c.body.text.includes('⚠️'))).toBe(true);
+
+      // 3. /del without quoting anything -> MUST error and MUST NOT delete anything!
+      calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 712,
+            from: { id: 10001, first_name: 'Owner' },
+            chat: { id: 10001, type: 'private' },
+            text: '/del',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(calls.some((c) => c.method === 'deleteMessage')).toBe(false);
+      expect(calls.some((c) => c.method === 'sendMessage' && c.body.text.includes('⚠️'))).toBe(true);
+
+      // 4. /del quoting owner's specific reply 601 -> deletes ONLY pmMessageId 801 (not 802)
+      calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 713,
+            from: { id: 10001, first_name: 'Owner' },
+            chat: { id: 10001, type: 'private' },
+            reply_to_message: { message_id: 601 },
+            text: '/del',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(calls.some((c) => c.method === 'deleteMessage' && c.body.chat_id === 20001 && c.body.message_id === 801)).toBe(
+        true
+      );
+      expect(calls.some((c) => c.method === 'deleteMessage' && c.body.message_id === 802)).toBe(false);
+
+      // 5. /ban quoting pushed message 502 -> bans 20001 and sends receipt with private-chat keyboard
+      calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 714,
+            from: { id: 10001, first_name: 'Owner' },
+            chat: { id: 10001, type: 'private' },
+            reply_to_message: { message_id: 502 },
+            text: '/ban',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(await kv.get('banned:20001')).toBe('1');
+      const banCall = calls.find((c) => c.method === 'sendMessage' && c.body.chat_id === 10001);
+      expect(banCall.body.text).toContain('已拉黑');
+      expect(banCall.body.message_thread_id).toBeUndefined();
+    });
+  });
+
+  it('enforces verification in DM mode (no supergroup bound) on /start, normal PM, and Mini App /api/chat/start', async () => {
+    const kv = createMemoryKV();
+    const botToken = '123:DM_VERIFY';
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001' };
+    const { calls, fetchMock } = createMockTg({ nextMsgStart: 300 });
+
+    await withFetch(fetchMock, async () => {
+      // 1. Unverified stranger sends /start -> triggers verification challenge (not bypassed!)
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 1,
+            from: { id: 30001, first_name: 'Stranger1' },
+            chat: { id: 30001, type: 'private' },
+            text: '/start',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(await kv.get('user_challenge:30001')).toBeTruthy();
+      expect(calls.some((c) => Number(c.body.chat_id) === 10001)).toBe(false);
+
+      // 2. Unverified stranger sends normal message -> triggers verification & queues pending message; passing delivers to owner DM!
+      calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 2,
+            from: { id: 30002, first_name: 'Stranger2' },
+            chat: { id: 30002, type: 'private' },
+            text: '你好，通过验证后请转发给我',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      const chalId = await kv.get('user_challenge:30002');
+      expect(chalId).toBeTruthy();
+      expect(calls.some((c) => Number(c.body.chat_id) === 10001)).toBe(false);
+      const chalState = JSON.parse(await kv.get(`chal:${chalId}`));
+
+      calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          callback_query: {
+            id: 'cq_dm_pass',
+            from: { id: 30002, first_name: 'Stranger2' },
+            data: `v:${chalId}:${chalState.correctIndex}`,
+            message: { message_id: 302, chat: { id: 30002, type: 'private' } },
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      // Pending message flushed directly to owner 10001!
+      expect(calls.some((c) => c.method === 'copyMessage' && c.body.chat_id === 10001 && c.body.message_id === 2)).toBe(
+        true
+      );
+
+      // Verified stranger sending /start sees canChatNow prompt
+      calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 3,
+            from: { id: 30002, first_name: 'Stranger2' },
+            chat: { id: 30002, type: 'private' },
+            text: '/start',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(calls.some((c) => c.method === 'sendMessage' && c.body.text.includes('已完成验证'))).toBe(true);
+
+      // 3. Unverified stranger tapping Mini App `[发私信]` -> triggers verification in DM mode
+      const guestInit = await signInitData(
+        { auth_date: String(Math.floor(Date.now() / 1000)), user: JSON.stringify({ id: 30003, first_name: 'Stranger3' }) },
+        botToken
+      );
+      const chatStartRes = await worker.fetch(
+        new Request('https://panel.test/api/chat/start', {
+          method: 'POST',
+          headers: { 'X-Telegram-Init-Data': guestInit },
+        }),
+        env
+      );
+      const chatStartJson = await chatStartRes.json();
+      expect(chatStartJson.ok).toBe(true);
+      expect(chatStartJson.triggeredVerification).toBe(true);
+      expect(await kv.get('user_challenge:30003')).toBeTruthy();
+    });
+  });
+
+  it('records dm:owner_unreachable on 403 push failure, preserves message in panel archive, and exposes status only to admin', async () => {
+    const kv = createMemoryKV();
+    const botToken = '123:DM_403';
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001' };
+    await kv.put('verified:20001', 'emoji:v1');
+
+    const { calls, fetchMock, state } = createMockTg({ failOwnerPush: true });
+
+    await withFetch(fetchMock, async () => {
+      // Push fails with 403 -> does NOT throw, sets dm:owner_unreachable = '1', STILL archives visitor message!
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 41,
+            from: { id: 20001, first_name: 'Alice' },
+            chat: { id: 20001, type: 'private' },
+            text: '重要留言不能丢',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+
+      expect(await kv.get(DM_OWNER_UNREACHABLE_KEY)).toBe('1');
+      const hist = await getVisitorHistory(env, '20001');
+      expect(hist.messages).toHaveLength(1);
+      expect(hist.messages[0].text).toBe('重要留言不能丢');
+
+      // Admin bootstrap exposes inboxMode='dm' & ownerUnreachable=true; guest bootstrap leaks neither
+      const now = Math.floor(Date.now() / 1000);
+      const adminInit = await signInitData(
+        { auth_date: String(now), user: JSON.stringify({ id: 10001, first_name: 'Owner' }) },
+        botToken
+      );
+      const guestInit = await signInitData(
+        { auth_date: String(now), user: JSON.stringify({ id: 20001, first_name: 'Alice' }) },
+        botToken
+      );
+
+      const adminBoot = await (
+        await worker.fetch(
+          new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': adminInit } }),
+          env
+        )
+      ).json();
+      expect(adminBoot.adminConfig.inboxMode).toBe('dm');
+      expect(adminBoot.adminConfig.ownerUnreachable).toBe(true);
+      expect(adminBoot.config.inboxMode).toBeUndefined();
+      expect(adminBoot.config.ownerUnreachable).toBeUndefined();
+
+      const guestBoot = await (
+        await worker.fetch(
+          new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': guestInit } }),
+          env
+        )
+      ).json();
+      expect(guestBoot.adminConfig).toBeNull();
+      expect(guestBoot.config.inboxMode).toBeUndefined();
+
+      // In-panel direct reply in DM mode sends to visitor ONLY (does not mirror to owner DM)
+      calls.length = 0;
+      const replyRes = await worker.fetch(
+        new Request('https://panel.test/api/admin/visitors/20001/reply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': adminInit },
+          body: JSON.stringify({ text: '面板直接回复你' }),
+        }),
+        env
+      );
+      expect((await replyRes.json()).ok).toBe(true);
+      expect(calls.some((c) => c.method === 'sendMessage' && Number(c.body.chat_id) === 20001)).toBe(true);
+      expect(calls.some((c) => Number(c.body.chat_id) === 10001)).toBe(false);
+
+      // Once push succeeds again, dm:owner_unreachable is cleared automatically
+      state.failOwnerPush = false;
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 42,
+            from: { id: 20001, first_name: 'Alice' },
+            chat: { id: 20001, type: 'private' },
+            text: '恢复推送测试',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(await kv.get(DM_OWNER_UNREACHABLE_KEY)).toBeNull();
+    });
+  });
+
+  it('sends silent keyword notice in DM mode and preserves full regression behavior in topic mode', async () => {
+    // Part A: DM mode silent keyword auto-reply notice
+    const dmKv = createMemoryKV();
+    const dmEnv = { TOPIC_MAP: dmKv, BOT_TOKEN: '123:DM_KW', ADMIN_IDS: '10001' };
+    await savePanelConfig(dmEnv, {
+      pmBot: {
+        keywordReplies: [{ id: 'kw1', keywords: '友链', matchMode: 'contains', reply: '欢迎换友链', forwardToAdmin: true }],
+      },
+    });
+    await dmKv.put('verified:20001', 'emoji:v1');
+    const dmMock = createMockTg({ nextMsgStart: 900 });
+
+    await withFetch(dmMock.fetchMock, async () => {
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 51,
+            from: { id: 20001, first_name: 'Alice' },
+            chat: { id: 20001, type: 'private' },
+            text: '请问换友链吗',
+          },
+        },
+        dmEnv,
+        'https://panel.test'
+      );
+      expect(
+        dmMock.calls.some(
+          (c) =>
+            c.method === 'sendMessage' &&
+            c.body.chat_id === 10001 &&
+            c.body.disable_notification === true &&
+            c.body.text.includes('已触发关键词自动回复')
+        )
+      ).toBe(true);
+    });
+
+    // Part B: Regression in topic mode (forwarding, topic reply, /del, keyword notice, unchanged KV schema)
+    const topicKv = createMemoryKV();
+    const topicEnv = {
+      TOPIC_MAP: topicKv,
+      BOT_TOKEN: '123:TOPIC_REG',
+      ADMIN_IDS: '10001',
+      SUPERGROUP_ID: '-100999111',
+    };
+    await savePanelConfig(topicEnv, {
+      pmBot: {
+        keywordReplies: [{ id: 'kw2', keywords: '合作', matchMode: 'contains', reply: '请留联系方式', forwardToAdmin: true }],
+      },
+    });
+    await topicKv.put('verified:20009', 'emoji:v1');
+    const topicMock = createMockTg({ nextMsgStart: 2000 });
+
+    await withFetch(topicMock.fetchMock, async () => {
+      // Visitor message with keyword -> creates topic, copies to topic, replies to visitor, silent topic notice, recorded ONCE
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 61,
+            from: { id: 20009, first_name: 'TopicGuest' },
+            chat: { id: 20009, type: 'private' },
+            text: '商务合作咨询',
+          },
+        },
+        topicEnv,
+        'https://panel.test'
+      );
+      expect(topicMock.calls.some((c) => c.method === 'createForumTopic')).toBe(true);
+      expect(
+        topicMock.calls.some(
+          (c) => c.method === 'copyMessage' && c.body.chat_id === '-100999111' && c.body.message_thread_id === 321
+        )
+      ).toBe(true);
+      expect(
+        topicMock.calls.some(
+          (c) =>
+            c.method === 'sendMessage' &&
+            c.body.chat_id === '-100999111' &&
+            c.body.message_thread_id === 321 &&
+            c.body.disable_notification === true &&
+            c.body.text.includes('已触发关键词自动回复')
+        )
+      ).toBe(true);
+      // Recorded exactly once (no double-write!)
+      const detail = await getVisitorDetail(topicEnv, '20009');
+      expect(detail.visitor_msg_count).toBe(1);
+      expect(detail.msg_count).toBe(1);
+
+      // Admin replies inside topic -> copies to visitor, KV entry has NO dmMsgId field
+      topicMock.calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 700,
+            message_thread_id: 321,
+            from: { id: 10001, first_name: 'Owner' },
+            chat: { id: -100999111, type: 'supergroup' },
+            text: '话题内回复测试',
+          },
+        },
+        topicEnv,
+        'https://panel.test'
+      );
+      const copyToVisitor = topicMock.calls.find((c) => c.method === 'copyMessage' && c.body.chat_id === 20009);
+      expect(copyToVisitor).toBeTruthy();
+      const hist = await getVisitorHistory(topicEnv, '20009');
+      expect(hist.pmMessageIds[0].topicMsgId).toBe(700);
+      expect('dmMsgId' in hist.pmMessageIds[0]).toBe(false);
+
+      // /del inside topic quoting 700 recalls the visitor PM message
+      const sentPmId = hist.pmMessageIds[0].id;
+      topicMock.calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 701,
+            message_thread_id: 321,
+            from: { id: 10001, first_name: 'Owner' },
+            chat: { id: -100999111, type: 'supergroup' },
+            reply_to_message: { message_id: 700 },
+            text: '/del',
+          },
+        },
+        topicEnv,
+        'https://panel.test'
+      );
+      expect(
+        topicMock.calls.some((c) => c.method === 'deleteMessage' && c.body.chat_id === 20009 && c.body.message_id === sentPmId)
+      ).toBe(true);
+
+      // Admin bootstrap reports inboxMode='topic' and ownerUnreachable=false
+      const adminInit = await signInitData(
+        { auth_date: String(Math.floor(Date.now() / 1000)), user: JSON.stringify({ id: 10001, first_name: 'Owner' }) },
+        '123:TOPIC_REG'
+      );
+      const boot = await (
+        await worker.fetch(
+          new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': adminInit } }),
+          topicEnv
+        )
+      ).json();
+      expect(boot.adminConfig.inboxMode).toBe('topic');
+      expect(boot.adminConfig.ownerUnreachable).toBe(false);
+    });
+  });
+
+  it('never resolves dmmap for a non-owner admin (per-chat message IDs collide) and hints once per 24h', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:DM_COADMIN', ADMIN_IDS: '10001,10002' };
+    // Owner's message #42 maps to visitor 20001; co-admin 10002 also has a message #42 in their own chat
+    await kv.put(`${DM_MAP_PREFIX}42`, '20001');
+
+    const { calls, fetchMock } = createMockTg();
+    const coAdminReply = (id) => ({
+      message: {
+        message_id: id,
+        from: { id: 10002, first_name: 'CoAdmin' },
+        chat: { id: 10002, type: 'private' },
+        text: 'hi there',
+        reply_to_message: { message_id: 42, chat: { id: 10002, type: 'private' } },
+      },
+    });
+
+    await withFetch(fetchMock, async () => {
+      await handleTelegramUpdate(coAdminReply(43), env, 'https://panel.test');
+      expect(calls.some((c) => Number(c.body.chat_id) === 20001)).toBe(false);
+      const hints = calls.filter((c) => c.method === 'sendMessage' && Number(c.body.chat_id) === 10002);
+      expect(hints).toHaveLength(1);
+      expect(hints[0].body.text).toContain('只有主人');
+
+      calls.length = 0;
+      await handleTelegramUpdate(coAdminReply(44), env, 'https://panel.test');
+      expect(calls).toHaveLength(0);
+    });
+  });
+
+  it('does not flag owner unreachable when a push fails for a non-403 reason', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:DM_400', ADMIN_IDS: '10001' };
+    await kv.put('verified:20001', 'emoji:v1');
+
+    const { fetchMock: baseFetch } = createMockTg();
+    const fetchMock = vi.fn(async (url, init) => {
+      const method = String(url).split('/').pop();
+      const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
+      if (method === 'copyMessage' && Number(body.chat_id) === 10001) {
+        return new Response(
+          JSON.stringify({ ok: false, error_code: 400, description: 'Bad Request: message to copy not found' }),
+          { status: 400 }
+        );
+      }
+      return baseFetch(url, init);
+    });
+
+    await withFetch(fetchMock, async () => {
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 51,
+            from: { id: 20001, first_name: 'Alice' },
+            chat: { id: 20001, type: 'private' },
+            text: 'deleted right away',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(await kv.get(DM_OWNER_UNREACHABLE_KEY)).toBeNull();
+      const hist = await getVisitorHistory(env, '20001');
+      expect(hist.messages).toHaveLength(1);
+    });
+  });
+
+  it('does not forward an unknown command to the visitor when the owner quotes a push', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:DM_UNKNOWN_CMD', ADMIN_IDS: '10001' };
+    await kv.put(`${DM_MAP_PREFIX}42`, '20001');
+
+    const { calls, fetchMock } = createMockTg();
+    await withFetch(fetchMock, async () => {
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 60,
+            from: { id: 10001, first_name: 'Owner' },
+            chat: { id: 10001, type: 'private' },
+            text: '/bna',
+            entities: [{ type: 'bot_command', offset: 0, length: 4 }],
+            reply_to_message: { message_id: 42, chat: { id: 10001, type: 'private' } },
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(calls.some((c) => Number(c.body.chat_id) === 20001)).toBe(false);
+      const notice = calls.find((c) => c.method === 'sendMessage' && Number(c.body.chat_id) === 10001);
+      expect(notice?.body.text).toContain('未识别的命令 /bna');
+    });
+  });
+
+  it('tells visitors messaging is unavailable instead of inviting them to type when the inbox is off', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:INBOX_OFF' };
+
+    const { calls, fetchMock } = createMockTg();
+    await withFetch(fetchMock, async () => {
+      const res = await initiateChatFromMiniApp(env, 'https://panel.test', { id: 20001, first_name: 'Alice' });
+      expect(res.inboxOff).toBe(true);
+      const sent = calls.filter((c) => c.method === 'sendMessage' && Number(c.body.chat_id) === 20001);
+      expect(sent).toHaveLength(1);
+      expect(sent[0].body.text).toContain('暂未开启私信功能');
+      expect(sent[0].body.text).not.toContain('直接在下方输入框打字');
+    });
   });
 });

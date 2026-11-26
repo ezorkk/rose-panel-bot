@@ -9,6 +9,22 @@ export const HIDE_STAR_STRIP_STORAGE_KEY = 'rose_hide_star_strip';
 
 export const RECENT_RELEASES = [
   {
+    version: '1.7.0',
+    url: 'https://github.com/mango0114/rose-panel-bot/releases/tag/v1.7.0',
+    items: [
+      {
+        tag: '新增',
+        tone: 'new',
+        text: '未绑定通知群时自动启用「Bot 私聊直推」，配好 ADMIN_IDS 即可收发私信、引用回复与使用管理指令，四层防骚扰与人机验证照常生效',
+      },
+      {
+        tag: '改进',
+        tone: 'imp',
+        text: '随时在话题群发送 /bind 自动切回话题模式；在设置「防骚扰验证」顶部新增通知方式状态与未 /start 提醒',
+      },
+    ],
+  },
+  {
     version: '1.6.0',
     url: 'https://github.com/mango0114/rose-panel-bot/releases/tag/v1.6.0',
     items: [
@@ -25,7 +41,7 @@ export const RECENT_RELEASES = [
       {
         tag: '新增',
         tone: 'new',
-        text: '顶栏全新原创玫瑰瓷像素风「昼夜气泡放大镜滑块」，可拖动切换夜晚 / 跟随 TG / 白天主题',
+        text: '顶栏全新玫瑰瓷像素风「昼夜气泡放大镜滑块」，可拖动切换夜晚 / 跟随 TG / 白天主题',
       },
       {
         tag: '改进',

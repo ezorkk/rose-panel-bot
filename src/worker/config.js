@@ -541,7 +541,7 @@ export function sanitizePublicConfig(config, env, isAdmin = false) {
   };
 }
 
-export function sanitizeAdminConfig(config, env = {}) {
+export function sanitizeAdminConfig(config, env = {}, inboxStatus = {}) {
   const cloned = structuredClone(config);
   if (cloned.probe.apiKey) {
     cloned.probe.apiKey = '********';
@@ -562,5 +562,13 @@ export function sanitizeAdminConfig(config, env = {}) {
     }
   }
   cloned.pmBot.turnstileReady = Boolean(env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET);
+  if (inboxStatus && typeof inboxStatus === 'object') {
+    if (inboxStatus.inboxMode !== undefined) {
+      cloned.inboxMode = inboxStatus.inboxMode;
+    }
+    if (inboxStatus.ownerUnreachable !== undefined) {
+      cloned.ownerUnreachable = Boolean(inboxStatus.ownerUnreachable);
+    }
+  }
   return cloned;
 }
