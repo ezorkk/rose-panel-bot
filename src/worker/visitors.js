@@ -17,6 +17,19 @@ const MAX_PHOTOS = 150;
 const MAX_LINKS = 200;
 const MAX_PM_IDS = 200;
 const MAX_MESSAGES = 60;
+export const PENDING_REVIEW_MAX = 10;
+export const PENDING_REVIEW_TTL_MS = 7 * 86400 * 1000;
+
+export function filterFreshPendingReview(list, nowMs = Date.now()) {
+  if (!Array.isArray(list) || list.length === 0) return [];
+  const cutoff = nowMs - PENDING_REVIEW_TTL_MS;
+  return list.filter((item) => {
+    if (!item || !Number(item.pmMessageId)) return false;
+    const ts = typeof item.at === 'number' ? item.at : Date.parse(item.at || '');
+    if (!Number.isFinite(ts)) return true;
+    return ts >= cutoff;
+  });
+}
 
 export const SOURCE_PARAM_RE = /^[a-z0-9_]{1,24}$/;
 export const PENDING_SOURCE_TTL_SECONDS = 7 * 86400;
@@ -259,6 +272,92 @@ export async function upsertVisitorProfile(env, tgUser, extra = {}) {
   await addToVisitorIndex(env, uid);
   await invalidateVisitorSummaryCache(env);
   return updated;
+}
+
+/**
+ * Appends a held probation message onto `user:{uid}.pendingReview` (max 10, 7-day retention),
+ * reusing the existing visitor profile write so no extra KV key is introduced.
+ */
+export async function addPendingReviewMessage(env, tgUser, entry) {
+  if (!env?.TOPIC_MAP || !tgUser?.id || !entry?.pmMessageId) return null;
+  const uid = String(tgUser.id);
+  const key = `user:${uid}`;
+  const existing = (await safeGetJSON(env.TOPIC_MAP, key, {})) || {};
+  const nowMs = typeof entry.at === 'number' ? entry.at : Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+
+  let resolvedSource = existing.source || '';
+  let resolvedSourceAt = existing.source_at || null;
+  let consumedPendingKey = '';
+  if (!resolvedSource) {
+    const rawPending = await env.TOPIC_MAP.get(`src:${uid}`);
+    const pendingSource = normalizeSourceParam(rawPending || '');
+    if (pendingSource) {
+      resolvedSource = pendingSource;
+      resolvedSourceAt = nowIso;
+      consumedPendingKey = `src:${uid}`;
+    }
+  }
+
+  const freshList = filterFreshPendingReview(existing.pendingReview, nowMs);
+  const pmId = Number(entry.pmMessageId);
+  const nextItem = {
+    pmMessageId: pmId,
+    chatId: Number(entry.chatId || tgUser.id),
+    preview: String(entry.preview || '').slice(0, 300),
+    reasons: Array.isArray(entry.reasons) ? entry.reasons.map(String).filter(Boolean) : [],
+    at: nowMs,
+  };
+  const deduped = freshList.filter((item) => Number(item.pmMessageId) !== pmId);
+  deduped.push(nextItem);
+  const nextPending = deduped.slice(-PENDING_REVIEW_MAX);
+
+  const existingTotal = Number(existing.msg_count) || 0;
+  const existingVisitor =
+    existing.visitor_msg_count !== undefined ? Number(existing.visitor_msg_count) || 0 : existingTotal;
+  const existingAdmin = Number(existing.admin_msg_count) || 0;
+
+  const updated = {
+    ...existing,
+    userId: uid,
+    first_name: tgUser.first_name ?? existing.first_name ?? '',
+    last_name: tgUser.last_name ?? existing.last_name ?? '',
+    username: tgUser.username ?? existing.username ?? '',
+    language_code: tgUser.language_code ?? existing.language_code ?? '',
+    first_seen_at: existing.first_seen_at || nowIso,
+    last_seen_at: nowIso,
+    msg_count: existingTotal,
+    visitor_msg_count: existingVisitor,
+    admin_msg_count: existingAdmin,
+    photo_count: Number(existing.photo_count) || 0,
+    link_count: Number(existing.link_count) || 0,
+    last_preview: existing.last_preview || '',
+    note: existing.note || '',
+    ...(resolvedSource ? { source: resolvedSource, source_at: resolvedSourceAt || nowIso } : {}),
+    pendingReview: nextPending,
+  };
+
+  await safePutJSON(env.TOPIC_MAP, key, updated);
+  if (consumedPendingKey) {
+    await env.TOPIC_MAP.delete(consumedPendingKey).catch(() => {});
+  }
+  await addToVisitorIndex(env, uid);
+  await invalidateVisitorSummaryCache(env);
+  return { record: updated, pendingReview: nextPending };
+}
+
+export async function clearPendingReviewMessages(env, userId) {
+  const uid = String(userId || '').trim();
+  if (!env?.TOPIC_MAP || !/^\d+$/.test(uid)) return null;
+  const key = `user:${uid}`;
+  const rec = await safeGetJSON(env.TOPIC_MAP, key, null);
+  if (!rec) return null;
+  if (rec.pendingReview !== undefined) {
+    delete rec.pendingReview;
+    await safePutJSON(env.TOPIC_MAP, key, rec);
+    await invalidateVisitorSummaryCache(env);
+  }
+  return rec;
 }
 
 /**
@@ -681,6 +780,7 @@ export async function getVisitorDetail(env, userId, knownSupergroupId = null) {
   const visitorMsgs =
     base.visitor_msg_count !== undefined ? Number(base.visitor_msg_count || 0) : totalMsgs;
   const adminMsgs = Number(base.admin_msg_count || 0);
+  const pendingReview = filterFreshPendingReview(base.pendingReview);
 
   return {
     userId: uid,
@@ -702,6 +802,8 @@ export async function getVisitorDetail(env, userId, knownSupergroupId = null) {
     note: base.note || '',
     source: base.source || '',
     source_at: base.source_at || null,
+    pendingReview,
+    pendingReviewCount: pendingReview.length,
     isBanned,
     isTrusted,
     isVerified,
@@ -713,7 +815,11 @@ export async function getVisitorDetail(env, userId, knownSupergroupId = null) {
 export async function listVisitors(env, options = {}) {
   const { search = '', filter = 'all', limit = 60 } = options;
   if (!env.TOPIC_MAP) {
-    return { stats: { total: 0, active: 0, trusted: 0, banned: 0, closed: 0 }, sourceStats: [], items: [] };
+    return {
+      stats: { total: 0, active: 0, trusted: 0, banned: 0, closed: 0, pendingReview: 0 },
+      sourceStats: [],
+      items: [],
+    };
   }
 
   const [indexedRaw, migrated, bannedMigrated] = await Promise.all([
@@ -785,6 +891,7 @@ export async function listVisitors(env, options = {}) {
     trusted: details.filter((v) => v.isTrusted && !v.isBanned).length,
     banned: details.filter((v) => v.isBanned).length,
     closed: details.filter((v) => v.isClosed && !v.isBanned).length,
+    pendingReview: details.filter((v) => !v.isBanned && (v.pendingReview?.length || 0) > 0).length,
   };
   const sourceStats = computeSourceStats(details);
 
@@ -794,6 +901,7 @@ export async function listVisitors(env, options = {}) {
     const cacheFresh =
       existingCache &&
       existingCache.stats &&
+      typeof existingCache.stats.pendingReview === 'number' &&
       Array.isArray(existingCache.sourceStats) &&
       Date.now() - Number(existingCache.cachedAt || 0) < VISITOR_SUMMARY_TTL_MS;
     if (!cacheFresh) {
@@ -808,6 +916,7 @@ export async function listVisitors(env, options = {}) {
 
   const q = String(search || '').trim().toLowerCase();
   const filtered = details.filter((v) => {
+    if (filter === 'pending' && (v.isBanned || !(v.pendingReview?.length > 0))) return false;
     if (filter === 'banned' && !v.isBanned) return false;
     if (filter === 'trusted' && (!v.isTrusted || v.isBanned)) return false;
     if (filter === 'closed' && (!v.isClosed || v.isBanned)) return false;
@@ -832,10 +941,20 @@ export async function listVisitors(env, options = {}) {
  */
 export async function getVisitorOverview(env) {
   if (!env.TOPIC_MAP) {
-    return { stats: { total: 0, active: 0, trusted: 0, banned: 0, closed: 0 }, sourceStats: [], recent: [], cached: false };
+    return {
+      stats: { total: 0, active: 0, trusted: 0, banned: 0, closed: 0, pendingReview: 0 },
+      sourceStats: [],
+      recent: [],
+      cached: false,
+    };
   }
   const cached = await safeGetJSON(env.TOPIC_MAP, VISITOR_SUMMARY_CACHE_KEY, null);
-  if (cached && cached.stats && Date.now() - Number(cached.cachedAt || 0) < VISITOR_SUMMARY_TTL_MS) {
+  if (
+    cached &&
+    cached.stats &&
+    typeof cached.stats.pendingReview === 'number' &&
+    Date.now() - Number(cached.cachedAt || 0) < VISITOR_SUMMARY_TTL_MS
+  ) {
     return {
       stats: cached.stats,
       sourceStats: Array.isArray(cached.sourceStats) ? cached.sourceStats : [],
@@ -862,13 +981,24 @@ export async function applyVisitorAction(env, userId, action, payload = {}) {
   const rec = (await safeGetJSON(env.TOPIC_MAP, key, { userId: uid })) || { userId: uid };
 
   switch (action) {
-    case 'ban':
+    case 'ban': {
       await env.TOPIC_MAP.put(`banned:${uid}`, '1');
+      await env.TOPIC_MAP.delete(`probation:${uid}`);
+      await env.TOPIC_MAP.delete(`rv_notify_cd:${uid}`);
+      let dirty = false;
       if (rec.casExempt) {
         delete rec.casExempt;
+        dirty = true;
+      }
+      if (rec.pendingReview !== undefined) {
+        delete rec.pendingReview;
+        dirty = true;
+      }
+      if (dirty) {
         await safePutJSON(env.TOPIC_MAP, key, rec);
       }
       break;
+    }
     case 'unban':
       await env.TOPIC_MAP.delete(`banned:${uid}`);
       await env.TOPIC_MAP.delete(`verify_cool:${uid}`);
@@ -880,6 +1010,7 @@ export async function applyVisitorAction(env, userId, action, payload = {}) {
       await env.TOPIC_MAP.delete(`banned:${uid}`);
       await env.TOPIC_MAP.delete(`verify_cool:${uid}`);
       await env.TOPIC_MAP.delete(`verify_cool_hint:${uid}`);
+      await env.TOPIC_MAP.delete(`probation:${uid}`);
       await env.TOPIC_MAP.put(`verified:${uid}`, 'trusted');
       await env.TOPIC_MAP.delete(`needs_verify:${uid}`);
       break;
@@ -887,6 +1018,8 @@ export async function applyVisitorAction(env, userId, action, payload = {}) {
       await env.TOPIC_MAP.delete(`verified:${uid}`);
       await env.TOPIC_MAP.delete(`verify_cool:${uid}`);
       await env.TOPIC_MAP.delete(`verify_cool_hint:${uid}`);
+      await env.TOPIC_MAP.delete(`probation:${uid}`);
+      await env.TOPIC_MAP.delete(`rv_notify_cd:${uid}`);
       await env.TOPIC_MAP.put(`needs_verify:${uid}`, '1', { expirationTtl: 600 });
       break;
     case 'close':

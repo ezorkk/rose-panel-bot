@@ -938,6 +938,11 @@ select {
   justify-content: center;
 }
 
+.dock-badge.alert {
+  background: var(--red);
+  box-shadow: 0 2px 8px rgba(212, 52, 72, 0.38);
+}
+
 /* Bottom Sheet / Modal */
 .sheet-backdrop {
   position: fixed;
@@ -2323,4 +2328,252 @@ select {
 .get-same-foot .btn {
   flex: 1;
   justify-content: center;
+}
+
+/* Admin single-line protection / pending-review status strip on Home */
+.admin-status-strip {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
+  text-align: left;
+  transition: transform 0.14s ease, opacity 0.14s ease, background 0.14s ease;
+}
+
+.admin-status-strip:active {
+  transform: scale(0.985);
+}
+
+.admin-status-strip.alert {
+  background: var(--accent);
+  border-color: transparent;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 700;
+  box-shadow: 0 6px 18px rgba(163, 41, 82, 0.25);
+}
+
+.admin-status-strip.calm {
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 8px 13px;
+}
+
+/* Filter chip inline count badge */
+.chip-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+}
+
+.chip-badge.alert {
+  background: var(--red);
+  color: #ffffff;
+}
+
+.chip.active .chip-badge {
+  background: rgba(255, 255, 255, 0.24);
+  color: #ffffff;
+}
+
+/* Visitor detail pending probation review card */
+.review-card {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.review-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent);
+  margin-bottom: 10px;
+}
+
+.review-card-hint {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.review-item-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.review-item {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 10px 12px;
+}
+
+.review-item-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.review-reason-tags {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.review-item-time {
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.review-item-text {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.review-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+/* Navigation order editor inside Settings */
+.nav-order-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.nav-order-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 14px;
+  background: var(--bg-subtle);
+}
+
+.nav-order-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.nav-order-idx {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.nav-order-label {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+/* Grouped anti-spam blocked keyword presets */
+.kw-preset-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.kw-preset-group {
+  background: var(--bg-subtle);
+  border-radius: 14px;
+  padding: 9px 10px;
+}
+
+.kw-preset-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+
+.kw-preset-group-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.kw-preset-group-add {
+  border: none;
+  background: transparent;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.kw-preset-group-add:disabled {
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.kw-preset-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.kw-preset-pill {
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease;
+}
+
+.kw-preset-pill.active {
+  background: var(--accent);
+  border-color: transparent;
+  color: #ffffff;
 }

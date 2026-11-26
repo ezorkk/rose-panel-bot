@@ -73,6 +73,34 @@ export const DEFAULT_PROBE_ALERTS = {
   },
 };
 
+export const DEFAULT_PROBATION = {
+  enabled: true, // 默认开启
+  maxMessages: 3, // 1–20
+  hours: 24, // 1–168
+  allowDomains: [], // 链接白名单，例如 ['github.com', 'example.com']，匹配域名本身及其子域名
+};
+
+export const DEFAULT_NAV_ORDER = ['profile', 'sites', 'probe', 'visitors', 'leaderboard'];
+
+export function normalizeNavOrder(raw) {
+  const list = Array.isArray(raw) ? raw : [];
+  const seen = new Set();
+  const result = [];
+  for (const item of list) {
+    const id = String(item || '').trim();
+    if (DEFAULT_NAV_ORDER.includes(id) && !seen.has(id)) {
+      seen.add(id);
+      result.push(id);
+    }
+  }
+  for (const id of DEFAULT_NAV_ORDER) {
+    if (!seen.has(id)) {
+      result.push(id);
+    }
+  }
+  return result;
+}
+
 export const DEFAULT_CONFIG = {
   profile: {
     displayName: 'RosePanel',
@@ -172,11 +200,15 @@ export const DEFAULT_CONFIG = {
     keywordReplies: [],
     verifiedDays: 30,
     showVisitorAvatarInCard: false,
+    probation: structuredClone(DEFAULT_PROBATION),
   },
   updater: {
     forkRepo: '', // e.g. "yourname/rose-panel-bot"
     branch: 'main',
     githubToken: '', // optional single-repo Fine-grained PAT for in-app 1-click fork sync
+  },
+  ui: {
+    navOrder: [...DEFAULT_NAV_ORDER],
   },
 };
 
@@ -347,6 +379,43 @@ export function normalizeProbeAlerts(baseAlerts = DEFAULT_PROBE_ALERTS, override
   };
 }
 
+function normalizeAllowDomain(raw) {
+  let s = String(raw || '').trim().toLowerCase();
+  if (!s) return '';
+  s = s.replace(/^https?:\/\//, '');
+  s = s.replace(/[/?#].*$/, '');
+  s = s.replace(/:\d+$/, '');
+  s = s.replace(/^\*\./, '').replace(/^\.+|\.+$/g, '');
+  if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/.test(s)) {
+    return '';
+  }
+  return s.slice(0, 128);
+}
+
+export function normalizeProbation(baseProbation = DEFAULT_PROBATION, override = null) {
+  const base = baseProbation && typeof baseProbation === 'object' ? baseProbation : DEFAULT_PROBATION;
+  const ov = override && typeof override === 'object' ? override : {};
+  const rawDomains =
+    ov.allowDomains !== undefined
+      ? ov.allowDomains
+      : base.allowDomains !== undefined
+        ? base.allowDomains
+        : DEFAULT_PROBATION.allowDomains;
+  const domainList = Array.isArray(rawDomains)
+    ? rawDomains
+    : typeof rawDomains === 'string'
+      ? rawDomains.split(/[\r\n,，;；]+/)
+      : [];
+  const allowDomains = Array.from(new Set(domainList.map(normalizeAllowDomain).filter(Boolean))).slice(0, 50);
+
+  return {
+    enabled: (ov.enabled ?? base.enabled) !== false,
+    maxMessages: clampInt(ov.maxMessages ?? base.maxMessages, 1, 20, DEFAULT_PROBATION.maxMessages),
+    hours: clampInt(ov.hours ?? base.hours, 1, 168, DEFAULT_PROBATION.hours),
+    allowDomains,
+  };
+}
+
 function resolveAvatarMode(rawMode, avatarUrl) {
   if (AVATAR_MODES.includes(rawMode)) return rawMode;
   return String(avatarUrl || '').trim() ? 'custom' : 'bot';
@@ -365,6 +434,10 @@ export function mergeConfig(base, override) {
     cloned.probe.visibility = cloned.probe.visibility === 'private' ? 'private' : 'public';
     cloned.probe.provider = PROBE_PROVIDER_IDS.includes(cloned.probe.provider) ? cloned.probe.provider : 'komari';
     cloned.probe.alerts = normalizeProbeAlerts(DEFAULT_PROBE_ALERTS, cloned.probe.alerts);
+    cloned.pmBot.probation = normalizeProbation(DEFAULT_PROBATION, cloned.pmBot?.probation);
+    cloned.ui = {
+      navOrder: normalizeNavOrder(cloned.ui?.navOrder),
+    };
     cloned.siteOrigin = String(cloned.siteOrigin || '').trim();
     return cloned;
   }
@@ -433,10 +506,14 @@ export function mergeConfig(base, override) {
       showVisitorAvatarInCard: Boolean(
         override.pmBot?.showVisitorAvatarInCard ?? base.pmBot?.showVisitorAvatarInCard ?? false
       ),
+      probation: normalizeProbation(base.pmBot?.probation, override.pmBot?.probation),
     },
     updater: {
       ...base.updater,
       ...(override.updater || {}),
+    },
+    ui: {
+      navOrder: normalizeNavOrder(override.ui?.navOrder ?? base.ui?.navOrder),
     },
     botUsername: String(override.botUsername ?? base.botUsername ?? '')
       .trim()
@@ -571,6 +648,10 @@ export async function savePanelConfig(env, nextConfig) {
   merged.pmBot.stickerChallenges = Array.isArray(merged.pmBot.stickerChallenges)
     ? merged.pmBot.stickerChallenges.filter((item) => item?.fileId && item?.question && item?.answer).slice(0, 40)
     : [];
+  merged.pmBot.probation = normalizeProbation(DEFAULT_PROBATION, merged.pmBot.probation);
+  merged.ui = {
+    navOrder: normalizeNavOrder(merged.ui?.navOrder),
+  };
 
   await safePutJSON(env.TOPIC_MAP, CONFIG_KV_KEY, merged);
   return merged;
@@ -659,6 +740,9 @@ export function sanitizePublicConfig(config, env, isAdmin = false, requestOrigin
           return h && h !== 'your_bot' && /bot$/i.test(h) ? h : '';
         })(),
       appShortName: env.APP_SHORT_NAME || '',
+    },
+    ui: {
+      navOrder: normalizeNavOrder(config.ui?.navOrder),
     },
     shareUrl: resolveShareUrl(config, env, requestOrigin),
     ...(publicVisitStats ? { visitStats: publicVisitStats } : {}),

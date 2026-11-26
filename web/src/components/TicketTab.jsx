@@ -9,17 +9,14 @@ import {
   Flame,
   HeartHandshake,
   Link2,
-  Lock,
   MessageCircle,
   RefreshCw,
   Share2,
-  ShieldCheck,
   Sparkles,
-  Users,
   X,
 } from 'lucide-react';
 import { Avatar, StubEmblem, TicketEmblem } from './Emblems.jsx';
-import { apiRequest, formatTimeAgo } from '../lib/api.js';
+import { apiRequest } from '../lib/api.js';
 import { BRAND_SIGNATURE } from '../lib/brand.js';
 import {
   buildSourceLink,
@@ -38,10 +35,8 @@ const GetSameCardModal = lazy(() => import('./GetSameCardModal.jsx'));
 export default function TicketTab({
   data,
   onNavigate,
-  onOpenVisitor,
   onCheckin,
   checkinLoading,
-  onOpenWhatsNew,
   onToast,
 }) {
   const [showLevels, setShowLevels] = useState(false);
@@ -49,14 +44,14 @@ export default function TicketTab({
 
   const {
     config,
-    user,
     isAdmin,
     checkin,
     levels = [],
     visitorSummary = null,
-    recentVisitors = [],
-    blockedSpamCount = 0,
+    blockedToday = 0,
+    pendingReviewCount: bootPendingReview,
   } = data;
+  const pendingReviewCount = Number(bootPendingReview ?? visitorSummary?.pendingReview ?? 0);
   const { profile, community, bot } = config;
   const enableCheckin = Boolean(community.enableCheckin);
   // The top bar already shows displayName, so the card leads with the @handle instead of repeating it.
@@ -171,6 +166,32 @@ export default function TicketTab({
       : null;
 
   const showPoweredBy = !isAdmin && profile.showPoweredBy !== false;
+
+  const renderAdminStatusStrip = () => {
+    if (!isAdmin) return null;
+    if (pendingReviewCount > 0) {
+      return (
+        <button
+          type="button"
+          className="admin-status-strip alert"
+          onClick={() => onNavigate('visitors', { filter: 'pending' })}
+        >
+          <span>🛡️ {pendingReviewCount} 位新访客的消息待审核</span>
+          <ChevronRight size={15} />
+        </button>
+      );
+    }
+    return (
+      <button
+        type="button"
+        className="admin-status-strip calm"
+        onClick={() => onNavigate('visitors')}
+      >
+        <span>🛡️ 防护正常 · 今日拦截 {blockedToday || 0} 次</span>
+        <ChevronRight size={14} />
+      </button>
+    );
+  };
 
   const renderVisitCounter = () =>
     publicMonthlyVisits !== null && (
@@ -557,6 +578,7 @@ export default function TicketTab({
           </div>
         </div>
 
+        {renderAdminStatusStrip()}
         {renderVisitCounter()}
         {renderPoweredBy()}
         {renderShareSheet()}
@@ -745,150 +767,8 @@ export default function TicketTab({
         </div>
       )}
 
-      {/* Admin-Only Owner Overview: Blocked Spam, Active Visitors & Recent Contacts */}
-      {isAdmin && visitorSummary && (
-        <div className="card">
-          <div className="card-header" style={{ marginBottom: 10 }}>
-            <span className="card-title" style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-              <ShieldCheck size={15} color="var(--accent)" /> 站长速览
-              <span className="pill" style={{ padding: '2px 8px', fontSize: 10 }}>
-                <Lock size={10} /> 仅自己可见
-              </span>
-              {onOpenWhatsNew && (
-                <button
-                  type="button"
-                  className="pill rose"
-                  style={{ padding: '2px 8px', fontSize: 10, border: 'none', cursor: 'pointer' }}
-                  onClick={() => {
-                    haptic('light');
-                    onOpenWhatsNew();
-                  }}
-                >
-                  <Sparkles size={10} /> 近期更新
-                </button>
-              )}
-            </span>
-            <button
-              type="button"
-              onClick={() => onNavigate('visitors')}
-              style={{
-                background: 'transparent',
-                border: 'none',
-                padding: 0,
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 2,
-                fontSize: 12,
-                fontWeight: 600,
-                color: 'var(--accent)',
-                cursor: 'pointer',
-              }}
-            >
-              全部 {visitorSummary.total || 0} <ChevronRight size={14} />
-            </button>
-          </div>
-
-          <div className="owner-stat-grid">
-            <button
-              type="button"
-              className="owner-stat-tile rose"
-              onClick={() => onNavigate('visitors')}
-            >
-              <div className="owner-stat-label">
-                <ShieldCheck size={13} /> 已拦截广告
-              </div>
-              <div className="owner-stat-value">
-                <span className="owner-stat-num">{blockedSpamCount || 0}</span>
-                <span className="owner-stat-unit">次</span>
-              </div>
-              <div className="owner-stat-sub">四层防骚扰实时守护</div>
-            </button>
-
-            <button
-              type="button"
-              className="owner-stat-tile"
-              onClick={() => onNavigate('visitors')}
-            >
-              <div className="owner-stat-label">
-                <Users size={13} /> 活跃访客
-              </div>
-              <div className="owner-stat-value">
-                <span className="owner-stat-num">{visitorSummary.active ?? visitorSummary.total ?? 0}</span>
-                <span className="owner-stat-unit">位</span>
-              </div>
-              <div className="owner-stat-sub">
-                信任 {visitorSummary.trusted || 0} · 封禁 {visitorSummary.banned || 0}
-              </div>
-            </button>
-          </div>
-
-          <div className="recent-subhead">
-            <span>最近联系</span>
-            <span>点击查看记录</span>
-          </div>
-
-          {recentVisitors.length > 0 ? (
-            recentVisitors.slice(0, 4).map((v) => (
-              <div
-                className="list-row"
-                key={v.userId}
-                style={{ cursor: 'pointer' }}
-                onClick={() => (onOpenVisitor ? onOpenVisitor(v.userId) : onNavigate('visitors'))}
-              >
-                <Avatar userId={v.userId} name={v.displayName} size="sm" />
-                <div className="row-main">
-                  <div className="row-title" style={{ fontSize: 14 }}>
-                    <span
-                      style={{
-                        whiteSpace: 'nowrap',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                      }}
-                    >
-                      {v.displayName}
-                    </span>
-                    {v.isBanned && (
-                      <span className="pill red" style={{ padding: '1px 6px', fontSize: 10 }}>
-                        封禁
-                      </span>
-                    )}
-                    {!v.isBanned && v.isTrusted && (
-                      <span className="pill green" style={{ padding: '1px 6px', fontSize: 10 }}>
-                        信任
-                      </span>
-                    )}
-                  </div>
-                  <div className="row-desc">
-                    {v.last_preview || (v.username ? `@${v.username}` : `UID ${v.userId}`)}
-                  </div>
-                </div>
-                <div
-                  style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'flex-end',
-                    gap: 3,
-                    flexShrink: 0,
-                  }}
-                >
-                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                    {formatTimeAgo(v.last_seen_at)}
-                  </span>
-                  {v.msg_count > 0 && (
-                    <span className="pill" style={{ padding: '1px 7px', fontSize: 10 }}>
-                      {v.msg_count} 条
-                    </span>
-                  )}
-                </div>
-              </div>
-            ))
-          ) : (
-            <div className="empty-state" style={{ padding: '12px 0' }}>
-              暂无访客来信记录
-            </div>
-          )}
-        </div>
-      )}
+      {/* Admin-only single-line protection / pending-review status strip */}
+      {renderAdminStatusStrip()}
 
       {renderVisitCounter()}
       {renderPoweredBy()}

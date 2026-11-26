@@ -20,6 +20,13 @@ import {
 } from 'lucide-react';
 import { apiRequest } from '../lib/api.js';
 import { BRAND_SIGNATURE } from '../lib/brand.js';
+import {
+  BLOCKED_KEYWORD_MAX_LENGTH,
+  KEYWORD_PRESET_GROUPS,
+  addBlockedKeywordGroup,
+  hasBlockedKeyword,
+  toggleBlockedKeyword,
+} from '../lib/keywordPresets.js';
 import { buildSourceLink, confirmDialog, copyText, haptic, openExternalUrl } from '../lib/telegram.js';
 import { TgStickerMedia, TicketEmblem } from './Emblems.jsx';
 import {
@@ -29,6 +36,24 @@ import {
   REPO_URL,
   StarSupportBanner,
 } from './WhatsNewModal.jsx';
+
+const DEFAULT_NAV_ORDER = ['profile', 'sites', 'probe', 'visitors', 'leaderboard'];
+
+function normalizeNavOrderDraft(raw) {
+  const list = Array.isArray(raw) ? raw : [];
+  const seen = new Set();
+  const res = [];
+  for (const id of list) {
+    if (DEFAULT_NAV_ORDER.includes(id) && !seen.has(id)) {
+      seen.add(id);
+      res.push(id);
+    }
+  }
+  for (const id of DEFAULT_NAV_ORDER) {
+    if (!seen.has(id)) res.push(id);
+  }
+  return res;
+}
 
 const PROBE_PROVIDER_OPTIONS = [
   {
@@ -78,6 +103,9 @@ export default function SettingsDrawer({
 }) {
   const [section, setSection] = useState(initialSection);
   const [draft, setDraft] = useState(() => structuredClone(adminConfig));
+  const [probationDomainsText, setProbationDomainsText] = useState(() =>
+    (adminConfig?.pmBot?.probation?.allowDomains || []).join('\n')
+  );
   const [saving, setSaving] = useState(false);
   const [testingProbe, setTestingProbe] = useState(false);
   const [probeTestResult, setProbeTestResult] = useState(null);
@@ -279,6 +307,27 @@ export default function SettingsDrawer({
     setDraft((prev) => ({
       ...prev,
       [group]: { ...prev[group], [key]: value },
+    }));
+  };
+
+  const defaultProbation = {
+    enabled: true,
+    maxMessages: 3,
+    hours: 24,
+    allowDomains: [],
+  };
+
+  const updateProbation = (patch) => {
+    setDraft((prev) => ({
+      ...prev,
+      pmBot: {
+        ...prev.pmBot,
+        probation: {
+          ...defaultProbation,
+          ...(prev.pmBot?.probation || {}),
+          ...patch,
+        },
+      },
     }));
   };
 
@@ -1033,6 +1082,97 @@ export default function SettingsDrawer({
                 ))}
               </div>
             </div>
+
+            {/* Navigation Order Card */}
+            {(() => {
+              const enableCheckin = Boolean(draft.community?.enableCheckin);
+              const fullOrder = normalizeNavOrderDraft(draft.ui?.navOrder);
+              const visibleOrder = fullOrder.filter((id) => id !== 'leaderboard' || enableCheckin);
+              const navMeta = {
+                profile: { label: enableCheckin ? '票根' : '名片', note: '' },
+                sites: { label: '小站', note: '' },
+                probe: {
+                  label: '探针',
+                  note:
+                    draft.probe?.visibility === 'private'
+                      ? '仅自己可见'
+                      : !draft.probe?.url && !draft.probe?.demoMode
+                        ? '未配置'
+                        : '',
+                },
+                visitors: { label: '访客', note: '仅站长' },
+                leaderboard: { label: '榜单', note: '群签到访客可见' },
+              };
+              const moveNavItem = (idx, delta) => {
+                const targetIdx = idx + delta;
+                if (targetIdx < 0 || targetIdx >= visibleOrder.length) return;
+                const nextVisible = [...visibleOrder];
+                [nextVisible[idx], nextVisible[targetIdx]] = [nextVisible[targetIdx], nextVisible[idx]];
+                const hidden = fullOrder.filter((id) => !nextVisible.includes(id));
+                const nextFull = [...nextVisible, ...hidden];
+                setDraft((prev) => ({
+                  ...prev,
+                  ui: { ...(prev.ui || {}), navOrder: nextFull },
+                }));
+                haptic('light');
+              };
+
+              return (
+                <div className="card">
+                  <div className="card-header" style={{ marginBottom: 4 }}>
+                    <span className="card-title">🧭 导航顺序</span>
+                  </div>
+                  <div className="row-desc wrap" style={{ marginBottom: 10 }}>
+                    第一个是打开面板时的默认页；访客看不到的页面会自动跳过
+                  </div>
+                  <div className="nav-order-list">
+                    {visibleOrder.map((id, idx) => {
+                      const info = navMeta[id] || { label: id, note: '' };
+                      return (
+                        <div className="nav-order-row" key={id}>
+                          <div className="nav-order-left">
+                            <span className="nav-order-idx">{idx + 1}</span>
+                            <span className="nav-order-label">{info.label}</span>
+                            {idx === 0 && (
+                              <span className="pill rose" style={{ padding: '2px 7px', fontSize: 10 }}>
+                                默认页
+                              </span>
+                            )}
+                            {info.note && (
+                              <span className="pill" style={{ padding: '2px 7px', fontSize: 10 }}>
+                                {info.note}
+                              </span>
+                            )}
+                          </div>
+                          <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                            <button
+                              type="button"
+                              className="icon-btn"
+                              disabled={idx === 0}
+                              title="上移"
+                              aria-label={`上移 ${info.label}`}
+                              onClick={() => moveNavItem(idx, -1)}
+                            >
+                              <ArrowUp size={13} />
+                            </button>
+                            <button
+                              type="button"
+                              className="icon-btn"
+                              disabled={idx === visibleOrder.length - 1}
+                              title="下移"
+                              aria-label={`下移 ${info.label}`}
+                              onClick={() => moveNavItem(idx, 1)}
+                            >
+                              <ArrowDown size={13} />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* Promo & Referral Links Helper (Section 8) */}
             <div className="card">
@@ -2051,31 +2191,168 @@ export default function SettingsDrawer({
                   </div>
                 )}
 
-                <div className="field" style={{ marginTop: 10 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
-                    <label className="field-label" style={{ margin: 0 }}>
-                      广告屏蔽关键词（自动去零宽/全角/同形字混淆）
-                    </label>
-                    <button
-                      type="button"
-                      className="pill rose"
-                      style={{ cursor: 'pointer', fontSize: 11, padding: '3px 8px' }}
-                      onClick={() => {
-                        const preset = 'USDT, 跑分, 博彩, 赌场, 棋牌, 机场, 翻墙节点, 承兑, 兼职日结, 代收代付, 私聊领福利';
-                        const cur = (draft.pmBot.blockedKeywords || '').trim();
-                        updateField('pmBot', 'blockedKeywords', cur ? `${cur}, ${preset}` : preset);
-                        onToast('已填入常见广告屏蔽词');
-                      }}
-                    >
-                      + 填入常见词
-                    </button>
+                {(() => {
+                  const prob = {
+                    ...defaultProbation,
+                    ...(draft.pmBot.probation || {}),
+                  };
+                  const probEnabled = prob.enabled !== false;
+                  return (
+                    <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+                      <div className="list-row" style={{ paddingTop: 0 }}>
+                        <div className="row-main">
+                          <div className="row-title" style={{ fontSize: 13 }}>🛡️ 新访客观察期</div>
+                          <div className="row-desc wrap">
+                            刚通过验证的访客，前几条消息如果带链接、@用户名、联系方式或是转发的，会先扣下等你审核，不会丢失。
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={probEnabled}
+                          className={`switch ${probEnabled ? 'on' : ''}`}
+                          onClick={() => updateProbation({ enabled: !probEnabled })}
+                        >
+                          <span className="switch-knob" />
+                        </button>
+                      </div>
+
+                      {probEnabled && (
+                        <div
+                          style={{
+                            background: 'var(--bg-subtle)',
+                            borderRadius: 14,
+                            padding: 10,
+                            marginTop: 8,
+                          }}
+                        >
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
+                            <div className="field" style={{ marginBottom: 0 }}>
+                              <label className="field-label">观察条数（1–20 条）</label>
+                              <input
+                                className="input"
+                                type="number"
+                                min="1"
+                                max="20"
+                                value={prob.maxMessages}
+                                onChange={(e) =>
+                                  updateProbation({
+                                    maxMessages: e.target.value === '' ? '' : Number(e.target.value),
+                                  })
+                                }
+                              />
+                            </div>
+                            <div className="field" style={{ marginBottom: 0 }}>
+                              <label className="field-label">观察时长（1–168 小时）</label>
+                              <input
+                                className="input"
+                                type="number"
+                                min="1"
+                                max="168"
+                                value={prob.hours}
+                                onChange={(e) =>
+                                  updateProbation({
+                                    hours: e.target.value === '' ? '' : Number(e.target.value),
+                                  })
+                                }
+                              />
+                            </div>
+                          </div>
+                          <div className="field" style={{ marginBottom: 0 }}>
+                            <label className="field-label">链接白名单域名（每行一个，自动匹配子域名）</label>
+                            <textarea
+                              className="textarea"
+                              rows={2}
+                              value={probationDomainsText}
+                              onChange={(e) => {
+                                const nextText = e.target.value;
+                                setProbationDomainsText(nextText);
+                                const parsed = nextText
+                                  .split(/[\r\n,，;；]+/)
+                                  .map((s) => s.trim())
+                                  .filter(Boolean);
+                                updateProbation({ allowDomains: parsed });
+                              }}
+                              placeholder={'例如：\ngithub.com\nexample.com'}
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                <div className="field" style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+                  <label className="field-label" style={{ marginBottom: 8 }}>
+                    广告屏蔽关键词（自动去零宽/全角/同形字混淆）
+                  </label>
+
+                  <div className="kw-preset-box">
+                    {KEYWORD_PRESET_GROUPS.map((group) => {
+                      const rawKw = draft.pmBot.blockedKeywords || '';
+                      const allAdded = group.keywords.every((kw) => hasBlockedKeyword(rawKw, kw));
+                      return (
+                        <div className="kw-preset-group" key={group.id}>
+                          <div className="kw-preset-group-head">
+                            <span className="kw-preset-group-label">{group.label}</span>
+                            <button
+                              type="button"
+                              className="kw-preset-group-add"
+                              disabled={allAdded}
+                              onClick={() => {
+                                const res = addBlockedKeywordGroup(rawKw, group.keywords, BLOCKED_KEYWORD_MAX_LENGTH);
+                                updateField('pmBot', 'blockedKeywords', res.value);
+                                haptic('light');
+                                if (res.truncated) {
+                                  onToast(`已达 ${BLOCKED_KEYWORD_MAX_LENGTH} 字符上限，仅添加部分预设词`);
+                                } else if (res.addedCount > 0) {
+                                  onToast(`已添加「${group.label}」${res.addedCount} 个词`);
+                                }
+                              }}
+                            >
+                              {allAdded ? '已全添加' : '+ 整组添加'}
+                            </button>
+                          </div>
+                          <div className="kw-preset-pills">
+                            {group.keywords.map((kw) => {
+                              const active = hasBlockedKeyword(rawKw, kw);
+                              return (
+                                <button
+                                  key={kw}
+                                  type="button"
+                                  className={`kw-preset-pill ${active ? 'active' : ''}`}
+                                  aria-pressed={active}
+                                  onClick={() => {
+                                    const res = toggleBlockedKeyword(rawKw, kw, BLOCKED_KEYWORD_MAX_LENGTH);
+                                    if (res.truncated) {
+                                      onToast(`已达 ${BLOCKED_KEYWORD_MAX_LENGTH} 字符上限，无法继续添加`);
+                                      return;
+                                    }
+                                    updateField('pmBot', 'blockedKeywords', res.value);
+                                    haptic('light');
+                                  }}
+                                >
+                                  {active ? '✓ ' : '+ '}
+                                  {kw}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
+
                   <textarea
                     className="textarea"
+                    maxLength={BLOCKED_KEYWORD_MAX_LENGTH}
                     value={draft.pmBot.blockedKeywords || ''}
                     onChange={(e) => updateField('pmBot', 'blockedKeywords', e.target.value)}
-                    placeholder="逗号或换行分隔，例如：USDT, 赌场, 机场, 跑分"
+                    placeholder="逗号或换行分隔，可点上方预设快速加入，或手动填写广告特有短语"
                   />
+                  <div className="row-desc wrap" style={{ marginTop: 6 }}>
+                    命中的消息会被直接丢弃，你和对方都不会收到提示。建议只添加广告特有的短语；熟人可设为永久信任，不受关键词限制。
+                  </div>
                 </div>
               </div>
             </div>

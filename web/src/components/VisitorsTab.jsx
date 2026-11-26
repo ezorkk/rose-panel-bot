@@ -15,9 +15,11 @@ import {
   Save,
   Search,
   Send,
+  ShieldCheck,
   Star,
   Trash2,
   Unlock,
+  Users,
   X,
 } from 'lucide-react';
 import { apiRequest, formatTimeAgo } from '../lib/api.js';
@@ -44,18 +46,31 @@ const STATUS_META = {
   pending: { label: '待验证', tone: '' },
 };
 
+const PROBATION_REASON_LABELS = {
+  link: '含链接',
+  forwarded: '转发消息',
+  mention: '含 @用户名',
+  contact: '含联系方式',
+};
+
 export default function VisitorsTab({
   initialVisitorId = '',
+  initialFilter = '',
   initialVisitStats = null,
+  initialBlockedSpamCount = 0,
+  initialBlockedToday = 0,
   onClearInitial,
+  onClearInitialFilter,
+  onStatsSync,
   onToast,
 }) {
   const [visitors, setVisitors] = useState([]);
-  const [stats, setStats] = useState({ total: 0, active: 0, trusted: 0, banned: 0, closed: 0 });
+  const [stats, setStats] = useState({ total: 0, active: 0, trusted: 0, banned: 0, closed: 0, pendingReview: 0 });
   const [sourceStats, setSourceStats] = useState([]);
   const [visitStats, setVisitStats] = useState(initialVisitStats);
-  const [blockedSpamCount, setBlockedSpamCount] = useState(0);
-  const [filter, setFilter] = useState('all');
+  const [blockedSpamCount, setBlockedSpamCount] = useState(initialBlockedSpamCount);
+  const [blockedToday, setBlockedToday] = useState(initialBlockedToday);
+  const [filter, setFilter] = useState(() => initialFilter || 'all');
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
 
@@ -109,12 +124,27 @@ export default function VisitorsTab({
       if (typeof res.blockedSpamCount === 'number') {
         setBlockedSpamCount(res.blockedSpamCount);
       }
+      if (typeof res.blockedToday === 'number') {
+        setBlockedToday(res.blockedToday);
+      }
+      onStatsSync?.({
+        visitorSummary: res.stats || null,
+        pendingReviewCount: Number(res.stats?.pendingReview || 0),
+        blockedSpamCount: typeof res.blockedSpamCount === 'number' ? res.blockedSpamCount : undefined,
+        blockedToday: typeof res.blockedToday === 'number' ? res.blockedToday : undefined,
+      });
     } catch (err) {
       onToast(err.message);
     } finally {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (!initialFilter) return;
+    setFilter(initialFilter);
+    onClearInitialFilter?.();
+  }, [initialFilter]);
 
   useEffect(() => {
     const timer = setTimeout(() => loadList(search, filter), 160);
@@ -363,6 +393,33 @@ export default function VisitorsTab({
     loadVisitorHistory(activeVisitor.userId);
   };
 
+  const handleReview = async (action) => {
+    if (!activeVisitor) return;
+    try {
+      setActionBusy(true);
+      haptic(action === 'ban' ? 'warning' : 'success');
+      const res = await apiRequest(`/api/admin/visitors/${encodeURIComponent(activeVisitor.userId)}/review`, {
+        method: 'POST',
+        body: { action },
+      });
+      if (res.visitor) {
+        setActiveVisitor(res.visitor);
+      }
+      if (res.alreadyHandled) {
+        onToast('该访客的待审核消息已处理');
+      } else if (action === 'approve') {
+        onToast(`✅ 已放行并补发 ${res.deliveredCount || 0} 条消息`);
+      } else {
+        onToast('🚫 已拉黑该访客');
+      }
+      loadList(search, filter);
+    } catch (err) {
+      onToast(err.message);
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
   const runAction = async (action, extra = {}) => {
     if (!activeVisitor) return;
     try {
@@ -438,25 +495,31 @@ export default function VisitorsTab({
 
   return (
     <>
-      {blockedSpamCount > 0 && (
-        <div
-          className="card"
-          style={{
-            padding: '10px 14px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            background: 'var(--accent-soft)',
-            borderColor: 'transparent',
-            fontSize: 12,
-            color: 'var(--accent)',
-            fontWeight: 600,
-          }}
-        >
-          <span>🛡️ 四层反广告护盾运行中</span>
-          <span>已累计拦截 {blockedSpamCount} 次骚扰/广告</span>
+      <div className="owner-stat-grid" style={{ marginBottom: 12 }}>
+        <div className="owner-stat-tile rose" style={{ cursor: 'default' }}>
+          <div className="owner-stat-label">
+            <ShieldCheck size={13} /> 已拦截广告
+          </div>
+          <div className="owner-stat-value">
+            <span className="owner-stat-num">{blockedSpamCount || 0}</span>
+            <span className="owner-stat-unit">次（累计）</span>
+          </div>
+          <div className="owner-stat-sub">今日拦截 {blockedToday || 0} 次</div>
         </div>
-      )}
+
+        <div className="owner-stat-tile" style={{ cursor: 'default' }}>
+          <div className="owner-stat-label">
+            <Users size={13} /> 活跃访客
+          </div>
+          <div className="owner-stat-value">
+            <span className="owner-stat-num">{stats.active || 0}</span>
+            <span className="owner-stat-unit">位</span>
+          </div>
+          <div className="owner-stat-sub">
+            信任 {stats.trusted || 0} · 封禁 {stats.banned || 0}
+          </div>
+        </div>
+      </div>
 
       {(visitStats || sourceStats.length > 0) && (
         <div className="card visitor-insight-bar">
@@ -500,6 +563,7 @@ export default function VisitorsTab({
       <div className="chip-row">
         {[
           { id: 'all', label: `全部 ${stats.total}` },
+          { id: 'pending', label: '待审核', count: stats.pendingReview || 0, isPending: true },
           { id: 'active', label: `活跃 ${stats.active}` },
           { id: 'trusted', label: `信任 ${stats.trusted}` },
           { id: 'banned', label: `已拉黑 ${stats.banned}` },
@@ -508,9 +572,15 @@ export default function VisitorsTab({
           <button
             key={item.id}
             className={`chip ${filter === item.id ? 'active' : ''}`}
+            style={item.isPending ? { display: 'inline-flex', alignItems: 'center', gap: 5 } : undefined}
             onClick={() => setFilter(item.id)}
           >
-            {item.label}
+            <span>{item.label}</span>
+            {item.isPending && (
+              <span className={`chip-badge ${item.count > 0 ? 'alert' : ''}`}>
+                {item.count}
+              </span>
+            )}
           </button>
         ))}
       </div>
@@ -552,9 +622,18 @@ export default function VisitorsTab({
                     <span className={`pill ${meta.tone}`} style={{ padding: '2px 8px', fontSize: 11 }}>
                       {meta.label}
                     </span>
+                    {v.pendingReview?.length > 0 && (
+                      <span className="pill red" style={{ padding: '2px 7px', fontSize: 10 }}>
+                        待审核 {v.pendingReview.length}
+                      </span>
+                    )}
                   </div>
                   <div className="row-desc">
-                    {v.note ? `📝 ${v.note}` : v.last_preview || (v.username ? `@${v.username}` : `UID ${v.userId}`)}
+                    {v.note
+                      ? `📝 ${v.note}`
+                      : v.last_preview ||
+                        v.pendingReview?.[v.pendingReview.length - 1]?.preview ||
+                        (v.username ? `@${v.username}` : `UID ${v.userId}`)}
                   </div>
                 </div>
                 <div style={{ textAlign: 'right', flexShrink: 0 }}>
@@ -926,6 +1005,52 @@ export default function VisitorsTab({
             {/* SUB-VIEW 0: PROFILE & MODERATION */}
             {drawerView === 'profile' && (
               <>
+                {Array.isArray(activeVisitor.pendingReview) && activeVisitor.pendingReview.length > 0 && (
+                  <div className="card review-card">
+                    <div className="review-card-head">
+                      <span>🛡️ 新访客消息待审核（{activeVisitor.pendingReview.length} 条）</span>
+                      <span className="review-card-hint">放行后按顺序补发</span>
+                    </div>
+                    <div className="review-item-list">
+                      {activeVisitor.pendingReview.map((item, idx) => (
+                        <div className="review-item" key={`${item.pmMessageId || idx}-${idx}`}>
+                          <div className="review-item-meta">
+                            <div className="review-reason-tags">
+                              {(item.reasons || []).map((r) => (
+                                <span key={r} className="pill amber" style={{ padding: '1px 7px', fontSize: 10 }}>
+                                  {PROBATION_REASON_LABELS[r] || r}
+                                </span>
+                              ))}
+                            </div>
+                            <span className="review-item-time">
+                              {formatTimeAgo(typeof item.at === 'number' ? new Date(item.at).toISOString() : item.at)}
+                            </span>
+                          </div>
+                          <div className="review-item-text">{item.preview || '[消息]'}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="review-actions">
+                      <button
+                        type="button"
+                        className="btn btn-success btn-block"
+                        disabled={actionBusy}
+                        onClick={() => handleReview('approve')}
+                      >
+                        ✅ 放行
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-danger btn-block"
+                        disabled={actionBusy}
+                        onClick={() => handleReview('ban')}
+                      >
+                        🚫 拉黑
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 <div className="card" style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
                   <Avatar userId={activeVisitor.userId} name={activeVisitor.displayName} size="lg" />
                   <div style={{ flex: 1, minWidth: 0 }}>

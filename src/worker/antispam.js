@@ -29,6 +29,99 @@ const HOMOGLYPH_MAP = {
 };
 
 const SPAM_STATS_KEY = 'stats:blocked_spam';
+export const BLOCKED_DAILY_TTL_SECONDS = 3 * 86400; // 3 days
+
+export function getBlockedDateKey(nowDate = new Date(), offsetHours = 8) {
+  const safeOffset = Number.isFinite(Number(offsetHours)) ? Number(offsetHours) : 8;
+  const date = nowDate instanceof Date ? nowDate : new Date(nowDate);
+  const shifted = new Date(date.getTime() + safeOffset * 3600 * 1000);
+  const year = shifted.getUTCFullYear();
+  const month = String(shifted.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(shifted.getUTCDate()).padStart(2, '0');
+  return `${year}${month}${day}`;
+}
+
+export const PROBATION_REASON_LABELS = {
+  link: '含链接',
+  forwarded: '转发消息',
+  mention: '含 @用户名',
+  contact: '含联系方式',
+};
+
+const LINK_TOKEN_RE = /(?:https?:\/\/|t\.me\/|telegram\.me\/|wa\.me\/)[^\s<>"'`\u4e00-\u9fa5，。！？；：】）)]+/gi;
+const MENTION_RE = /(?:^|[^a-z0-9_.])@[a-z0-9_]{5,}/i;
+const PHONE_NUMBER_RE = /(?:^|[^\d])(\d(?:[ \t-]{0,2}\d){6,})(?=$|[^\d])/g;
+const ISO_DATE_RE = /^(?:19|20)\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])$/;
+const WECHAT_CONTACT_RE =
+  /(?:微信(?:号)?(?:[^\S\n]|号|是|为|[:：=+\-—，,、]){0,6}[a-z0-9_][a-z0-9_-]{3,}|(?<![a-z0-9])(?:vx|wx)(?:(?:[^\S\n]|号|是|为|[:：=+\-—，,、]){1,6}[a-z0-9_][a-z0-9_-]{3,}|_[a-z0-9_-]{3,}|[0-9][a-z0-9_-]{4,})|(?:加我|联系我)(?:[^\S\n]|号|是|为|微信|vx|wx|qq|tg|[:：=+\-—，,、]){0,8}[a-z0-9][a-z0-9_-]{4,})/i;
+
+export function formatProbationReasons(reasons = []) {
+  const labels = (Array.isArray(reasons) ? reasons : [])
+    .map((r) => PROBATION_REASON_LABELS[r] || String(r || ''))
+    .filter(Boolean);
+  return labels.join(' · ') || '可疑内容';
+}
+
+export function normalizeDomain(raw = '') {
+  let s = String(raw || '').trim().toLowerCase();
+  if (!s) return '';
+  s = s.replace(/^https?:\/\//, '');
+  s = s.replace(/[/?#].*$/, '');
+  s = s.replace(/:\d+$/, '');
+  s = s.replace(/^\*\./, '').replace(/^\.+|\.+$/g, '');
+  return s;
+}
+
+export function isDomainAllowed(hostname, allowDomains = []) {
+  const host = normalizeDomain(hostname);
+  if (!host) return false;
+  for (const rawAllowed of Array.isArray(allowDomains) ? allowDomains : []) {
+    const allowed = normalizeDomain(rawAllowed);
+    if (!allowed) continue;
+    if (host === allowed || host.endsWith(`.${allowed}`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function parseLinkHostname(raw) {
+  const trimmed = String(raw || '').trim().replace(/[),.;!?，。！？；：】）]+$/, '');
+  if (!trimmed) return '';
+  let withScheme = trimmed;
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(withScheme)) {
+    if (/^[a-z][a-z0-9+.-]*:/i.test(withScheme)) return '';
+    withScheme = `https://${withScheme}`;
+  }
+  try {
+    const u = new URL(withScheme);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
+    return String(u.hostname || '').toLowerCase().replace(/\.$/, '');
+  } catch {
+    return '';
+  }
+}
+
+function stripAllowedUrls(text, allowDomains) {
+  if (!text || !Array.isArray(allowDomains) || allowDomains.length === 0) return text;
+  return String(text).replace(LINK_TOKEN_RE, (match) => {
+    const host = parseLinkHostname(match);
+    return host && isDomainAllowed(host, allowDomains) ? ' ' : match;
+  });
+}
+
+function hasPhoneNumber(text) {
+  if (!text) return false;
+  PHONE_NUMBER_RE.lastIndex = 0;
+  let m;
+  while ((m = PHONE_NUMBER_RE.exec(text)) !== null) {
+    const candidate = String(m[1] || '').trim();
+    if (!candidate) continue;
+    if (ISO_DATE_RE.test(candidate)) continue;
+    return true;
+  }
+  return false;
+}
 
 /**
  * Strips invisible zero-width characters, folds full-width Unicode (NFKC),
@@ -169,15 +262,108 @@ export function assessIncomingRisk(msg = {}, pmBotConfig = {}) {
   };
 }
 
-export async function recordBlockedSpam(env) {
+/**
+ * Evaluates whether a verified visitor's message during the new-visitor probation window
+ * should be held for admin review.
+ * Suspicious signals (any triggers hold):
+ *   - Non-whitelisted link (including t.me / telegram.me / wa.me / url & text_link entities)
+ *   - Forwarded message
+ *   - @username mention (mention entity or @[A-Za-z0-9_]{5,})
+ *   - Contact info (7+ digit phone number allowing spaces/hyphens, or WeChat/VX/wx/加我/联系我 + handle)
+ * Media alone (photo/video/file/sticker) is intentionally NOT suspicious after verification.
+ */
+export function assessProbationRisk(msg = {}, pmBotConfig = {}) {
+  const baseRisk = assessIncomingRisk(msg, pmBotConfig);
+  const rawText = String(msg.text || msg.caption || '');
+  const textInfo = normalizeAntiSpamText(rawText);
+  const entities = [...(msg.entities || []), ...(msg.caption_entities || [])];
+  const allowDomains = Array.isArray(pmBotConfig?.probation?.allowDomains)
+    ? pmBotConfig.probation.allowDomains
+    : [];
+
+  // 1. Links: extract from entities, raw text (catches IDN/homoglyph spoofing), and normalized text
+  const linkCandidates = [];
+  for (const ent of entities) {
+    if (ent.type === 'text_link') {
+      linkCandidates.push(String(ent.url || ''));
+    } else if (ent.type === 'url') {
+      if (typeof ent.offset === 'number' && typeof ent.length === 'number') {
+        linkCandidates.push(rawText.slice(ent.offset, ent.offset + ent.length));
+      } else {
+        linkCandidates.push('');
+      }
+    }
+  }
+  const rawMatches = rawText.match(LINK_TOKEN_RE) || [];
+  const normMatches = textInfo.normalized.match(LINK_TOKEN_RE) || [];
+  linkCandidates.push(...rawMatches, ...normMatches);
+
+  let hasUnallowedLink = false;
+  if (linkCandidates.length > 0) {
+    for (const candidate of linkCandidates) {
+      const host = parseLinkHostname(candidate);
+      if (!host || !isDomainAllowed(host, allowDomains)) {
+        hasUnallowedLink = true;
+        break;
+      }
+    }
+  }
+
+  // Strip whitelisted URLs before mention / contact checks so allowed links with digits or @paths don't false-trigger
+  const rawWithoutAllowed = stripAllowedUrls(rawText, allowDomains);
+  const normWithoutAllowed = stripAllowedUrls(textInfo.normalized, allowDomains);
+
+  // 2. Forwarded message
+  const isForwarded = baseRisk.isForwarded;
+
+  // 3. @username mention
+  const hasEntityMention = entities.some((e) => e.type === 'mention');
+  const hasMention = hasEntityMention || MENTION_RE.test(rawWithoutAllowed) || MENTION_RE.test(normWithoutAllowed);
+
+  // 4. Contact info (phone number or WeChat/VX/wx/加我/联系我 + account-like token)
+  const hasContact = hasPhoneNumber(normWithoutAllowed) || WECHAT_CONTACT_RE.test(normWithoutAllowed);
+
+  const reasons = [];
+  if (hasUnallowedLink) reasons.push('link');
+  if (isForwarded) reasons.push('forwarded');
+  if (hasMention) reasons.push('mention');
+  if (hasContact) reasons.push('contact');
+
+  return {
+    isSuspicious: reasons.length > 0,
+    hasLink: hasUnallowedLink,
+    isForwarded,
+    hasMention,
+    hasContact,
+    reasons,
+  };
+}
+
+export async function recordBlockedSpam(env, config = null, nowDate = new Date()) {
   if (!env.TOPIC_MAP) return 0;
-  const cur = Number((await env.TOPIC_MAP.get(SPAM_STATS_KEY)) || 0);
-  const next = cur + 1;
-  await env.TOPIC_MAP.put(SPAM_STATS_KEY, String(next));
-  return next;
+  const offsetHours = config?.community?.timezoneOffsetHours ?? 8;
+  const dailyKey = `stats:blocked:${getBlockedDateKey(nowDate, offsetHours)}`;
+  const [curTotalRaw, curDailyRaw] = await Promise.all([
+    env.TOPIC_MAP.get(SPAM_STATS_KEY),
+    env.TOPIC_MAP.get(dailyKey),
+  ]);
+  const nextTotal = Number(curTotalRaw || 0) + 1;
+  const nextDaily = Number(curDailyRaw || 0) + 1;
+  await Promise.all([
+    env.TOPIC_MAP.put(SPAM_STATS_KEY, String(nextTotal)),
+    env.TOPIC_MAP.put(dailyKey, String(nextDaily), { expirationTtl: BLOCKED_DAILY_TTL_SECONDS }),
+  ]);
+  return nextTotal;
 }
 
 export async function getBlockedSpamCount(env) {
   if (!env.TOPIC_MAP) return 0;
   return Number((await env.TOPIC_MAP.get(SPAM_STATS_KEY)) || 0);
+}
+
+export async function getBlockedSpamToday(env, config = null, nowDate = new Date()) {
+  if (!env.TOPIC_MAP) return 0;
+  const offsetHours = config?.community?.timezoneOffsetHours ?? 8;
+  const dailyKey = `stats:blocked:${getBlockedDateKey(nowDate, offsetHours)}`;
+  return Number((await env.TOPIC_MAP.get(dailyKey)) || 0);
 }
