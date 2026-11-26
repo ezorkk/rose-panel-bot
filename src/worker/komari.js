@@ -10,6 +10,9 @@
 // returning `{ nodes, protocol }`, then register it in PROBE_PROVIDERS below.
 
 const PROBE_CACHE_KEY = 'cache:komari_probe';
+export const KOMARI_LATENCY_TIMEOUT_MS = 4000;
+const MAX_LATENCY_LINES = 6;
+const MAX_LATENCY_NAME_CHARS = 32;
 
 function normalizeBaseUrl(rawUrl) {
   if (!rawUrl) return '';
@@ -293,12 +296,154 @@ export function normalizeNodeMetrics(nodeMeta = {}, status = {}) {
     load1: Number.isFinite(load1) ? Number(load1.toFixed(2)) : 0,
     uptime,
     updatedAt: status?.updated_at || status?.time || nodeMeta?.updated_at || null,
+    latency: [],
   };
 }
 
 function roundPct(n) {
   if (!Number.isFinite(n) || n < 0) return 0;
   return Math.min(100, Number(n.toFixed(1)));
+}
+
+function roundLatencyMs(val) {
+  if (val === null || val === undefined || val === '') return null;
+  const n = Number(val);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.round(n);
+}
+
+function roundLossPct(val) {
+  const n = Number(val);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.min(100, Number(n.toFixed(1)));
+}
+
+function truncateChars(str, maxChars) {
+  return Array.from(String(str || '').trim())
+    .slice(0, maxChars)
+    .join('');
+}
+
+/**
+ * Maps Komari `public:getPingMetricStats` result (and optional `public:getPublicPingTasks`
+ * weights) into a `Map<uuid, LatencyLine[]>`, sorted by task weight or name, capped at 6 lines.
+ */
+export function normalizeKomariLatencyMap(statsResult, tasksResult = null) {
+  const rawStats = Array.isArray(statsResult?.stats) ? statsResult.stats : [];
+  if (rawStats.length === 0) return new Map();
+
+  const taskWeightMap = new Map();
+  const rawTasks = Array.isArray(tasksResult)
+    ? tasksResult
+    : Array.isArray(tasksResult?.tasks)
+      ? tasksResult.tasks
+      : [];
+  for (const task of rawTasks) {
+    if (!task || task.id === undefined || task.id === null) continue;
+    const w = Number(task.weight);
+    if (Number.isFinite(w)) {
+      taskWeightMap.set(String(task.id), w);
+    }
+  }
+
+  const byEntity = new Map();
+  for (const row of rawStats) {
+    if (!row || typeof row !== 'object') continue;
+    const entityId = String(row.entity_id || '').trim();
+    if (!entityId) continue;
+
+    const rawName = row.name || (row.task_id != null ? `Task ${row.task_id}` : '');
+    const name = truncateChars(rawName, MAX_LATENCY_NAME_CHARS);
+    if (!name) continue;
+
+    const taskKey = row.task_id !== undefined && row.task_id !== null ? String(row.task_id) : '';
+    const inlineWeight = row.weight !== undefined && row.weight !== null ? Number(row.weight) : NaN;
+    const weight = taskWeightMap.has(taskKey)
+      ? taskWeightMap.get(taskKey)
+      : Number.isFinite(inlineWeight)
+        ? inlineWeight
+        : Infinity;
+
+    const item = {
+      name,
+      type: truncateChars(row.type || '', 16),
+      avg: roundLatencyMs(row.avg),
+      min: roundLatencyMs(row.min),
+      max: roundLatencyMs(row.max),
+      latest: roundLatencyMs(row.latest),
+      loss: roundLossPct(row.loss),
+      _weight: weight,
+    };
+
+    if (!byEntity.has(entityId)) byEntity.set(entityId, []);
+    byEntity.get(entityId).push(item);
+  }
+
+  const result = new Map();
+  for (const [entityId, list] of byEntity.entries()) {
+    list.sort((a, b) => {
+      if (a._weight !== b._weight) return a._weight - b._weight;
+      return a.name.localeCompare(b.name, 'zh-CN');
+    });
+    result.set(
+      entityId,
+      list.slice(0, MAX_LATENCY_LINES).map(({ _weight, ...clean }) => clean)
+    );
+  }
+  return result;
+}
+
+async function fetchKomariLatencyStats(rpcUrl, headers) {
+  const rpcHeaders = { ...headers, 'Content-Type': 'application/json' };
+  const [statsSettled, tasksSettled] = await Promise.allSettled([
+    fetchJsonWithTimeout(
+      rpcUrl,
+      {
+        method: 'POST',
+        headers: rpcHeaders,
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'public:getPingMetricStats',
+          params: { hours: 1 },
+          id: 1,
+        }),
+      },
+      KOMARI_LATENCY_TIMEOUT_MS
+    ),
+    fetchJsonWithTimeout(
+      rpcUrl,
+      {
+        method: 'POST',
+        headers: rpcHeaders,
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'public:getPublicPingTasks',
+          params: {},
+          id: 2,
+        }),
+      },
+      KOMARI_LATENCY_TIMEOUT_MS
+    ),
+  ]);
+
+  if (statsSettled.status !== 'fulfilled' || !statsSettled.value || typeof statsSettled.value !== 'object') {
+    return { latencyMap: new Map(), unsupported: false };
+  }
+
+  const statsJson = statsSettled.value;
+  if (statsJson.error) {
+    return { latencyMap: new Map(), unsupported: true };
+  }
+
+  const tasksResult =
+    tasksSettled.status === 'fulfilled' && tasksSettled.value && !tasksSettled.value.error
+      ? tasksSettled.value.result
+      : null;
+
+  return {
+    latencyMap: normalizeKomariLatencyMap(statsJson.result, tasksResult),
+    unsupported: false,
+  };
 }
 
 /**
@@ -331,10 +476,26 @@ async function fetchViaKomariRpc2(baseUrl, headers) {
       ? Object.entries(rawNodes).map(([uuid, meta]) => ({ uuid, ...meta }))
       : [];
 
-  return nodeList.map((node) => {
+  let latencyMap = new Map();
+  let latencyUnsupported = false;
+  if (nodeList.length > 0) {
+    try {
+      const latRes = await fetchKomariLatencyStats(rpcUrl, headers);
+      latencyMap = latRes.latencyMap;
+      latencyUnsupported = latRes.unsupported;
+    } catch {
+      // Latency stats are strictly best-effort and must never fail node fetching
+    }
+  }
+
+  const nodes = nodeList.map((node) => {
     const latest = statusMap?.[node.uuid] || {};
-    return normalizeNodeMetrics(node, latest);
+    const normalized = normalizeNodeMetrics(node, latest);
+    const latency = latencyMap.get(normalized.uuid) || [];
+    return { ...normalized, latency };
   });
+
+  return { nodes, latencyUnsupported };
 }
 
 /**
@@ -402,6 +563,10 @@ export function getDemoKomariNodes() {
       load1: 0.24,
       uptime: 48 * 86400 + 11400,
       updatedAt: new Date().toISOString(),
+      latency: [
+        { name: '浙江移动', type: 'tcp', avg: 62, min: 56, max: 78, latest: 60, loss: 0 },
+        { name: '浙江电信', type: 'tcp', avg: 148, min: 121, max: 192, latest: 144, loss: 1.5 },
+      ],
     },
     {
       uuid: 'demo-hk-cmi',
@@ -429,6 +594,10 @@ export function getDemoKomariNodes() {
       load1: 0.68,
       uptime: 21 * 86400 + 3600,
       updatedAt: new Date().toISOString(),
+      latency: [
+        { name: '广东移动', type: 'tcp', avg: 34, min: 29, max: 46, latest: 33, loss: 0 },
+        { name: '上海联通', type: 'tcp', avg: 88, min: 76, max: 112, latest: 85, loss: 0 },
+      ],
     },
     {
       uuid: 'demo-us-lax',
@@ -456,6 +625,10 @@ export function getDemoKomariNodes() {
       load1: 0.11,
       uptime: 92 * 86400,
       updatedAt: new Date().toISOString(),
+      latency: [
+        { name: '浙江移动', type: 'tcp', avg: 168, min: 152, max: 204, latest: 165, loss: 0 },
+        { name: '浙江电信', type: 'tcp', avg: 224, min: 185, max: 298, latest: 236, loss: 12.5 },
+      ],
     },
     {
       uuid: 'demo-de-fra',
@@ -483,6 +656,7 @@ export function getDemoKomariNodes() {
       load1: 0,
       uptime: 0,
       updatedAt: null,
+      latency: [],
     },
   ];
 }
@@ -927,11 +1101,12 @@ async function fetchViaGenericJson(baseUrl, headers) {
 async function fetchViaKomari(baseUrl, headers) {
   const httpBase = toHttpUrl(baseUrl);
   try {
-    return { nodes: await fetchViaKomariRpc2(httpBase, headers), protocol: 'rpc2' };
+    const { nodes, latencyUnsupported } = await fetchViaKomariRpc2(httpBase, headers);
+    return { nodes, protocol: 'rpc2', ...(latencyUnsupported ? { latencyUnsupported: true } : {}) };
   } catch (err) {
     if (err?.isRedirectLoop) throw err;
     try {
-      return { nodes: await fetchViaKomariRest(httpBase, headers), protocol: 'rest' };
+      return { nodes: await fetchViaKomariRest(httpBase, headers), protocol: 'rest', latencyUnsupported: true };
     } catch (restErr) {
       throw new Error(`${err?.message || ''} / ${restErr?.message || ''}`);
     }
@@ -1027,11 +1202,13 @@ export async function fetchProbeStatus(env, probeConfig, options = {}) {
   const headers = buildAuthHeaders(probeConfig.apiKey);
   let nodes = null;
   let protocol = providerId;
+  let latencyUnsupported = false;
 
   try {
     const result = await provider.fetch(baseUrl, headers, probeConfig.apiKey);
     nodes = result.nodes;
     protocol = result.protocol || providerId;
+    latencyUnsupported = Boolean(result.latencyUnsupported);
   } catch (err) {
     return {
       configured: true,
@@ -1054,6 +1231,7 @@ export async function fetchProbeStatus(env, probeConfig, options = {}) {
     demo: false,
     provider: providerId,
     protocol,
+    ...(latencyUnsupported ? { latencyUnsupported: true } : {}),
     fetchedAt: new Date().toISOString(),
     publicUrl: probeConfig.publicUrl || toHttpUrl(baseUrl),
     summary: summarizeNodes(nodes),

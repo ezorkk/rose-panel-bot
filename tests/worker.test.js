@@ -68,7 +68,13 @@ import {
 } from '../src/worker/inbox.js';
 import worker, { WEBHOOK_ALLOWED_UPDATES } from '../src/worker/index.js';
 import { apiRequest } from '../web/src/lib/api.js';
-import { fetchKomariStatus, normalizeNodeMetrics } from '../src/worker/komari.js';
+import {
+  fetchKomariStatus,
+  fetchProbeStatus,
+  getDemoKomariNodes,
+  normalizeKomariLatencyMap,
+  normalizeNodeMetrics,
+} from '../src/worker/komari.js';
 import { normalizeStickerObject, parseStickerPackName } from '../src/worker/telegram.js';
 import { renderTurnstileVerifyPage } from '../src/worker/turnstile.js';
 import { checkLatestRelease, compareSemver, syncForkWithUpstream } from '../src/worker/updater.js';
@@ -6985,5 +6991,384 @@ describe('Blocked keyword presets & normalization matching (v1.10)', () => {
     const blockedAdd = toggleBlockedKeyword(nearCap, '稳赚不赔');
     expect(blockedAdd.truncated).toBe(true);
     expect(blockedAdd.value).toBe(nearCap);
+  });
+});
+
+describe('Komari probe latency & packet loss display (v1.11)', () => {
+  const NODE_A = '496c4866-63b6-4025-b90a-bd7b1d0d6fd2';
+  const NODE_B = '8f3e9b11-2a0c-4a1d-8e52-7d3e1c9f0011';
+
+  it('attaches Komari public:getPingMetricStats to matching uuids, rounds values, sorts by task weight or name, caps at 6 lines, and passes auth headers', async () => {
+    const seenAuthHeaders = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (_url, init) => {
+      seenAuthHeaders.push(init?.headers?.Authorization || '');
+      const body = JSON.parse(init.body);
+      if (body.method === 'common:getNodes') {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            result: {
+              [NODE_A]: { name: 'JP-Edge', region: '🇯🇵', mem_total: 2048, disk_total: 40960 },
+              [NODE_B]: { name: 'US-NoPing', region: '🇺🇸', mem_total: 2048, disk_total: 40960 },
+            },
+          }),
+          { status: 200 }
+        );
+      }
+      if (body.method === 'common:getNodesLatestStatus') {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: 2,
+            result: {
+              [NODE_A]: { cpu: 15, ram: 512, disk: 10240, online: true, uptime: 86400 },
+              [NODE_B]: { cpu: 10, ram: 256, disk: 8192, online: true, uptime: 43200 },
+            },
+          }),
+          { status: 200 }
+        );
+      }
+      if (body.method === 'public:getPingMetricStats') {
+        expect(body.params).toEqual({ hours: 1 });
+        return new Response(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            result: {
+              start: '2026-11-26T16:52:15Z',
+              end: '2026-11-26T17:52:15Z',
+              interval_seconds: 60,
+              stats: [
+                {
+                  entity_id: NODE_A,
+                  task_id: '17',
+                  name: '浙江移动',
+                  type: 'tcp',
+                  interval: 300,
+                  total: 12,
+                  valid: 12,
+                  loss: 0,
+                  min: 40.2,
+                  max: 65.4,
+                  avg: 47.166666666666664,
+                  latest: 41.3,
+                  p50: 47.17,
+                  p99: 47.17,
+                  stddev: 0,
+                },
+                {
+                  entity_id: NODE_A,
+                  task_id: '8',
+                  name: '浙江电信',
+                  type: 'tcp',
+                  interval: 300,
+                  total: 12,
+                  valid: 9,
+                  loss: 25.04,
+                  min: 134.6,
+                  max: 310.4,
+                  avg: 218.7,
+                  latest: 135.2,
+                },
+                { entity_id: NODE_A, task_id: '21', name: '上海联通', type: 'tcp', loss: 12.56, min: 70, max: 140, avg: 104.6, latest: 99 },
+                { entity_id: NODE_A, task_id: '22', name: '广东电信', type: 'icmp', loss: 0, min: 55, max: 90, avg: 68.4, latest: 66 },
+                { entity_id: NODE_A, task_id: '23', name: '北京联通', type: 'tcp', loss: 0, min: 80, max: 120, avg: 95.1, latest: 91 },
+                { entity_id: NODE_A, task_id: '24', name: '江苏移动', type: 'tcp', loss: 0, min: 50, max: 88, avg: 61.2, latest: 59 },
+                {
+                  entity_id: NODE_A,
+                  task_id: '25',
+                  name: '第七条超长线路名称用于验证长度上限以及截断逻辑1234567890',
+                  type: 'tcp',
+                  loss: 0,
+                  min: 10,
+                  max: 20,
+                  avg: 15,
+                  latest: 15,
+                },
+              ],
+            },
+          }),
+          { status: 200 }
+        );
+      }
+      if (body.method === 'public:getPublicPingTasks') {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: 2,
+            result: [
+              { id: 8, name: '浙江电信', type: 'tcp', interval: 300, weight: 1, clients: [NODE_A] },
+              { id: 17, name: '浙江移动', type: 'tcp', interval: 300, weight: 2, clients: [NODE_A] },
+              { id: 21, name: '上海联通', type: 'tcp', interval: 300, weight: 3, clients: [NODE_A] },
+              { id: 22, name: '广东电信', type: 'icmp', interval: 300, weight: 4, clients: [NODE_A] },
+              { id: 23, name: '北京联通', type: 'tcp', interval: 300, weight: 5, clients: [NODE_A] },
+              { id: 24, name: '江苏移动', type: 'tcp', interval: 300, weight: 6, clients: [NODE_A] },
+              { id: 25, name: '第七条', type: 'tcp', interval: 300, weight: 7, clients: [NODE_A] },
+            ],
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response(JSON.stringify({ ok: false }), { status: 404 });
+    });
+
+    try {
+      const env = { TOPIC_MAP: createMemoryKV() };
+      const res = await fetchKomariStatus(env, {
+        ...DEFAULT_CONFIG.probe,
+        url: 'https://komari.example.com',
+        apiKey: 'secret-token-123',
+      });
+
+      expect(res.protocol).toBe('rpc2');
+      expect(res.error).toBeUndefined();
+      // Same auth header passed to all Komari requests including ping stats
+      expect(seenAuthHeaders.every((h) => h === 'Bearer secret-token-123')).toBe(true);
+
+      const nodeA = res.nodes.find((n) => n.uuid === NODE_A);
+      const nodeB = res.nodes.find((n) => n.uuid === NODE_B);
+
+      // Node without ping tasks gets empty array
+      expect(nodeB.latency).toEqual([]);
+
+      // Node with 7 tasks is sorted by weight and capped at 6
+      expect(nodeA.latency).toHaveLength(6);
+      expect(nodeA.latency.map((x) => x.name)).toEqual([
+        '浙江电信',
+        '浙江移动',
+        '上海联通',
+        '广东电信',
+        '北京联通',
+        '江苏移动',
+      ]);
+      expect(nodeA.latency[0]).toEqual({
+        name: '浙江电信',
+        type: 'tcp',
+        avg: 219,
+        min: 135,
+        max: 310,
+        latest: 135,
+        loss: 25,
+      });
+      expect(nodeA.latency[1]).toEqual({
+        name: '浙江移动',
+        type: 'tcp',
+        avg: 47,
+        min: 40,
+        max: 65,
+        latest: 41,
+        loss: 0,
+      });
+      expect(nodeA.latency[2].loss).toBe(12.6);
+
+      // Fallback sorting by name and 32-char name truncation when tasks/weights are unavailable
+      const noWeightMap = normalizeKomariLatencyMap({
+        stats: [
+          {
+            entity_id: NODE_A,
+            task_id: '1',
+            name: 'B线路超长名称测试123456789012345678901234567890',
+            type: 'tcp',
+            avg: 80.4,
+            min: 70,
+            max: 90,
+            latest: 79,
+            loss: 0,
+          },
+          {
+            entity_id: NODE_A,
+            task_id: '2',
+            name: 'A线路',
+            type: 'tcp',
+            avg: 50.6,
+            min: 45,
+            max: 60,
+            latest: 51,
+            loss: 0,
+          },
+        ],
+      });
+      const sortedByName = noWeightMap.get(NODE_A);
+      expect(sortedByName[0].name).toBe('A线路');
+      expect(Array.from(sortedByName[1].name).length).toBe(32);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('silently skips latency on JSON-RPC error, HTTP 500, or timeout without turning protocol into error', async () => {
+    const scenarios = [
+      {
+        label: 'jsonrpc-error',
+        respondPing: () =>
+          new Response(
+            JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code: -32601, message: 'Method not found' } }),
+            { status: 200 }
+          ),
+        expectUnsupported: true,
+      },
+      {
+        label: 'http-500',
+        respondPing: () => new Response('Internal Server Error', { status: 500 }),
+        expectUnsupported: false,
+      },
+      {
+        label: 'timeout-abort',
+        respondPing: () => {
+          const err = new Error('The operation was aborted');
+          err.name = 'AbortError';
+          throw err;
+        },
+        expectUnsupported: false,
+      },
+    ];
+
+    for (const sc of scenarios) {
+      const origFetch = globalThis.fetch;
+      globalThis.fetch = vi.fn(async (_url, init) => {
+        const body = JSON.parse(init.body);
+        if (body.method === 'common:getNodes') {
+          return new Response(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: 1,
+              result: { [NODE_A]: { name: `Node-${sc.label}`, region: '🇭🇰', mem_total: 1000, disk_total: 2000 } },
+            }),
+            { status: 200 }
+          );
+        }
+        if (body.method === 'common:getNodesLatestStatus') {
+          return new Response(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: 2,
+              result: { [NODE_A]: { cpu: 12, ram: 400, disk: 800, online: true, uptime: 600 } },
+            }),
+            { status: 200 }
+          );
+        }
+        return sc.respondPing();
+      });
+
+      try {
+        const env = { TOPIC_MAP: createMemoryKV() };
+        const res = await fetchKomariStatus(env, { ...DEFAULT_CONFIG.probe, url: 'https://komari.example.com' });
+        expect(res.protocol).toBe('rpc2');
+        expect(res.error).toBeUndefined();
+        expect(res.nodes).toHaveLength(1);
+        expect(res.nodes[0].latency).toEqual([]);
+        expect(Boolean(res.latencyUnsupported)).toBe(sc.expectUnsupported);
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    }
+  });
+
+  it('keeps latency empty and sends zero latency requests for non-Komari providers', async () => {
+    const requestedUrls = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url) => {
+      requestedUrls.push(String(url));
+      return new Response(
+        JSON.stringify([{ id: 's1', name: 'GenericNode', online: true, cpu: 18, mem_usage: 45, disk_usage: 30 }]),
+        { status: 200 }
+      );
+    });
+
+    try {
+      const env = { TOPIC_MAP: createMemoryKV() };
+      const res = await fetchProbeStatus(env, {
+        ...DEFAULT_CONFIG.probe,
+        provider: 'json',
+        url: 'https://probe.example.com/stats.json',
+      });
+      expect(res.protocol).toBe('json');
+      expect(res.nodes).toHaveLength(1);
+      expect(res.nodes[0].latency).toEqual([]);
+      expect(requestedUrls).toEqual(['https://probe.example.com/stats.json']);
+      expect(requestedUrls.some((u) => u.includes('/api/rpc2') || u.includes('ping'))).toBe(false);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('stores latency inside the single existing cache:komari_probe key with zero extra KV writes, and ships demo latency', async () => {
+    const kv = createMemoryKV();
+    const putSpy = vi.spyOn(kv, 'put');
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.method === 'common:getNodes') {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            result: { [NODE_A]: { name: 'CachedNode', region: '🇯🇵', mem_total: 1000, disk_total: 2000 } },
+          }),
+          { status: 200 }
+        );
+      }
+      if (body.method === 'common:getNodesLatestStatus') {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: 2,
+            result: { [NODE_A]: { cpu: 20, ram: 300, disk: 500, online: true, uptime: 1200 } },
+          }),
+          { status: 200 }
+        );
+      }
+      if (body.method === 'public:getPingMetricStats') {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            result: {
+              stats: [
+                {
+                  entity_id: NODE_A,
+                  task_id: '17',
+                  name: '浙江移动',
+                  type: 'tcp',
+                  loss: 0,
+                  min: 40,
+                  max: 65,
+                  avg: 47.2,
+                  latest: 41,
+                },
+              ],
+            },
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: 2, result: [] }), { status: 200 });
+    });
+
+    try {
+      const env = { TOPIC_MAP: kv };
+      const cfg = { ...DEFAULT_CONFIG.probe, url: 'https://komari.example.com', cacheTtlSeconds: 60 };
+
+      const live = await fetchKomariStatus(env, cfg);
+      expect(live.cached).toBeUndefined();
+      expect(live.nodes[0].latency).toHaveLength(1);
+      // Exactly 1 KV write into the existing cache:komari_probe key
+      expect(putSpy).toHaveBeenCalledTimes(1);
+      expect(putSpy.mock.calls[0][0]).toBe('cache:komari_probe');
+
+      // Second read hits cache with 0 additional KV writes & preserves latency
+      const cached = await fetchKomariStatus(env, cfg);
+      expect(cached.cached).toBe(true);
+      expect(cached.nodes[0].latency).toEqual(live.nodes[0].latency);
+      expect(putSpy).toHaveBeenCalledTimes(1);
+
+      // Demo nodes include realistic latency previews
+      const demoNodes = getDemoKomariNodes();
+      expect(demoNodes.some((n) => Array.isArray(n.latency) && n.latency.length > 0)).toBe(true);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
   });
 });

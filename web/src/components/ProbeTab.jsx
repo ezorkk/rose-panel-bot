@@ -17,6 +17,44 @@ function meterTone(pct) {
   return '';
 }
 
+function latencyTone(avg, loss = 0) {
+  if (avg === null || avg === undefined || (loss >= 100 && avg === 0)) return 'bad';
+  if (avg < 100) return 'good';
+  if (avg <= 200) return 'warn';
+  return 'bad';
+}
+
+function lossTone(loss = 0) {
+  if (loss > 10) return 'bad';
+  if (loss === 0) return 'zero';
+  return '';
+}
+
+function formatLatencyMs(val) {
+  if (val === null || val === undefined || !Number.isFinite(Number(val))) return '—';
+  return `${Math.round(Number(val))} ms`;
+}
+
+function formatAvgLatency(line) {
+  if (!line || line.avg === null || line.avg === undefined || (line.loss >= 100 && line.avg === 0)) {
+    return '—';
+  }
+  return `${Math.round(Number(line.avg))} ms`;
+}
+
+function pickBestLatencyLine(latency) {
+  if (!Array.isArray(latency) || latency.length === 0) return null;
+  let best = null;
+  for (const line of latency) {
+    if (!line || line.avg === null || line.avg === undefined) continue;
+    if (line.loss >= 100 && line.avg === 0) continue;
+    if (!best || line.avg < best.avg) {
+      best = line;
+    }
+  }
+  return best;
+}
+
 export default function ProbeTab({ probeConfig, isAdmin, onOpenSettings, onToast }) {
   const [probe, setProbe] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -225,6 +263,8 @@ export default function ProbeTab({ probeConfig, isAdmin, onOpenSettings, onToast
       ) : (
         filteredNodes.map((node) => {
           const isOpen = expandedId === node.uuid;
+          const latencyLines = Array.isArray(node.latency) ? node.latency : [];
+          const bestLatency = pickBestLatencyLine(latencyLines);
           return (
             <div
               className="card"
@@ -249,25 +289,39 @@ export default function ProbeTab({ probeConfig, isAdmin, onOpenSettings, onToast
                         {node.name}
                       </span>
                     </div>
-                    <div className="row-desc" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <span style={{ color: node.online ? 'var(--green)' : 'var(--red)', fontWeight: 600 }}>
+                    <div className="row-desc" style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                      <span style={{ color: node.online ? 'var(--green)' : 'var(--red)', fontWeight: 600, flexShrink: 0 }}>
                         ● {node.online ? '在线' : '离线'}
                       </span>
-                      {node.online && <span>· {formatUptime(node.uptime)}</span>}
-                      {node.os && <span>· {node.os}</span>}
+                      {node.online && <span style={{ flexShrink: 0 }}>· {formatUptime(node.uptime)}</span>}
+                      {node.os && (
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          · {node.os}
+                        </span>
+                      )}
                     </div>
                   </div>
                 </div>
 
-                <ChevronDown
-                  size={16}
-                  color="var(--text-muted)"
-                  style={{
-                    flexShrink: 0,
-                    transform: isOpen ? 'rotate(180deg)' : 'none',
-                    transition: 'transform 0.16s ease',
-                  }}
-                />
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                  {bestLatency && (
+                    <span
+                      className={`latency-summary-pill ${latencyTone(bestLatency.avg, bestLatency.loss)}`}
+                      title={`最低平均延迟：${bestLatency.name} ${bestLatency.avg} ms`}
+                    >
+                      📶 {bestLatency.avg} ms
+                    </span>
+                  )}
+                  <ChevronDown
+                    size={16}
+                    color="var(--text-muted)"
+                    style={{
+                      flexShrink: 0,
+                      transform: isOpen ? 'rotate(180deg)' : 'none',
+                      transition: 'transform 0.16s ease',
+                    }}
+                  />
+                </div>
               </div>
 
               <div className="metric-grid">
@@ -310,6 +364,38 @@ export default function ProbeTab({ probeConfig, isAdmin, onOpenSettings, onToast
                   </div>
                 </div>
               </div>
+
+              {latencyLines.length > 0 && (
+                <div className="latency-list">
+                  {latencyLines.map((line, idx) => {
+                    const noValidSample = line.loss >= 100 && (line.avg === 0 || line.avg === null);
+                    const minLabel = noValidSample ? '—' : formatLatencyMs(line.min);
+                    const maxLabel = noValidSample ? '—' : formatLatencyMs(line.max);
+                    const latestLabel = noValidSample ? '—' : formatLatencyMs(line.latest);
+                    const detailText = `最低 ${minLabel} / 最高 ${maxLabel} / 最近 ${latestLabel}`;
+                    return (
+                      <div className="latency-row" key={`${line.name}-${idx}`} title={detailText}>
+                        <div className="latency-row-main">
+                          <span className="latency-line-name">📶 {line.name}</span>
+                          <div className="latency-line-metrics">
+                            <span className={`latency-ms ${latencyTone(line.avg, line.loss)}`}>
+                              {formatAvgLatency(line)}
+                            </span>
+                            <span className={`latency-loss ${lossTone(line.loss)}`}>
+                              丢包 {line.loss}%
+                            </span>
+                          </div>
+                        </div>
+                        {isOpen && (
+                          <div className="latency-row-detail">
+                            最低 {minLabel} · 最高 {maxLabel} · 最近 {latestLabel}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
 
               <div
                 style={{
