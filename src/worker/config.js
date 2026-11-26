@@ -207,10 +207,10 @@ export async function clearBoundSupergroupId(env) {
   await env.TOPIC_MAP.delete(SUPERGROUP_KV_KEY);
 }
 
-export async function safeGetJSON(kv, key, fallback = null) {
+export async function safeGetJSON(kv, key, fallback = null, readOptions = undefined) {
   if (!kv) return fallback;
   try {
-    const val = await kv.get(key, { type: 'json' });
+    const val = await kv.get(key, { ...(readOptions || {}), type: 'json' });
     return val === null || val === undefined ? fallback : val;
   } catch {
     return fallback;

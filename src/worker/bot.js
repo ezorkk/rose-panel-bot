@@ -47,6 +47,7 @@ import {
   formatSourceLabel,
   getVisitorDetail,
   normalizeSourceParam,
+  attachTopicMirror,
   recallAdminVisitorMessage,
   recordVisitorExchange,
   rememberPendingSource,
@@ -2782,7 +2783,7 @@ export async function syncTelegramBotSurface(env, requestOrigin, config = null, 
  * directly to the visitor in private chat, while silently mirroring into the Forum Supergroup Topic
  * (if bound) and archiving into `history:<uid>` so Mini App and Telegram Topics stay 100% synced.
  */
-export async function sendAdminDirectVisitorReply(env, requestOrigin, targetUid, payload = {}) {
+export async function sendAdminDirectVisitorReply(env, requestOrigin, targetUid, payload = {}, options = {}) {
   const uid = String(targetUid || '').trim();
   if (!/^\d+$/.test(uid)) {
     throw new Error('无效的访客 UID');
@@ -2860,9 +2861,28 @@ export async function sendAdminDirectVisitorReply(env, requestOrigin, targetUid,
     await safePutJSON(env.TOPIC_MAP, `user:${uid}`, rec);
   }
 
-  // Silently mirror into the Admin Forum Supergroup Topic if bound
-  let topicMsgId = null;
-  if (supergroupId) {
+  const pmMessageId = sentPm?.message_id || null;
+  const syntheticMsg = {
+    message_id: null,
+    text: photoFile ? '' : rawText.slice(0, 4000),
+    caption: photoFile ? rawText.slice(0, 1000) : '',
+    photo: Array.isArray(sentPm?.photo) ? sentPm.photo : null,
+  };
+
+  // Archive right away (the topic copy's ID is attached once the mirror exists), so the panel can
+  // confirm the send without waiting for the second Telegram round trip.
+  const exchanged = await recordVisitorExchange(env, uid, syntheticMsg, {
+    sender: 'admin',
+    pmMessageId,
+    topicMsgId: null,
+    incrementCount: true,
+    preview: previewTextOfMessage(syntheticMsg),
+  });
+
+  // Silently mirror into the Admin Forum Supergroup Topic if bound. Runs after the response when the
+  // caller passes `waitUntil` (the visitor already has the message; this is bookkeeping for the owner).
+  const mirrorToTopic = async () => {
+    let topicMsgId = null;
     try {
       const preview = photoFile ? rawText.slice(0, 80) || '[图片]' : rawText.slice(0, 80);
       const topicUser = {
@@ -2926,22 +2946,20 @@ export async function sendAdminDirectVisitorReply(env, requestOrigin, targetUid,
     } catch {
       // Non-fatal: visitor already received the message in private chat
     }
-  }
-
-  const syntheticMsg = {
-    message_id: topicMsgId,
-    text: photoFile ? '' : rawText.slice(0, 4000),
-    caption: photoFile ? rawText.slice(0, 1000) : '',
-    photo: Array.isArray(sentPm?.photo) ? sentPm.photo : null,
+    if (!topicMsgId || !pmMessageId) return;
+    const attached = await attachTopicMirror(env, uid, pmMessageId, topicMsgId, supergroupId).catch(() => true);
+    // Recalled before the mirror landed: the archive entry is gone, so remove the orphaned copy too
+    if (!attached) {
+      await tgCall(env, 'deleteMessage', { chat_id: supergroupId, message_id: topicMsgId }).catch(() => {});
+    }
   };
-
-  const exchanged = await recordVisitorExchange(env, uid, syntheticMsg, {
-    sender: 'admin',
-    pmMessageId: sentPm?.message_id || null,
-    ...(topicMsgId && supergroupId ? { topicChatId: supergroupId } : {}),
-    incrementCount: true,
-    preview: previewTextOfMessage(syntheticMsg),
-  });
+  if (supergroupId) {
+    if (typeof options.waitUntil === 'function') {
+      options.waitUntil(mirrorToTopic().catch(() => {}));
+    } else {
+      await mirrorToTopic();
+    }
+  }
 
   const visitor = await getVisitorDetail(env, uid, supergroupId);
   return {

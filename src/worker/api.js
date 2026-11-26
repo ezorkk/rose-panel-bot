@@ -361,7 +361,9 @@ export async function handleApiRequest(request, env, url, ctx = null) {
       }
 
       try {
-        const sent = await sendAdminDirectVisitorReply(env, url.origin, uid, { text, photoFile });
+        const sent = await sendAdminDirectVisitorReply(env, url.origin, uid, { text, photoFile }, {
+          waitUntil: ctx?.waitUntil ? (p) => ctx.waitUntil(p) : undefined,
+        });
         let signedMessage = sent.message;
         if (signedMessage?.photoFileId && env.BOT_TOKEN) {
           const fullToken = await signMediaToken(signedMessage.photoFileId, env.BOT_TOKEN, 1800);
