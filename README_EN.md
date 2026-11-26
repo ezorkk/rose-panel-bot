@@ -268,6 +268,12 @@ Then reverse-proxy `127.0.0.1:8787` with Caddy for automatic HTTPS.
 
 ---
 
+## 💬 Feedback
+
+Found a bug, have a deployment question, or want to suggest an improvement? Feel free to open an issue via **[GitHub Issues](https://github.com/mango0114/rose-panel-bot/issues/new/choose)** (choose between Bug Report, Feature Request, or Usage Feedback — please never paste secrets like `BOT_TOKEN` or `WEBHOOK_SECRET`).
+
+---
+
 ## 🧧 Support & Sponsors
 
 RosePanel Bot is 100% free & MIT open-source with zero paywalls and zero data collection. If it saves you from Telegram spam or makes your personal profile shine, feel free to support ongoing development ☕✨

@@ -5,6 +5,7 @@ import { haptic, openExternalUrl } from '../lib/telegram.js';
 export const REPO_URL = 'https://github.com/mango0114/rose-panel-bot';
 // Verified against live GitHub README heading anchor: 🚀 极简部署（5 分钟免费上线）
 export const DEPLOY_GUIDE_URL = `${REPO_URL}#${encodeURIComponent('-极简部署5-分钟免费上线')}`;
+export const FEEDBACK_URL = `${REPO_URL}/issues/new/choose`;
 export const CHANGELOG_URL = 'https://github.com/mango0114/rose-panel-bot/blob/main/CHANGELOG.md';
 export const SEEN_VERSION_STORAGE_KEY = 'rose_seen_version';
 export const HIDE_STAR_STRIP_STORAGE_KEY = 'rose_hide_star_strip';
@@ -250,13 +251,28 @@ export default function WhatsNewModal({
         </div>
 
         <div className="whatsnew-foot">
-          <button
-            type="button"
-            className="btn btn-subtle btn-sm"
-            onClick={() => openExternalUrl(CHANGELOG_URL)}
-          >
-            查看完整更新内容
-          </button>
+          <div className="whatsnew-foot-links">
+            <button
+              type="button"
+              className="btn btn-subtle btn-sm"
+              onClick={() => {
+                haptic('light');
+                openExternalUrl(CHANGELOG_URL);
+              }}
+            >
+              完整更新日志
+            </button>
+            <button
+              type="button"
+              className="btn btn-subtle btn-sm"
+              onClick={() => {
+                haptic('light');
+                openExternalUrl(FEEDBACK_URL);
+              }}
+            >
+              💬 意见反馈
+            </button>
+          </div>
           <button
             type="button"
             className="btn btn-primary btn-sm"

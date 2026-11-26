@@ -268,6 +268,12 @@ npx wrangler dev --ip 127.0.0.1 --port 8787 --persist-to ./.wrangler/state --sho
 
 ---
 
+## 💬 反馈与建议
+
+遇到部署问题、Bug，或者有任何使用体验上的改进建议，欢迎前往 **[GitHub Issues](https://github.com/mango0114/rose-panel-bot/issues/new/choose)** 提交反馈（支持 Bug 反馈、功能建议与使用问题与建议，提交时请勿粘贴 `BOT_TOKEN`、`WEBHOOK_SECRET` 等隐私凭证）。
+
+---
+
 ## 🧧 赞助与支持
 
 本项目以 MIT 协议完全免费开源，零付费墙、零数据收集。如果你喜欢 **RosePanel Bot**，或者它帮你挡掉了恼人的 TG 广告骚扰，欢迎请作者喝杯咖啡 / 投喂一点 AI 算力，支持项目持续迭代 ☕✨
