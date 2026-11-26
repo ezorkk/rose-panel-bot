@@ -10,6 +10,8 @@ const MEASURE_HEIGHT = 1350;
 const SIGNATURE_FONT_PX = 22;
 const SIGNATURE_ALPHA = 0.55;
 const SIGNATURE_BOTTOM_OFFSET = 40;
+// Non-t.me links longer than this are not printed under the QR code.
+const MAX_LINK_LABEL_CHARS = 32;
 
 const FONT_STACK =
   "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif";
@@ -566,8 +568,13 @@ export async function generateSharePoster({
   ctx.fillStyle = palette.text;
   ctx.fillText('扫码打开个人名片', cx, qrTopY + qrBoxSize + 52);
 
+  // Show the link under the QR only when it is useful at a glance: always for t.me links (people
+  // viewing the poster on their own phone can search it in Telegram), otherwise only if short —
+  // long preview / workers.dev hosts would just be noise.
   const shortLink = compactUrlLabel(targetUrl);
-  if (shortLink) {
+  const showLinkLabel =
+    Boolean(shortLink) && (/^t\.me\//i.test(shortLink) || Array.from(shortLink).length <= MAX_LINK_LABEL_CHARS);
+  if (showLinkLabel) {
     ctx.font = `400 22px ${FONT_STACK}`;
     ctx.fillStyle = palette.textMuted;
     ctx.fillText(truncateLine(ctx, shortLink, textMaxW), cx, qrTopY + qrBoxSize + 92);
