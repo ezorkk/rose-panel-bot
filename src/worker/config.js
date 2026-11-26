@@ -80,6 +80,27 @@ export const DEFAULT_PROBATION = {
   allowDomains: [], // 链接白名单，例如 ['github.com', 'example.com']，匹配域名本身及其子域名
 };
 
+export const DEFAULT_NAV_ORDER = ['profile', 'sites', 'probe', 'visitors', 'leaderboard'];
+
+export function normalizeNavOrder(raw) {
+  const list = Array.isArray(raw) ? raw : [];
+  const seen = new Set();
+  const result = [];
+  for (const item of list) {
+    const id = String(item || '').trim();
+    if (DEFAULT_NAV_ORDER.includes(id) && !seen.has(id)) {
+      seen.add(id);
+      result.push(id);
+    }
+  }
+  for (const id of DEFAULT_NAV_ORDER) {
+    if (!seen.has(id)) {
+      result.push(id);
+    }
+  }
+  return result;
+}
+
 export const DEFAULT_CONFIG = {
   profile: {
     displayName: 'RosePanel',
@@ -185,6 +206,9 @@ export const DEFAULT_CONFIG = {
     forkRepo: '', // e.g. "yourname/rose-panel-bot"
     branch: 'main',
     githubToken: '', // optional single-repo Fine-grained PAT for in-app 1-click fork sync
+  },
+  ui: {
+    navOrder: [...DEFAULT_NAV_ORDER],
   },
 };
 
@@ -411,6 +435,9 @@ export function mergeConfig(base, override) {
     cloned.probe.provider = PROBE_PROVIDER_IDS.includes(cloned.probe.provider) ? cloned.probe.provider : 'komari';
     cloned.probe.alerts = normalizeProbeAlerts(DEFAULT_PROBE_ALERTS, cloned.probe.alerts);
     cloned.pmBot.probation = normalizeProbation(DEFAULT_PROBATION, cloned.pmBot?.probation);
+    cloned.ui = {
+      navOrder: normalizeNavOrder(cloned.ui?.navOrder),
+    };
     cloned.siteOrigin = String(cloned.siteOrigin || '').trim();
     return cloned;
   }
@@ -484,6 +511,9 @@ export function mergeConfig(base, override) {
     updater: {
       ...base.updater,
       ...(override.updater || {}),
+    },
+    ui: {
+      navOrder: normalizeNavOrder(override.ui?.navOrder ?? base.ui?.navOrder),
     },
     botUsername: String(override.botUsername ?? base.botUsername ?? '')
       .trim()
@@ -619,6 +649,9 @@ export async function savePanelConfig(env, nextConfig) {
     ? merged.pmBot.stickerChallenges.filter((item) => item?.fileId && item?.question && item?.answer).slice(0, 40)
     : [];
   merged.pmBot.probation = normalizeProbation(DEFAULT_PROBATION, merged.pmBot.probation);
+  merged.ui = {
+    navOrder: normalizeNavOrder(merged.ui?.navOrder),
+  };
 
   await safePutJSON(env.TOPIC_MAP, CONFIG_KV_KEY, merged);
   return merged;
@@ -707,6 +740,9 @@ export function sanitizePublicConfig(config, env, isAdmin = false, requestOrigin
           return h && h !== 'your_bot' && /bot$/i.test(h) ? h : '';
         })(),
       appShortName: env.APP_SHORT_NAME || '',
+    },
+    ui: {
+      navOrder: normalizeNavOrder(config.ui?.navOrder),
     },
     shareUrl: resolveShareUrl(config, env, requestOrigin),
     ...(publicVisitStats ? { visitStats: publicVisitStats } : {}),

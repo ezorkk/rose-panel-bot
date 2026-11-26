@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import {
   Globe,
@@ -32,6 +32,18 @@ import {
 
 const BOOT_CACHE_PREFIX = 'rose_panel_boot_v1:';
 const THEME_MODE_STORAGE_KEY = 'rose_panel_theme_mode';
+const DEFAULT_NAV_ORDER = ['profile', 'sites', 'probe', 'visitors', 'leaderboard'];
+
+function sortNavItemsByOrder(items, rawOrder) {
+  const order = Array.isArray(rawOrder) && rawOrder.length > 0 ? rawOrder : DEFAULT_NAV_ORDER;
+  const rank = (id) => {
+    const idx = order.indexOf(id);
+    if (idx >= 0) return idx;
+    const defIdx = DEFAULT_NAV_ORDER.indexOf(id);
+    return order.length + (defIdx >= 0 ? defIdx : DEFAULT_NAV_ORDER.length);
+  };
+  return [...items].sort((a, b) => rank(a.id) - rank(b.id));
+}
 
 function readThemeMode() {
   try {
@@ -158,10 +170,14 @@ export default function App() {
   const [bootstrap, setBootstrap] = useState(() => loadCachedBootstrap());
   const [loading, setLoading] = useState(() => !loadCachedBootstrap());
   const [error, setError] = useState('');
-  const [activeTab, setActiveTab] = useState('profile');
+  const [activeTab, setActiveTab] = useState(() => {
+    const target = getLaunchTarget();
+    return ['profile', 'sites', 'probe', 'visitors', 'leaderboard'].includes(target.tab) ? target.tab : '';
+  });
   const [deepVisitorId, setDeepVisitorId] = useState('');
   const [visitorFilterPreset, setVisitorFilterPreset] = useState('');
   const [settingsSection, setSettingsSection] = useState(null);
+  const launchHandledRef = useRef(false);
   const [checkinLoading, setCheckinLoading] = useState(false);
   const [toast, setToast] = useState('');
   const [previewRole, setPreviewRole] = useState(() => getDevRole());
@@ -233,16 +249,19 @@ export default function App() {
       setBootstrap(res);
       saveCachedBootstrap(res);
 
-      // Handle Telegram start_param / query deep links (e.g. visitor_123456 or settings=modes)
+      // Handle Telegram start_param / query deep links (e.g. visitor_123456 or settings=modes) once on launch
       const target = getLaunchTarget();
-      if (target.settings && res.isAdmin) {
-        setSettingsSection(target.settings);
-      }
-      if (target.tab === 'visitors' && res.isAdmin) {
-        setActiveTab('visitors');
-        if (target.visitorId) setDeepVisitorId(target.visitorId);
-      } else if (['profile', 'sites', 'probe'].includes(target.tab)) {
-        setActiveTab(target.tab);
+      if (!launchHandledRef.current) {
+        launchHandledRef.current = true;
+        if (target.settings && res.isAdmin) {
+          setSettingsSection(target.settings);
+        }
+        if (target.tab === 'visitors' && res.isAdmin) {
+          setActiveTab('visitors');
+          if (target.visitorId) setDeepVisitorId(target.visitorId);
+        } else if (['profile', 'sites', 'probe', 'leaderboard'].includes(target.tab)) {
+          setActiveTab(target.tab);
+        }
       }
 
       if (
@@ -303,9 +322,7 @@ export default function App() {
     const next = previewRole === 'admin' ? 'guest' : 'admin';
     setDevRole(next);
     setPreviewRole(next);
-    if (next === 'guest' && activeTab === 'visitors') {
-      setActiveTab('profile');
-    }
+    setActiveTab('');
     loadBootstrap();
   };
 
@@ -365,7 +382,10 @@ export default function App() {
     navItems.push({ id: 'leaderboard', label: '榜单', icon: Trophy });
   }
 
-  const effectiveTab = navItems.some((item) => item.id === activeTab) ? activeTab : 'profile';
+  const orderedNavItems = sortNavItemsByOrder(navItems, bootstrap?.config?.ui?.navOrder);
+  const defaultTab = orderedNavItems[0]?.id || 'profile';
+  const effectiveTab =
+    activeTab && orderedNavItems.some((item) => item.id === activeTab) ? activeTab : defaultTab;
 
   return (
     <div className="app-shell">
@@ -496,10 +516,10 @@ export default function App() {
       </main>
 
       {/* Floating Glass Pill Bottom Dock — auto-hides when only 1 tab is visible */}
-      {navItems.length > 1 && (
+      {orderedNavItems.length > 1 && (
         <nav className="bottom-dock-wrap" aria-label="主导航">
           <div className="bottom-dock">
-            {navItems.map((item) => {
+            {orderedNavItems.map((item) => {
               const Icon = item.icon;
               const active = effectiveTab === item.id;
               return (

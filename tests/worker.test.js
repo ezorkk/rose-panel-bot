@@ -50,7 +50,9 @@ import {
 import { getLeaderboard, getMemberTicket, performCheckin, resolveLevel } from '../src/worker/checkin.js';
 import {
   DEFAULT_CONFIG,
+  DEFAULT_NAV_ORDER,
   loadPanelConfig,
+  normalizeNavOrder,
   resolveSupergroupId,
   sanitizeAdminConfig,
   sanitizePublicConfig,
@@ -6880,5 +6882,41 @@ describe('Daily blocked spam counter & admin bootstrap status fields (v1.10)', (
     ).json();
     expect(guestBoot.blockedToday).toBeUndefined();
     expect(guestBoot.pendingReviewCount).toBeUndefined();
+  });
+});
+
+describe('Customizable navigation order (v1.10)', () => {
+  it('validates navOrder (drops unknown IDs, deduplicates, appends missing), preserves default for legacy configs, and exposes navOrder in public config', async () => {
+    expect(DEFAULT_CONFIG.ui.navOrder).toEqual(['profile', 'sites', 'probe', 'visitors', 'leaderboard']);
+
+    // Drops unknown IDs, deduplicates, fills missing known IDs in default order
+    expect(normalizeNavOrder(['visitors', 'bogus', 'probe', 'visitors', 'evil'])).toEqual([
+      'visitors',
+      'probe',
+      'profile',
+      'sites',
+      'leaderboard',
+    ]);
+    expect(normalizeNavOrder(null)).toEqual(DEFAULT_NAV_ORDER);
+    expect(normalizeNavOrder([])).toEqual(DEFAULT_NAV_ORDER);
+
+    // Legacy KV config without `ui` field upgrades with unchanged default order
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:NAV_TEST', ADMIN_IDS: '10001' };
+    await kv.put('config:panel', JSON.stringify({ profile: { displayName: 'LegacyOwner' } }));
+    const loadedLegacy = await loadPanelConfig(env);
+    expect(loadedLegacy.ui.navOrder).toEqual(['profile', 'sites', 'probe', 'visitors', 'leaderboard']);
+
+    // Saving custom order normalizes and persists cleanly
+    const saved = await savePanelConfig(env, {
+      ui: { navOrder: ['visitors', 'invalid_tab', 'sites', 'visitors'] },
+    });
+    expect(saved.ui.navOrder).toEqual(['visitors', 'sites', 'profile', 'probe', 'leaderboard']);
+
+    // Public config exposes navOrder for BOTH guests and admins
+    const guestPublic = sanitizePublicConfig(saved, env, false);
+    const adminPublic = sanitizePublicConfig(saved, env, true);
+    expect(guestPublic.ui.navOrder).toEqual(['visitors', 'sites', 'profile', 'probe', 'leaderboard']);
+    expect(adminPublic.ui.navOrder).toEqual(['visitors', 'sites', 'profile', 'probe', 'leaderboard']);
   });
 });

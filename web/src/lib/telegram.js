@@ -61,16 +61,25 @@ export function getLaunchTarget() {
     return { tab: 'visitors', visitorId: startParam.slice('visitor_'.length), settings: '' };
   }
   if (startParam.startsWith('settings_')) {
-    return { tab: 'profile', visitorId: '', settings: startParam.slice('settings_'.length) };
+    return { tab: '', visitorId: '', settings: startParam.slice('settings_'.length) };
   }
   if (startParam === 'visitors') return { tab: 'visitors', visitorId: '', settings: '' };
   if (startParam === 'probe') return { tab: 'probe', visitorId: '', settings: '' };
   if (startParam === 'sites') return { tab: 'sites', visitorId: '', settings: '' };
+  if (startParam === 'profile') return { tab: 'profile', visitorId: '', settings: '' };
+  if (startParam === 'leaderboard') return { tab: 'leaderboard', visitorId: '', settings: '' };
 
-  const tab = params.get('tab') || 'profile';
+  const queryTab = params.get('tab') || '';
   const visitorId = params.get('uid') || '';
   const settings = params.get('settings') || '';
-  return { tab, visitorId, settings };
+  if (queryTab) {
+    return { tab: queryTab, visitorId, settings };
+  }
+  // Share-poster QR code always opens the personal card regardless of custom navOrder
+  if (startParam === 'src_poster' || params.get('src') === 'poster') {
+    return { tab: 'profile', visitorId, settings };
+  }
+  return { tab: '', visitorId, settings };
 }
 
 const SOURCE_PARAM_RE = /^[a-z0-9_]{1,24}$/;

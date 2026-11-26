@@ -30,6 +30,24 @@ import {
   StarSupportBanner,
 } from './WhatsNewModal.jsx';
 
+const DEFAULT_NAV_ORDER = ['profile', 'sites', 'probe', 'visitors', 'leaderboard'];
+
+function normalizeNavOrderDraft(raw) {
+  const list = Array.isArray(raw) ? raw : [];
+  const seen = new Set();
+  const res = [];
+  for (const id of list) {
+    if (DEFAULT_NAV_ORDER.includes(id) && !seen.has(id)) {
+      seen.add(id);
+      res.push(id);
+    }
+  }
+  for (const id of DEFAULT_NAV_ORDER) {
+    if (!seen.has(id)) res.push(id);
+  }
+  return res;
+}
+
 const PROBE_PROVIDER_OPTIONS = [
   {
     id: 'komari',
@@ -1057,6 +1075,97 @@ export default function SettingsDrawer({
                 ))}
               </div>
             </div>
+
+            {/* Navigation Order Card */}
+            {(() => {
+              const enableCheckin = Boolean(draft.community?.enableCheckin);
+              const fullOrder = normalizeNavOrderDraft(draft.ui?.navOrder);
+              const visibleOrder = fullOrder.filter((id) => id !== 'leaderboard' || enableCheckin);
+              const navMeta = {
+                profile: { label: enableCheckin ? '票根' : '名片', note: '' },
+                sites: { label: '小站', note: '' },
+                probe: {
+                  label: '探针',
+                  note:
+                    draft.probe?.visibility === 'private'
+                      ? '仅自己可见'
+                      : !draft.probe?.url && !draft.probe?.demoMode
+                        ? '未配置'
+                        : '',
+                },
+                visitors: { label: '访客', note: '仅站长' },
+                leaderboard: { label: '榜单', note: '群签到访客可见' },
+              };
+              const moveNavItem = (idx, delta) => {
+                const targetIdx = idx + delta;
+                if (targetIdx < 0 || targetIdx >= visibleOrder.length) return;
+                const nextVisible = [...visibleOrder];
+                [nextVisible[idx], nextVisible[targetIdx]] = [nextVisible[targetIdx], nextVisible[idx]];
+                const hidden = fullOrder.filter((id) => !nextVisible.includes(id));
+                const nextFull = [...nextVisible, ...hidden];
+                setDraft((prev) => ({
+                  ...prev,
+                  ui: { ...(prev.ui || {}), navOrder: nextFull },
+                }));
+                haptic('light');
+              };
+
+              return (
+                <div className="card">
+                  <div className="card-header" style={{ marginBottom: 4 }}>
+                    <span className="card-title">🧭 导航顺序</span>
+                  </div>
+                  <div className="row-desc wrap" style={{ marginBottom: 10 }}>
+                    第一个是打开面板时的默认页；访客看不到的页面会自动跳过
+                  </div>
+                  <div className="nav-order-list">
+                    {visibleOrder.map((id, idx) => {
+                      const info = navMeta[id] || { label: id, note: '' };
+                      return (
+                        <div className="nav-order-row" key={id}>
+                          <div className="nav-order-left">
+                            <span className="nav-order-idx">{idx + 1}</span>
+                            <span className="nav-order-label">{info.label}</span>
+                            {idx === 0 && (
+                              <span className="pill rose" style={{ padding: '2px 7px', fontSize: 10 }}>
+                                默认页
+                              </span>
+                            )}
+                            {info.note && (
+                              <span className="pill" style={{ padding: '2px 7px', fontSize: 10 }}>
+                                {info.note}
+                              </span>
+                            )}
+                          </div>
+                          <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                            <button
+                              type="button"
+                              className="icon-btn"
+                              disabled={idx === 0}
+                              title="上移"
+                              aria-label={`上移 ${info.label}`}
+                              onClick={() => moveNavItem(idx, -1)}
+                            >
+                              <ArrowUp size={13} />
+                            </button>
+                            <button
+                              type="button"
+                              className="icon-btn"
+                              disabled={idx === visibleOrder.length - 1}
+                              title="下移"
+                              aria-label={`下移 ${info.label}`}
+                              onClick={() => moveNavItem(idx, 1)}
+                            >
+                              <ArrowDown size={13} />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* Promo & Referral Links Helper (Section 8) */}
             <div className="card">
