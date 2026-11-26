@@ -172,7 +172,7 @@ export function StarSupportBanner({ onDismiss = null, style = undefined }) {
 }
 
 export default function WhatsNewModal({
-  appVersion = '1.7.0',
+  appVersion = '1.8.0',
   previousVersion = '',
   mode = 'auto',
   onClose,
