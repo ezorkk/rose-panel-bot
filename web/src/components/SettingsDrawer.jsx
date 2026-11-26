@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
+  Database,
   ExternalLink,
   GitFork,
   Globe,
@@ -101,7 +102,7 @@ export default function SettingsDrawer({
   onSaved,
   onToast,
 }) {
-  const [section, setSection] = useState(initialSection);
+  const [section, setSection] = useState(initialSection === 'storage' ? 'update' : initialSection);
   const [draft, setDraft] = useState(() => structuredClone(adminConfig));
   const [probationDomainsText, setProbationDomainsText] = useState(() =>
     (adminConfig?.pmBot?.probation?.allowDomains || []).join('\n')
@@ -168,6 +169,107 @@ export default function SettingsDrawer({
   useEffect(() => {
     handleCheckUpdate(false);
   }, []);
+
+  // Storage mode (`kv` vs `d1`) & progressive batched KV -> D1 visitor migration
+  const [storageStatus, setStorageStatus] = useState(() => ({
+    d1Bound: Boolean(adminConfig?.d1Bound),
+    mode: adminConfig?.d1Bound ? 'd1' : 'kv',
+    done: 0,
+    total: 0,
+    finished: !adminConfig?.d1Bound,
+    loaded: false,
+  }));
+  const [loadingStorage, setLoadingStorage] = useState(false);
+  const [migratingStorage, setMigratingStorage] = useState(false);
+  const [migrationFeedback, setMigrationFeedback] = useState(null);
+  const mountedRef = React.useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const loadStorageStatus = async () => {
+    try {
+      setLoadingStorage(true);
+      const res = await apiRequest('/api/admin/storage');
+      if (!mountedRef.current) return;
+      setStorageStatus({
+        d1Bound: Boolean(res.d1Bound),
+        mode: res.mode || (res.d1Bound ? 'd1' : 'kv'),
+        done: Number(res.done || 0),
+        total: Number(res.total || 0),
+        finished: Boolean(res.finished),
+        loaded: true,
+      });
+    } catch (err) {
+      if (mountedRef.current) {
+        setMigrationFeedback({ ok: false, text: err.message });
+      }
+    } finally {
+      if (mountedRef.current) {
+        setLoadingStorage(false);
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (section === 'update') {
+      loadStorageStatus();
+    }
+  }, [section]);
+
+  const handleMigrateAllVisitors = async () => {
+    if (migratingStorage) return;
+    try {
+      setMigratingStorage(true);
+      setMigrationFeedback(null);
+      haptic('light');
+
+      let safetyGuard = 0;
+      while (mountedRef.current && safetyGuard < 2000) {
+        safetyGuard += 1;
+        const res = await apiRequest('/api/admin/storage/migrate', {
+          method: 'POST',
+          body: { batchSize: 20 },
+        });
+        if (!mountedRef.current) return;
+        const done = Number(res.done || 0);
+        const total = Number(res.total || 0);
+        const finished = Boolean(res.finished);
+        setStorageStatus({
+          d1Bound: true,
+          mode: 'd1',
+          done,
+          total,
+          finished,
+          loaded: true,
+        });
+        if (finished || Number(res.batchMigrated || 0) === 0) {
+          setMigrationFeedback({
+            ok: true,
+            text: `✅ 已完成全部 ${done} / ${total} 位访客聊天记录迁移（KV 旧数据已原样保留作为备份）`,
+          });
+          onToast('🎉 访客聊天记录已全部迁移至 D1');
+          break;
+        }
+      }
+    } catch (err) {
+      if (mountedRef.current) {
+        setMigrationFeedback({
+          ok: false,
+          text: `${err.message}（已完成批次不会丢失或重复，可随时点击重试）`,
+        });
+        onToast(err.message);
+      }
+    } finally {
+      if (mountedRef.current) {
+        setMigratingStorage(false);
+      }
+    }
+  };
 
   // Telegram Sticker / Custom Emoji pack browser state
   const [packInput, setPackInput] = useState('');
@@ -2906,6 +3008,93 @@ export default function SettingsDrawer({
                 </div>
               </div>
 
+              <div className="card" style={{ marginBottom: 12 }}>
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    justifyContent: 'space-between',
+                    gap: 10,
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
+                      <span className="row-title" style={{ fontSize: 14, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                        <Database size={14} /> 数据存储
+                      </span>
+                      <span
+                        className={`pill ${storageStatus.d1Bound ? 'rose' : ''}`}
+                        style={{ fontSize: 11, padding: '2px 8px' }}
+                      >
+                        {storageStatus.d1Bound
+                          ? storageStatus.loaded
+                            ? `D1 · 已迁移 ${storageStatus.done} / ${storageStatus.total} 个访客`
+                            : 'D1 · 读取进度中…'
+                          : 'KV（未绑定 D1）'}
+                      </span>
+                    </div>
+                    <div className="row-desc wrap" style={{ marginTop: 5, lineHeight: 1.5 }}>
+                      {storageStatus.d1Bound ? (
+                        storageStatus.loaded && storageStatus.finished ? (
+                          '聊天记录与消息映射已由 Cloudflare D1 承载，KV 旧数据原样保留作为备份。'
+                        ) : (
+                          '老访客打开聊天记录时会自动按需迁移；也可点击右侧「一键迁移」分批搬完（KV 旧数据保留不删）。'
+                        )
+                      ) : (
+                        <>
+                          当前使用 Workers KV 存储，行为与旧版完全一致；绑定 D1 数据库（变量名 <code>DB</code>，库名{' '}
+                          <code>rose-panel-bot</code>）后可节省每日 KV 写入配额并保留完整聊天历史。
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  {storageStatus.d1Bound ? (
+                    <button
+                      type="button"
+                      className={`btn btn-sm ${storageStatus.loaded && storageStatus.finished ? 'btn-subtle' : 'btn-primary'}`}
+                      style={{ flexShrink: 0 }}
+                      disabled={migratingStorage || loadingStorage || (storageStatus.loaded && storageStatus.finished)}
+                      onClick={handleMigrateAllVisitors}
+                    >
+                      <RefreshCw size={13} className={migratingStorage || loadingStorage ? 'spin' : ''} />{' '}
+                      {migratingStorage
+                        ? `迁移中 (${storageStatus.done}/${storageStatus.total})…`
+                        : storageStatus.loaded && storageStatus.finished
+                          ? '已全部迁移'
+                          : '一键迁移'}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn btn-subtle btn-sm"
+                      style={{ flexShrink: 0 }}
+                      onClick={() => openExternalUrl(`${REPO_URL}/blob/main/docs/SETUP_GUIDE.md#d1-storage`)}
+                    >
+                      <ExternalLink size={13} /> 手动绑定步骤
+                    </button>
+                  )}
+                </div>
+
+                {migrationFeedback && (
+                  <div
+                    style={{
+                      marginTop: 10,
+                      padding: '8px 11px',
+                      borderRadius: 12,
+                      fontSize: 12,
+                      lineHeight: 1.5,
+                      background: migrationFeedback.ok ? 'var(--green-soft)' : 'var(--red-soft)',
+                      color: migrationFeedback.ok ? 'var(--green)' : 'var(--red)',
+                    }}
+                  >
+                    {migrationFeedback.ok ? '' : '⚠️ '}
+                    {migrationFeedback.text}
+                  </div>
+                )}
+              </div>
+
               <div className="card update-fork-card">
                 <button
                   type="button"
@@ -2926,7 +3115,7 @@ export default function SettingsDrawer({
                 {forkCardOpen && (
                   <div className="update-fork-body">
                     <div className="row-desc wrap" style={{ marginBottom: 10, lineHeight: 1.5 }}>
-                      升级仅同步代码，名片、小站、探针与访客 KV 数据 <b>100% 原样保留</b>。
+                      升级仅同步代码，KV 数据 <b>100% 原样保留</b>；绑定 D1 后聊天数据自动迁移到 D1。
                     </div>
 
                     <div className="field">

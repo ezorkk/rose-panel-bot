@@ -770,6 +770,7 @@ export function sanitizeAdminConfig(config, env = {}, inboxStatus = {}) {
     }
   }
   cloned.pmBot.turnstileReady = Boolean(env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET);
+  cloned.d1Bound = Boolean(env.DB);
   if (inboxStatus && typeof inboxStatus === 'object') {
     if (inboxStatus.inboxMode !== undefined) {
       cloned.inboxMode = inboxStatus.inboxMode;

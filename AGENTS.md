@@ -12,7 +12,7 @@ Before configuring environment variables or deploying, ask the user to choose:
 
 | Module | Default | Required Env / Config | Notes |
 | :--- | :---: | :--- | :--- |
-| **1. Core Personal Card (`名片`)** | Always ON | `BOT_TOKEN`, `WEBHOOK_SECRET`, `ADMIN_IDS`, `TOPIC_MAP` KV | Rose-porcelain profile card, 3-way privacy avatar (`bot` / server-proxied `owner` / `custom`), editable/hideable ticket stub labels, social links, personal tags, contact etiquette, customizable 0ms splash screen, custom TG Sticker/Emoji emblem via `/set`, and in-app version checker (`⚙️ 设置 → 版本更新`). |
+| **1. Core Personal Card (`名片`)** | Always ON | `BOT_TOKEN`, `WEBHOOK_SECRET`, `ADMIN_IDS`, `TOPIC_MAP` KV (+ optional `DB` D1) | Rose-porcelain profile card, 3-way privacy avatar (`bot` / server-proxied `owner` / `custom`), editable/hideable ticket stub labels, social links, personal tags, contact etiquette, customizable 0ms splash screen, custom TG Sticker/Emoji emblem via `/set`, and in-app version checker (`⚙️ 设置 → 版本更新`). |
 | **2. Personal Sites & Private Bookmarks (`小站`)** | Always ON | Managed live in Mini App Settings | Supports Public sites + server-side isolated `🔒 Private` owner-only bookmarks. |
 | **3. Server Probe Module (`探针`)** | Optional (Lightweight OFF) | `PROBE_PROVIDER` + `PROBE_URL` (+ optional `PROBE_API_KEY`; legacy `KOMARI_URL` / `KOMARI_API_KEY` still work) or set in Mini App UI | **Ask the user which probe they use** (see Step 1b). Built-in providers: `komari` (v2 `/api/rpc2` + v1 `/api/nodes`, with per-line latency & packet loss display via `public:getPingMetricStats` when Ping Tasks are configured in Komari), `nezha` (v1 public WS `/api/v1/ws/server` + v1 REST `/api/v1/server` + v0 `/api/v1/server/details`), `nodeget` (NodeSeek official probe WebSocket JSON-RPC 2.0), `json` (generic JSON node list for 极简探针 / CF Workers 探针 / ServerStatus). Hides the `探针` tab for non-admin visitors when unconfigured or set to `private`. 可选掉线告警（默认关闭，设置里开启）。 |
 | **4. Bidirectional PM Bot, In-Panel Chat, Auto-Reply & 4-Layer Anti-Spam Shield (`访客`)** | Optional | `ADMIN_IDS`（Bot 私聊推送），或 `/bind` 话题群（推荐给高频用户） | Verification-first `/start` onboarding (auto-syncs `welcomeText` to Telegram pre-Start `setMyDescription` + toggleable bottom-left menu button without re-running `/setup`), zero-group Bot DM push (quote-reply & moderation commands) or isolated Forum Topics (`/del` message recall), **in-panel direct visitor chat** (`💬 聊过` -> 60-message bubble log, direct text & photo replies, 1-tap recall mirrored to Forum Topic), busy/offline auto-reply, up to 50 keyword rules, Photo Gallery, Links Archive, and 4-layer shield (`Emoji` / `Custom Sticker Quiz via /add` / `Quiz` / `CF Turnstile` + CAS + media flyer block + honeypot + edit guard). |
@@ -46,17 +46,17 @@ Ask the user which deployment path fits their environment (see `README.md` / `RE
 ## Step 3: Post-Deployment Activation Checklist
 
 After deploying, remind or assist the user with these 3 final steps:
-1. **Bind `TOPIC_MAP` KV**, set secrets (`BOT_TOKEN`, `WEBHOOK_SECRET`, and optional `TURNSTILE_SECRET` / `KOMARI_API_KEY`) and the required text var `ADMIN_IDS` (owner numeric UID). **Never set `DEV_PREVIEW="true"` in production**, and **never commit real tokens, group IDs, or KV IDs to a public repository.**
+1. **Bind `TOPIC_MAP` KV** (and optionally bind D1 database `rose-panel-bot` as `DB` — Wrangler v4 auto-provisions it by default; if manually creating in Cloudflare Dashboard, name the database `rose-panel-bot` to match `wrangler.toml` and bind as `DB`), set secrets (`BOT_TOKEN`, `WEBHOOK_SECRET`, and optional `TURNSTILE_SECRET` / `KOMARI_API_KEY`) and the required text var `ADMIN_IDS` (owner numeric UID). **Never set `DEV_PREVIEW="true"` in production**, and **never commit real tokens, group IDs, or KV/D1 IDs to a public repository.**
 2. **Run `/setup`** once in a browser: `https://<your-domain>/setup?secret=<YOUR_WEBHOOK_SECRET>` to register Telegram webhook (`message`, `edited_message`, `callback_query`), bot commands, and the bottom-left Mini App menu button.
 3. **Register Direct-Link Mini App in `@BotFather`** (`/newapp` → URL `https://<your-domain>/` → short name matching `APP_SHORT_NAME`, e.g., `panel`) so the panel opens cleanly from groups and admin topic buttons.
 
 ---
 
-## Upgrading an Existing Deployment (Safe In-Place Update — Zero KV Changes)
+## Upgrading an Existing Deployment (Safe In-Place Update — KV Data Preserved, Chat History Auto-Migrated to D1)
 
 When a user asks you to **upgrade / overwrite an existing RosePanel Bot deployment** to the latest upstream release (`https://github.com/mango0114/rose-panel-bot`):
 
-1. **NEVER click "Deploy to Cloudflare" again, NEVER recreate or wipe `TOPIC_MAP` KV, NEVER recreate the Telegram Bot, and NEVER overwrite existing Secrets (`BOT_TOKEN`, `WEBHOOK_SECRET`, etc.).** All existing profile settings, sites, probe config, visitor history, and verification records live in `TOPIC_MAP` KV and are 100% preserved across code upgrades.
+1. **NEVER click "Deploy to Cloudflare" again, NEVER recreate or wipe `TOPIC_MAP` KV, NEVER recreate the Telegram Bot, and NEVER overwrite existing Secrets (`BOT_TOKEN`, `WEBHOOK_SECRET`, etc.).** All existing KV data (`TOPIC_MAP`) is 100% preserved across upgrades; when D1 (`DB`) is bound, visitor chat history & message maps automatically migrate to D1 on demand (or via 1-click batch migration in **⚙️ Settings → 版本更新 → 数据存储**) while leaving KV untouched as a backup. Without `DB`, the Worker continues running 100% on KV.
 2. **Identify how the user deployed**:
    - **GitHub Repo connected to Cloudflare Workers Builds (Fork or Deploy-button copy — PREFERRED path)**: Merge `upstream/main` (`https://github.com/mango0114/rose-panel-bot.git`) into the user's own GitHub repository (`git fetch upstream && git merge upstream/main --allow-unrelated-histories`) and `git push origin main` so Cloudflare Workers Builds automatically rebuilds & deploys the existing Worker with all existing bindings intact.
    - **Direct `wrangler` CLI deploy (only when not Git-connected)**: First verify the existing Worker `name` and existing `TOPIC_MAP` KV `id` in `wrangler.toml` match the user's live Cloudflare Worker so you NEVER accidentally deploy a duplicate empty Worker. Then run `npm install && npm run build && npx wrangler deploy --keep-vars`.
@@ -67,7 +67,8 @@ When a user asks you to **upgrade / overwrite an existing RosePanel Bot deployme
 
 ## Architecture Quick Reference for Extensions
 
-- `src/worker/index.js` — Cloudflare Worker entrypoint (`/health`, `/setup`, `/webhook`, `/verify`, `/verify-submit`, `/api/*`, `ASSETS`).
+- `src/worker/index.js` — Cloudflare Worker entrypoint (`/health`, `/setup`, `/webhook`, `/verify`, `/verify-submit`, `/api/*`, `ASSETS`, daily D1 expired map cleanup in `scheduled`).
+- `src/worker/store/` — Dual-mode storage layer (`index.js` `getStore(env)` -> D1 when `env.DB` is bound, KV otherwise; `kvStore.js`, `d1Schema.js`, `d1Store.js`, `migrate.js` lazy & batched KV-to-D1 migration).
 - `src/worker/config.js` — Defaults, KV persistence (`config:panel`), and strict server-side sanitization (`sanitizePublicConfig`).
 - `src/worker/auth.js` — Telegram Mini App `initData` HMAC-SHA256 verification & signed private media tokens.
 - `src/worker/antispam.js` — 4-layer shield: CAS blacklist (`api.cas.chat`), Unicode de-obfuscation, unverified media/link/forward risk scoring, spam counter.

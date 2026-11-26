@@ -97,6 +97,7 @@ import {
 } from '../web/src/lib/keywordPresets.js';
 import pkg from '../package.json' with { type: 'json' };
 import {
+  addPendingReviewMessage,
   applyVisitorAction,
   buildSourceLink,
   clearVisitorHistory,
@@ -114,12 +115,24 @@ import {
   recallAdminVisitorMessage,
   recordVisitorExchange,
   rememberPendingSource,
+  updateVisitorMessageReaction,
   upsertVisitorProfile,
 } from '../src/worker/visitors.js';
 import {
   buildSourceLink as buildClientSourceLink,
   normalizeSourceParam as normalizeClientSourceParam,
 } from '../web/src/lib/telegram.js';
+import {
+  SCHEMA_VERSION,
+  cleanupExpiredMaps,
+  ensureSchema,
+  getStorageStatus,
+  getStore,
+  migrateVisitor,
+  migrateVisitorsBatch,
+  shouldRunDailyCleanup,
+} from '../src/worker/store/index.js';
+import { createD1Shim } from './helpers/d1Shim.js';
 
 // Minimal in-memory Cloudflare KV mock
 function createMemoryKV() {
@@ -183,6 +196,17 @@ async function signInitData(fields, botToken) {
   return params.toString();
 }
 
+describe.each(['kv', 'd1'])('Full regression suite [%s storage mode]', (storageMode) => {
+  function makeEnv(props = {}) {
+    if (storageMode === 'd1' && props && props.TOPIC_MAP && !Object.prototype.hasOwnProperty.call(props, 'DB')) {
+      if (!props.TOPIC_MAP._pairedD1) {
+        props.TOPIC_MAP._pairedD1 = createD1Shim();
+      }
+      return { ...props, DB: props.TOPIC_MAP._pairedD1 };
+    }
+    return props;
+  }
+
 describe('Telegram Mini App initData verification', () => {
   const token = '123456:TEST_BOT_TOKEN_SECRET';
 
@@ -235,7 +259,7 @@ describe('Telegram Mini App initData verification', () => {
 
 describe('Group check-in, streaks, levels and badges', () => {
   it('handles daily check-in idempotency, streaks, early bird badge, and leaderboard', async () => {
-    const env = { TOPIC_MAP: createMemoryKV() };
+    const env = makeEnv({ TOPIC_MAP: createMemoryKV() });
     const cfg = { ...DEFAULT_CONFIG.community, enableCheckin: true, dailyMinPoints: 20, dailyMaxPoints: 20, streakStepBonus: 5 };
     const user = { id: 55501, first_name: 'Alice', username: 'alice_tg' };
 
@@ -281,7 +305,7 @@ describe('Group check-in, streaks, levels and badges', () => {
 describe('Visitor profiles & moderation (telegram_private_chatbot KV compatibility)', () => {
   it('reads legacy KV keys, supports ban/unban/trust/close/note and filtering', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, SUPERGROUP_ID: '-1001234567890' };
+    const env = makeEnv({ TOPIC_MAP: kv, SUPERGROUP_ID: '-1001234567890' });
 
     // Simulate a legacy user key created by telegram_private_chatbot v5.3
     await kv.put('user:77701', JSON.stringify({ thread_id: 42, closed: false }));
@@ -415,7 +439,7 @@ describe('Komari probe adapter', () => {
     globalThis.fetch = mockFetch;
 
     try {
-      const env = { TOPIC_MAP: createMemoryKV() };
+      const env = makeEnv({ TOPIC_MAP: createMemoryKV() });
       const res = await fetchKomariStatus(env, {
         ...DEFAULT_CONFIG.probe,
         url: 'https://probe.example.com',
@@ -430,7 +454,7 @@ describe('Komari probe adapter', () => {
   });
 
   it('returns demo nodes when demoMode is enabled without URL', async () => {
-    const env = { TOPIC_MAP: createMemoryKV() };
+    const env = makeEnv({ TOPIC_MAP: createMemoryKV() });
     const status = await fetchKomariStatus(env, { ...DEFAULT_CONFIG.probe, demoMode: true, url: '' });
     expect(status.configured).toBe(true);
     expect(status.demo).toBe(true);
@@ -472,7 +496,7 @@ describe('Komari probe adapter', () => {
     });
 
     try {
-      const env = { TOPIC_MAP: createMemoryKV() };
+      const env = makeEnv({ TOPIC_MAP: createMemoryKV() });
       const res = await fetchKomariStatus(env, {
         ...DEFAULT_CONFIG.probe,
         url: 'https://probe.example.com',
@@ -491,11 +515,11 @@ describe('Worker API authorization & config masking', () => {
   const token = '987654:UNIT_TEST_BOT_TOKEN';
 
   it('blocks non-admin access to admin endpoints and allows admin config update with secret preservation', async () => {
-    const env = {
+    const env = makeEnv({
       TOPIC_MAP: createMemoryKV(),
       BOT_TOKEN: token,
       ADMIN_IDS: '10001',
-    };
+    });
 
     const now = Math.floor(Date.now() / 1000);
     const guestInit = await signInitData(
@@ -554,11 +578,11 @@ describe('Worker API authorization & config masking', () => {
   });
 
   it('strictly hides private sites from non-admin visitors while letting admin toggle visibility', async () => {
-    const env = {
+    const env = makeEnv({
       TOPIC_MAP: createMemoryKV(),
       BOT_TOKEN: token,
       ADMIN_IDS: '10001',
-    };
+    });
 
     await savePanelConfig(env, {
       sites: [
@@ -696,12 +720,12 @@ describe('Telegram sticker pack parser & metadata normalizer', () => {
 describe('Visitor bidirectional archive, signed media proxy & clear history', () => {
   it('extracts photos & links from both directions, signs media tokens, and clears archive/full topic', async () => {
     const kv = createMemoryKV();
-    const env = {
+    const env = makeEnv({
       TOPIC_MAP: kv,
       BOT_TOKEN: '111222:MEDIA_TEST_SECRET',
       SUPERGROUP_ID: '-100999888',
       ADMIN_IDS: '10001',
-    };
+    });
 
     await upsertVisitorProfile(env, { id: 30003, first_name: 'Clara', username: 'clara_tg' }, { threadId: 77 });
 
@@ -851,7 +875,7 @@ describe('4-Layer Intelligent Anti-Spam Shield', () => {
 
   it('checks CAS blacklist with KV caching and fails open on network errors', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv };
+    const env = makeEnv({ TOPIC_MAP: kv });
 
     const spamFetch = vi.fn(async () =>
       new Response(JSON.stringify({ ok: true, result: { offenses: 3 } }), { status: 200 })
@@ -878,11 +902,11 @@ describe('4-Layer Intelligent Anti-Spam Shield', () => {
 describe('One-click /bind & /unbind Forum Inbox binding', () => {
   it('allows authorized admin to bind and unbind a Forum supergroup while blocking strangers', async () => {
     const kv = createMemoryKV();
-    const env = {
+    const env = makeEnv({
       TOPIC_MAP: kv,
       BOT_TOKEN: '123456:BIND_TEST_TOKEN',
       ADMIN_IDS: '10001',
-    };
+    });
 
     const tgCalls = [];
     const origFetch = globalThis.fetch;
@@ -960,12 +984,12 @@ describe('One-click /bind & /unbind Forum Inbox binding', () => {
 });
 
 describe('Security hardening: webhook secret, /setup guard & DEV_PREVIEW scope', () => {
-  const baseEnv = () => ({
+  const baseEnv = () => (makeEnv({
     TOPIC_MAP: createMemoryKV(),
     BOT_TOKEN: '987654:UNIT_TEST_BOT_TOKEN',
     ADMIN_IDS: '10001',
     WEBHOOK_SECRET: 'unit-test-secret',
-  });
+  }));
   const forgedUpdate = JSON.stringify({
     update_id: 1,
     message: {
@@ -1064,7 +1088,7 @@ function createMockWebSocket(onSend) {
 }
 
 describe('Pluggable probe providers (Nezha v1 WS/REST & v0, NodeGet, generic JSON)', () => {
-  const env = () => ({ TOPIC_MAP: createMemoryKV() });
+  const env = () => (makeEnv({ TOPIC_MAP: createMemoryKV() }));
 
   it('fetches public Nezha v1 dashboards over /api/v1/ws/server without a token and converts country codes to flags', async () => {
     const origFetch = globalThis.fetch;
@@ -1255,7 +1279,7 @@ describe('Pluggable probe providers (Nezha v1 WS/REST & v0, NodeGet, generic JSO
 
   it('auto-detects generic JSON probes, isolates KV cache by provider, and rejects empty URL test', async () => {
     const kv = createMemoryKV();
-    const testEnv = { TOPIC_MAP: kv, BOT_TOKEN: '123:ABC', ADMIN_IDS: '10001', DEV_PREVIEW: 'true' };
+    const testEnv = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123:ABC', ADMIN_IDS: '10001', DEV_PREVIEW: 'true' });
     const origFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async () =>
       new Response(
@@ -1304,7 +1328,7 @@ describe('In-app version checker (Scheme A) & optional Fork syncer (Scheme B)', 
 
   it('checks latest GitHub release with 6h KV caching and supports forceRefresh', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv };
+    const env = makeEnv({ TOPIC_MAP: kv });
     const origFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async (url) => {
       expect(String(url)).toBe('https://api.github.com/repos/mango0114/rose-panel-bot/releases/latest');
@@ -1343,7 +1367,7 @@ describe('In-app version checker (Scheme A) & optional Fork syncer (Scheme B)', 
 
   it('falls back to raw package.json on GitHub 403/429 rate limits and caches errors for 30 min', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv };
+    const env = makeEnv({ TOPIC_MAP: kv });
     const origFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async (url) => {
       if (String(url).includes('api.github.com')) {
@@ -1380,13 +1404,13 @@ describe('In-app version checker (Scheme A) & optional Fork syncer (Scheme B)', 
 
   it('never writes env GITHUB_UPDATE_TOKEN into KV on savePanelConfig and returns clear 422 message for non-fork copies', async () => {
     const kv = createMemoryKV();
-    const env = {
+    const env = makeEnv({
       TOPIC_MAP: kv,
       BOT_TOKEN: '123:ENV_TOK_TEST',
       ADMIN_IDS: '10001',
       DEV_PREVIEW: 'true',
       GITHUB_UPDATE_TOKEN: 'env_super_secret_pat',
-    };
+    });
 
     // Save config with masked placeholder while token is only provided via env Secret
     await savePanelConfig(env, { updater: { forkRepo: 'bob/rose-panel-bot', branch: 'main', githubToken: '********' } });
@@ -1429,12 +1453,12 @@ describe('In-app version checker (Scheme A) & optional Fork syncer (Scheme B)', 
 
   it('validates fork repo strictly, syncs via GitHub merge-upstream, and masks/isolates token in API', async () => {
     const kv = createMemoryKV();
-    const env = {
+    const env = makeEnv({
       TOPIC_MAP: kv,
       BOT_TOKEN: '123:UPD_TEST',
       ADMIN_IDS: '10001',
       DEV_PREVIEW: 'true',
-    };
+    });
 
     // Rejects invalid repo, path traversal, and upstream self-sync
     expect((await syncForkWithUpstream(env, { forkRepo: '../evil', githubToken: 'tok' })).ok).toBe(false);
@@ -1498,11 +1522,11 @@ describe('In-app version checker (Scheme A) & optional Fork syncer (Scheme B)', 
 describe('Privacy-safe 3-way owner/bot card avatar proxy (/api/avatar/owner)', () => {
   it('defaults to bot avatar (ignoring client query overrides), switches to owner avatar when configured, and preserves legacy custom avatarUrl', async () => {
     const kv = createMemoryKV();
-    const env = {
+    const env = makeEnv({
       TOPIC_MAP: kv,
       BOT_TOKEN: '555000:AVATAR_TEST_TOKEN',
       ADMIN_IDS: '999888',
-    };
+    });
 
     const requestedUserIds = [];
     const origFetch = globalThis.fetch;
@@ -1550,12 +1574,12 @@ describe('Privacy-safe 3-way owner/bot card avatar proxy (/api/avatar/owner)', (
 describe('Topic visitor profile card clickable mention & optional avatar photo mode', () => {
   it('links visitor display name via tg://user?id= and sends compact text card by default', async () => {
     const kv = createMemoryKV();
-    const env = {
+    const env = makeEnv({
       TOPIC_MAP: kv,
       BOT_TOKEN: '777000:CARD_TEST_TOKEN',
       ADMIN_IDS: '10001',
       SUPERGROUP_ID: '-100999888',
-    };
+    });
     await upsertVisitorProfile(
       env,
       { id: 424242, first_name: 'NoHandleUser' },
@@ -1599,12 +1623,12 @@ describe('Topic visitor profile card clickable mention & optional avatar photo m
 
   it('sends photo visitor card when enabled, falls back when avatar hidden, and edits caption on moderation button', async () => {
     const kv = createMemoryKV();
-    const env = {
+    const env = makeEnv({
       TOPIC_MAP: kv,
       BOT_TOKEN: '777000:CARD_TEST_TOKEN',
       ADMIN_IDS: '10001',
       SUPERGROUP_ID: '-100999888',
-    };
+    });
     await savePanelConfig(env, { pmBot: { showVisitorAvatarInCard: true } });
     await upsertVisitorProfile(
       env,
@@ -1706,12 +1730,12 @@ describe('Topic visitor profile card clickable mention & optional avatar photo m
 describe('Configurable /start verification-first flow & panel button visibility', () => {
   it('immediately triggers verification on stranger /start, prompts to chat after passing, and honors welcome/panel toggles', async () => {
     const kv = createMemoryKV();
-    const env = {
+    const env = makeEnv({
       TOPIC_MAP: kv,
       BOT_TOKEN: '888000:WELCOME_TEST_TOKEN',
       ADMIN_IDS: '10001',
       SUPERGROUP_ID: '-100999888',
-    };
+    });
 
     const tgCalls = [];
     const origFetch = globalThis.fetch;
@@ -1811,12 +1835,12 @@ describe('Auto-reply & keyword reply engine', () => {
 
   it('replies to verified visitors via keyword rules (with optional silent no-forward) and enforces general auto-reply cooldown', async () => {
     const kv = createMemoryKV();
-    const env = {
+    const env = makeEnv({
       TOPIC_MAP: kv,
       BOT_TOKEN: '999000:AUTOREPLY_TEST_TOKEN',
       ADMIN_IDS: '10001',
       SUPERGROUP_ID: '-100777666',
-    };
+    });
 
     await savePanelConfig(env, {
       pmBot: {
@@ -1910,12 +1934,12 @@ describe('Auto-reply & keyword reply engine', () => {
 
   it('never triggers keyword or general auto-reply for unverified strangers before verification passes', async () => {
     const kv = createMemoryKV();
-    const env = {
+    const env = makeEnv({
       TOPIC_MAP: kv,
       BOT_TOKEN: '999000:AUTOREPLY_TEST_TOKEN',
       ADMIN_IDS: '10001',
       SUPERGROUP_ID: '-100777666',
-    };
+    });
     await savePanelConfig(env, {
       pmBot: {
         verificationMode: 'emoji',
@@ -2019,7 +2043,7 @@ describe('v1.5.0 edge cases: caption limits, fallbacks, welcome toggles & pendin
 
   it('sends a photo card when a brand-new visitor topic is created', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '999000:EDGE', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '999000:EDGE', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777' });
     await savePanelConfig(env, {
       pmBot: { showVisitorAvatarInCard: true, verificationMode: 'off', enableCasCheck: false },
     });
@@ -2050,7 +2074,7 @@ describe('v1.5.0 edge cases: caption limits, fallbacks, welcome toggles & pendin
 
   it('falls back to a text card when sendPhoto fails, and to editMessageReplyMarkup when a caption edit fails', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '999000:EDGE', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '999000:EDGE', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777' });
     await savePanelConfig(env, { pmBot: { showVisitorAvatarInCard: true } });
     await upsertVisitorProfile(env, { id: 717171, first_name: 'Carol' }, { threadId: 55, incrementMsg: false });
     await kv.put('thread:55', '717171');
@@ -2101,7 +2125,7 @@ describe('v1.5.0 edge cases: caption limits, fallbacks, welcome toggles & pendin
 
   it('honors the welcome toggles when inbox is off (no group or ADMIN_IDS), and handles /start with a payload', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '999000:EDGE' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '999000:EDGE' });
     const { calls, fetchMock } = mockTelegram();
     const privateMsg = (text) => ({
       message: { message_id: 3, from: { id: 818181, first_name: 'Dan' }, chat: { id: 818181, type: 'private' }, text },
@@ -2127,7 +2151,7 @@ describe('v1.5.0 edge cases: caption limits, fallbacks, welcome toggles & pendin
 
   it('does not match keyword rules against the placeholder preview of replayed media messages', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '999000:EDGE', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '999000:EDGE', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777' });
     await savePanelConfig(env, {
       pmBot: {
         keywordReplies: [{ keywords: '图片', reply: '图片请发原图哦', matchMode: 'contains', forwardToAdmin: false }],
@@ -2167,7 +2191,7 @@ describe('Card labels cleanup (labelsRev 2)', () => {
     expect('showCardName' in DEFAULT_CONFIG.profile).toBe(false);
 
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:LABELS', ADMIN_IDS: '10001' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123:LABELS', ADMIN_IDS: '10001' });
 
     // Config saved by an older version still carries the shipped defaults verbatim
     await kv.put(
@@ -2198,12 +2222,12 @@ describe('Card labels cleanup (labelsRev 2)', () => {
 describe('Honeypot / CAS auto-ban visibility & unban cooldown clearing', () => {
   it('defaults honeypot click to temporary cooldown (preventing permanent lockout) with single-shot cooldown reminder', async () => {
     const kv = createMemoryKV();
-    const env = {
+    const env = makeEnv({
       TOPIC_MAP: kv,
       BOT_TOKEN: '555111:HONEYPOT_TEST_TOKEN',
       ADMIN_IDS: '10001',
       SUPERGROUP_ID: '-100888999',
-    };
+    });
 
     const tgPayloads = [];
     const origFetch = globalThis.fetch;
@@ -2270,12 +2294,12 @@ describe('Honeypot / CAS auto-ban visibility & unban cooldown clearing', () => {
 
   it('supports strict honeypot ban mode, recovers pre-v1.5.3 orphan banned:* keys, and prevents CAS re-ban after manual unban', async () => {
     const kv = createMemoryKV();
-    const env = {
+    const env = makeEnv({
       TOPIC_MAP: kv,
       BOT_TOKEN: '555111:HONEYPOT_TEST_TOKEN',
       ADMIN_IDS: '10001',
       SUPERGROUP_ID: '-100888999',
-    };
+    });
 
     const origFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({ ok: true, result: { message_id: 50 } }), { status: 200 }));
@@ -2352,7 +2376,7 @@ describe('v1.6.0: Mini App PM wake-up, Bot surface sync, legacy social cleanup, 
   it('cleans legacy non-clickable TG social row once while preserving custom socials', async () => {
     expect(DEFAULT_CONFIG.profile.socials).toHaveLength(1);
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:SOC', ADMIN_IDS: '10001' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123:SOC', ADMIN_IDS: '10001' });
 
     await kv.put(
       'config:panel',
@@ -2373,12 +2397,12 @@ describe('v1.6.0: Mini App PM wake-up, Bot surface sync, legacy social cleanup, 
   it('wakes up verification from POST /api/chat/start, syncs Bot description & menu button on save, supports /del recall & General topic hint', async () => {
     const kv = createMemoryKV();
     const botToken = '777888:SURFACE_TEST_TOKEN';
-    const env = {
+    const env = makeEnv({
       TOPIC_MAP: kv,
       BOT_TOKEN: botToken,
       ADMIN_IDS: '10001',
       SUPERGROUP_ID: '-100555666',
-    };
+    });
 
     const tgCalls = [];
     const origFetch = globalThis.fetch;
@@ -2539,14 +2563,14 @@ describe('v1.6.0 review fixes: challenge refresh cannot reset failures, rate lim
 
   it('keeps failure count, queued messages and Turnstile escalation when /start re-issues a challenge', async () => {
     const kv = createMemoryKV();
-    const env = {
+    const env = makeEnv({
       TOPIC_MAP: kv,
       BOT_TOKEN: '555:REFRESH',
       ADMIN_IDS: '10001',
       SUPERGROUP_ID: '-100123',
       TURNSTILE_SITE_KEY: 'site',
       TURNSTILE_SECRET: 'secret',
-    };
+    });
     const { fetchMock } = mockTg();
 
     await withFetch(fetchMock, async () => {
@@ -2582,7 +2606,7 @@ describe('v1.6.0 review fixes: challenge refresh cannot reset failures, rate lim
   it('caps repeated /start challenges and Mini App PM wake-ups per user', async () => {
     const kv = createMemoryKV();
     const botToken = '556:LIMITS';
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001', SUPERGROUP_ID: '-100124' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001', SUPERGROUP_ID: '-100124' });
     const { calls, fetchMock } = mockTg();
 
     await withFetch(fetchMock, async () => {
@@ -2615,7 +2639,7 @@ describe('v1.6.0 review fixes: challenge refresh cannot reset failures, rate lim
   it('caches the bot @username in the same KV write as the owner settings save', async () => {
     const kv = createMemoryKV();
     const botToken = '557:USERNAME';
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001' });
     const { calls, fetchMock } = mockTg();
     const putSpy = vi.spyOn(kv, 'put');
 
@@ -2648,12 +2672,12 @@ describe('Mini App in-panel visitor chat log, direct text/photo reply & recall',
   it('blocks non-admins, sends text & multipart photo replies to visitor + mirrors to topic, signs chat history, and recalls cleanly', async () => {
     const kv = createMemoryKV();
     const botToken = '999111:CHAT_DRAWER_TOKEN';
-    const env = {
+    const env = makeEnv({
       TOPIC_MAP: kv,
       BOT_TOKEN: botToken,
       ADMIN_IDS: '10001',
       SUPERGROUP_ID: '-100888777',
-    };
+    });
 
     await upsertVisitorProfile(
       env,
@@ -2864,7 +2888,7 @@ describe('Mini App in-panel visitor chat log, direct text/photo reply & recall',
   it('mirrors panel replies to the topic as a blockquote quoting the latest visitor message, without a text label', async () => {
     const kv = createMemoryKV();
     const botToken = '999222:MIRROR_STYLE';
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777' });
     await upsertVisitorProfile(env, { id: 91919, first_name: 'Momo' }, { threadId: 55, incrementMsg: false });
     await kv.put('thread:55', '91919');
     await kv.put('verified:91919', 'emoji:v1');
@@ -2948,7 +2972,7 @@ describe('Mini App in-panel visitor chat log, direct text/photo reply & recall',
   it('reply fast path: reuses the known topic without rewriting the thread map, and a failed delivery writes nothing', async () => {
     const kv = createMemoryKV();
     const botToken = '999333:FAST_REPLY';
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777' });
     await upsertVisitorProfile(env, { id: 92929, first_name: 'Kiki' }, { threadId: 66, incrementMsg: false });
     await kv.put('thread:66', '92929');
 
@@ -3007,7 +3031,7 @@ describe('Mini App in-panel visitor chat log, direct text/photo reply & recall',
 
   it('recall fails fast past 48 hours and only deletes the topic copy after the visitor-side delete succeeds', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, SUPERGROUP_ID: '-100777' };
+    const env = makeEnv({ TOPIC_MAP: kv, SUPERGROUP_ID: '-100777' });
     const now = Date.now();
     await kv.put(
       'history:93939',
@@ -3062,7 +3086,7 @@ describe('Mini App in-panel visitor chat log, direct text/photo reply & recall',
   it('confirms a panel reply before the topic mirror, attaches the mirror later, and cleans it up if recalled first', async () => {
     const kv = createMemoryKV();
     const botToken = '999444:BG_MIRROR';
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777' });
     await upsertVisitorProfile(env, { id: 94949, first_name: 'Bea' }, { threadId: 77, incrementMsg: false });
     await kv.put('thread:77', '94949');
 
@@ -3148,10 +3172,17 @@ describe('Mini App in-panel visitor chat log, direct text/photo reply & recall',
 
   it('reads chat history with the shortest KV edge cache so new visitor messages show up sooner', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv };
+    const env = makeEnv({ TOPIC_MAP: kv });
     const getSpy = vi.spyOn(kv, 'get');
     await getVisitorHistory(env, '95959');
-    expect(getSpy).toHaveBeenCalledWith('history:95959', expect.objectContaining({ cacheTtl: HISTORY_CACHE_TTL_SECONDS, type: 'json' }));
+    if (storageMode === 'kv') {
+      expect(getSpy).toHaveBeenCalledWith('history:95959', expect.objectContaining({ cacheTtl: HISTORY_CACHE_TTL_SECONDS, type: 'json' }));
+    } else {
+      expect(getSpy).toHaveBeenCalledTimes(1);
+      getSpy.mockClear();
+      await getVisitorHistory(env, '95959');
+      expect(getSpy).not.toHaveBeenCalled();
+    }
     expect(HISTORY_CACHE_TTL_SECONDS).toBe(30);
   });
 
@@ -3239,22 +3270,22 @@ describe('Bot DM direct push inbox (dm-inbox)', () => {
 
   it('resolves inbox mode accurately across topic, dm, and off configurations', async () => {
     const kv = createMemoryKV();
-    expect(await resolveInboxMode({ TOPIC_MAP: kv })).toBe('off');
-    expect(getOwnerChatId({ TOPIC_MAP: kv })).toBe('');
+    expect(await resolveInboxMode(makeEnv({ TOPIC_MAP: kv }))).toBe('off');
+    expect(getOwnerChatId(makeEnv({ TOPIC_MAP: kv }))).toBe('');
 
-    expect(await resolveInboxMode({ TOPIC_MAP: kv, ADMIN_IDS: '10001, 10002' })).toBe('dm');
-    expect(getOwnerChatId({ TOPIC_MAP: kv, ADMIN_IDS: '10001, 10002' })).toBe('10001');
+    expect(await resolveInboxMode(makeEnv({ TOPIC_MAP: kv, ADMIN_IDS: '10001, 10002' }))).toBe('dm');
+    expect(getOwnerChatId(makeEnv({ TOPIC_MAP: kv, ADMIN_IDS: '10001, 10002' }))).toBe('10001');
 
-    expect(await resolveInboxMode({ TOPIC_MAP: kv, ADMIN_IDS: '10001', SUPERGROUP_ID: '-100123' })).toBe('topic');
+    expect(await resolveInboxMode(makeEnv({ TOPIC_MAP: kv, ADMIN_IDS: '10001', SUPERGROUP_ID: '-100123' }))).toBe('topic');
 
     // KV-bound supergroup also selects topic mode immediately
     await kv.put('config:supergroup_id', '-100456');
-    expect(await resolveInboxMode({ TOPIC_MAP: kv, ADMIN_IDS: '10001' })).toBe('topic');
+    expect(await resolveInboxMode(makeEnv({ TOPIC_MAP: kv, ADMIN_IDS: '10001' }))).toBe('topic');
   });
 
   it('pushes visitor card on demand (10min / visitor switch), copies message verbatim, and records dmmap & archive', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:DM_PUSH', ADMIN_IDS: '10001,10002' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123:DM_PUSH', ADMIN_IDS: '10001,10002' });
     await kv.put('verified:20001', 'emoji:v1');
     await kv.put('verified:20002', 'emoji:v1');
 
@@ -3290,8 +3321,21 @@ describe('Bot DM direct push inbox (dm-inbox)', () => {
       // Must NOT push to second admin 10002
       expect(calls.some((c) => Number(c.body.chat_id) === 10002)).toBe(false);
       // Both header card and copied message mapped to visitor 20001 (copied visitor msg carries `{ u, p }`)
-      expect(await kv.get(`${DM_MAP_PREFIX}501`)).toBe('20001');
-      expect(JSON.parse(await kv.get(`${DM_MAP_PREFIX}502`))).toEqual({ u: '20001', p: 11 });
+      if (storageMode === 'kv') {
+        expect(await kv.get(`${DM_MAP_PREFIX}501`)).toBe('20001');
+        expect(JSON.parse(await kv.get(`${DM_MAP_PREFIX}502`))).toEqual({ u: '20001', p: 11 });
+      } else {
+        expect(await kv.get(`${DM_MAP_PREFIX}501`)).toBeNull();
+        expect(await kv.get(`${DM_MAP_PREFIX}502`)).toBeNull();
+        expect(await env.DB.prepare(`SELECT uid, pm_message_id FROM dm_map WHERE owner_msg_id = 501`).first()).toEqual({
+          uid: '20001',
+          pm_message_id: null,
+        });
+        expect(await env.DB.prepare(`SELECT uid, pm_message_id FROM dm_map WHERE owner_msg_id = 502`).first()).toEqual({
+          uid: '20001',
+          pm_message_id: 11,
+        });
+      }
       expect(await lookupDmMessageMap(env, 502)).toBe('20001');
 
       // Visitor profile & archive saved cleanly without thread_id
@@ -3317,7 +3361,15 @@ describe('Bot DM direct push inbox (dm-inbox)', () => {
       );
       expect(calls.filter((c) => c.method === 'sendMessage' && c.body.chat_id === 10001)).toHaveLength(0);
       expect(calls.filter((c) => c.method === 'copyMessage' && c.body.chat_id === 10001)).toHaveLength(1);
-      expect(JSON.parse(await kv.get(`${DM_MAP_PREFIX}503`))).toEqual({ u: '20001', p: 12 });
+      if (storageMode === 'kv') {
+        expect(JSON.parse(await kv.get(`${DM_MAP_PREFIX}503`))).toEqual({ u: '20001', p: 12 });
+      } else {
+        expect(await kv.get(`${DM_MAP_PREFIX}503`)).toBeNull();
+        expect(await env.DB.prepare(`SELECT uid, pm_message_id FROM dm_map WHERE owner_msg_id = 503`).first()).toEqual({
+          uid: '20001',
+          pm_message_id: 12,
+        });
+      }
       expect(await lookupDmMessageMap(env, 503)).toBe('20001');
 
       // 3. Same visitor sends after >10 minutes -> re-sends header card
@@ -3364,7 +3416,7 @@ describe('Bot DM direct push inbox (dm-inbox)', () => {
 
   it('delivers owner quote-replies to visitor, records admin exchange, and chains replies to own reply', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:DM_REPLY', ADMIN_IDS: '10001' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123:DM_REPLY', ADMIN_IDS: '10001' });
     await kv.put(`${DM_MAP_PREFIX}502`, '20001');
     await upsertVisitorProfile(env, { id: 20001, first_name: 'Alice' }, { incrementMsg: false });
 
@@ -3396,7 +3448,12 @@ describe('Bot DM direct push inbox (dm-inbox)', () => {
         )
       ).toBe(true);
       // Owner's own reply is also mapped in dmmap
-      expect(await kv.get(`${DM_MAP_PREFIX}601`)).toBe('20001');
+      if (storageMode === 'kv') {
+        expect(await kv.get(`${DM_MAP_PREFIX}601`)).toBe('20001');
+      } else {
+        expect(await kv.get(`${DM_MAP_PREFIX}601`)).toBeNull();
+        expect(await lookupDmMessageMap(env, 601)).toBe('20001');
+      }
 
       const hist = await getVisitorHistory(env, '20001');
       expect(hist.messages).toHaveLength(1);
@@ -3427,7 +3484,7 @@ describe('Bot DM direct push inbox (dm-inbox)', () => {
 
   it('never guesses recipient when owner does not quote or quotes unknown message, and hints only once per 24h', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:DM_HINT', ADMIN_IDS: '10001' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123:DM_HINT', ADMIN_IDS: '10001' });
     await upsertVisitorProfile(env, { id: 20001, first_name: 'Alice' }, { incrementMsg: true });
     await kv.put(DM_LAST_HEADER_KEY, JSON.stringify({ uid: '20001', at: Date.now() }));
 
@@ -3474,7 +3531,7 @@ describe('Bot DM direct push inbox (dm-inbox)', () => {
 
   it('supports /ban, /info, and strict /del in DM mode without falling back to most recent reply', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:DM_CMD', ADMIN_IDS: '10001' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123:DM_CMD', ADMIN_IDS: '10001' });
     await upsertVisitorProfile(env, { id: 20001, first_name: 'Alice', username: 'alice_tg' }, { incrementMsg: false });
     await kv.put(`${DM_MAP_PREFIX}502`, '20001'); // pushed visitor msg
     await kv.put(`${DM_MAP_PREFIX}601`, '20001'); // owner reply #1
@@ -3595,7 +3652,7 @@ describe('Bot DM direct push inbox (dm-inbox)', () => {
   it('enforces verification in DM mode (no supergroup bound) on /start, normal PM, and Mini App /api/chat/start', async () => {
     const kv = createMemoryKV();
     const botToken = '123:DM_VERIFY';
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001' });
     const { calls, fetchMock } = createMockTg({ nextMsgStart: 300 });
 
     await withFetch(fetchMock, async () => {
@@ -3690,7 +3747,7 @@ describe('Bot DM direct push inbox (dm-inbox)', () => {
   it('records dm:owner_unreachable on 403 push failure, preserves message in panel archive, and exposes status only to admin', async () => {
     const kv = createMemoryKV();
     const botToken = '123:DM_403';
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001' });
     await kv.put('verified:20001', 'emoji:v1');
 
     const { calls, fetchMock, state } = createMockTg({ failOwnerPush: true });
@@ -3781,7 +3838,7 @@ describe('Bot DM direct push inbox (dm-inbox)', () => {
   it('sends silent keyword notice in DM mode and preserves full regression behavior in topic mode', async () => {
     // Part A: DM mode silent keyword auto-reply notice
     const dmKv = createMemoryKV();
-    const dmEnv = { TOPIC_MAP: dmKv, BOT_TOKEN: '123:DM_KW', ADMIN_IDS: '10001' };
+    const dmEnv = makeEnv({ TOPIC_MAP: dmKv, BOT_TOKEN: '123:DM_KW', ADMIN_IDS: '10001' });
     await savePanelConfig(dmEnv, {
       pmBot: {
         keywordReplies: [{ id: 'kw1', keywords: '友链', matchMode: 'contains', reply: '欢迎换友链', forwardToAdmin: true }],
@@ -3816,12 +3873,12 @@ describe('Bot DM direct push inbox (dm-inbox)', () => {
 
     // Part B: Regression in topic mode (forwarding, topic reply, /del, keyword notice, unchanged KV schema)
     const topicKv = createMemoryKV();
-    const topicEnv = {
+    const topicEnv = makeEnv({
       TOPIC_MAP: topicKv,
       BOT_TOKEN: '123:TOPIC_REG',
       ADMIN_IDS: '10001',
       SUPERGROUP_ID: '-100999111',
-    };
+    });
     await savePanelConfig(topicEnv, {
       pmBot: {
         keywordReplies: [{ id: 'kw2', keywords: '合作', matchMode: 'contains', reply: '请留联系方式', forwardToAdmin: true }],
@@ -3925,7 +3982,7 @@ describe('Bot DM direct push inbox (dm-inbox)', () => {
 
   it('never resolves dmmap for a non-owner admin (per-chat message IDs collide) and hints once per 24h', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:DM_COADMIN', ADMIN_IDS: '10001,10002' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123:DM_COADMIN', ADMIN_IDS: '10001,10002' });
     // Owner's message #42 maps to visitor 20001; co-admin 10002 also has a message #42 in their own chat
     await kv.put(`${DM_MAP_PREFIX}42`, '20001');
 
@@ -3955,7 +4012,7 @@ describe('Bot DM direct push inbox (dm-inbox)', () => {
 
   it('does not flag owner unreachable when a push fails for a non-403 reason', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:DM_400', ADMIN_IDS: '10001' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123:DM_400', ADMIN_IDS: '10001' });
     await kv.put('verified:20001', 'emoji:v1');
 
     const { fetchMock: baseFetch } = createMockTg();
@@ -3992,7 +4049,7 @@ describe('Bot DM direct push inbox (dm-inbox)', () => {
 
   it('does not forward an unknown command to the visitor when the owner quotes a push', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:DM_UNKNOWN_CMD', ADMIN_IDS: '10001' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123:DM_UNKNOWN_CMD', ADMIN_IDS: '10001' });
     await kv.put(`${DM_MAP_PREFIX}42`, '20001');
 
     const { calls, fetchMock } = createMockTg();
@@ -4019,7 +4076,7 @@ describe('Bot DM direct push inbox (dm-inbox)', () => {
 
   it('tells visitors messaging is unavailable instead of inviting them to type when the inbox is off', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:INBOX_OFF' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123:INBOX_OFF' });
 
     const { calls, fetchMock } = createMockTg();
     await withFetch(fetchMock, async () => {
@@ -4080,7 +4137,7 @@ describe('Probe offline & resource alerts (v1.8)', () => {
   it('skips probe fetch and performs zero KV writes when disabled, unconfigured, or in demoMode', async () => {
     const kv = createMemoryKV();
     const putSpy = vi.spyOn(kv, 'put');
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:ALERT', ADMIN_IDS: '10001' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123:ALERT', ADMIN_IDS: '10001' });
     const { tgCalls, probeCalls, fetchMock } = setupMockNet();
     const tick = Date.parse('2026-11-26T10:00:00Z');
 
@@ -4117,7 +4174,7 @@ describe('Probe offline & resource alerts (v1.8)', () => {
 
   it('requires confirmChecks consecutive misses before offline alert, avoids duplicates, and sends silent recovery with duration', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:ALERT_OFF', ADMIN_IDS: '10001' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123:ALERT_OFF', ADMIN_IDS: '10001' });
     await savePanelConfig(env, {
       siteOrigin: 'https://panel.test',
       probe: {
@@ -4183,7 +4240,7 @@ describe('Probe offline & resource alerts (v1.8)', () => {
 
   it('sends only one probe-down alert when probe endpoint fails without flagging nodes offline, then sends recovery', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:PROBE_DOWN', ADMIN_IDS: '10001' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123:PROBE_DOWN', ADMIN_IDS: '10001' });
     await savePanelConfig(env, {
       probe: {
         provider: 'json',
@@ -4235,7 +4292,7 @@ describe('Probe offline & resource alerts (v1.8)', () => {
 
   it('never alerts on first-seen offline nodes, skips muted nodes, and treats vanished nodes as offline until pruned', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:FIRST_MUTE', ADMIN_IDS: '10001' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123:FIRST_MUTE', ADMIN_IDS: '10001' });
     await savePanelConfig(env, {
       probe: {
         provider: 'json',
@@ -4296,7 +4353,7 @@ describe('Probe offline & resource alerts (v1.8)', () => {
 
   it('triggers resource breach alert only after sustainChecks consecutive ticks, once per breach, and clears silently on drop', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:RES', ADMIN_IDS: '10001' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123:RES', ADMIN_IDS: '10001' });
     await savePanelConfig(env, {
       probe: {
         provider: 'json',
@@ -4352,7 +4409,7 @@ describe('Probe offline & resource alerts (v1.8)', () => {
 
   it('respects intervalMinutes gating, performs zero KV writes when steady-state healthy, and honors skipCacheWrite', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:ZERO_WRITE', ADMIN_IDS: '10001' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123:ZERO_WRITE', ADMIN_IDS: '10001' });
     await savePanelConfig(env, {
       probe: {
         provider: 'json',
@@ -4391,14 +4448,14 @@ describe('Probe offline & resource alerts (v1.8)', () => {
   it('routes alerts to dedicated Forum Topic (reusing & recreating if deleted), merges >10 alerts, and supports alert-test API with rate limit', async () => {
     const kv = createMemoryKV();
     const botToken = '123:ALERT_ROUTE';
-    const env = {
+    const env = makeEnv({
       TOPIC_MAP: kv,
       BOT_TOKEN: botToken,
       ADMIN_IDS: '10001',
       SUPERGROUP_ID: '-100555999',
       BOT_USERNAME: 'RoseTest_bot',
       APP_SHORT_NAME: 'panel',
-    };
+    });
     await savePanelConfig(env, {
       probe: {
         provider: 'json',
@@ -4509,7 +4566,7 @@ describe('Probe offline & resource alerts (v1.8)', () => {
 
   it('strips probe.alerts from sanitizePublicConfig while keeping it clamped in sanitizeAdminConfig', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, ADMIN_IDS: '10001' };
+    const env = makeEnv({ TOPIC_MAP: kv, ADMIN_IDS: '10001' });
     const saved = await savePanelConfig(env, {
       probe: {
         url: 'https://probe.test',
@@ -4547,7 +4604,7 @@ describe('Probe offline & resource alerts (v1.8)', () => {
 
   it('does not reuse a cached alert topic after rebinding to a different group', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:REBIND', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100111' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123:REBIND', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100111' });
     // Group A's alert topic was thread 57; the owner then rebinds to group B (where 57 is a visitor topic)
     await kv.put(ALERT_TOPIC_ID_KEY, JSON.stringify({ chatId: '-100111', threadId: 57 }));
     await kv.put('config:supergroup_id', '-100222');
@@ -4573,7 +4630,7 @@ describe('Probe offline & resource alerts (v1.8)', () => {
 
   it('treats a sudden empty node list as a probe failure instead of mass offline alerts', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:EMPTY', ADMIN_IDS: '10001' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123:EMPTY', ADMIN_IDS: '10001' });
     await savePanelConfig(env, {
       probe: {
         provider: 'json',
@@ -4613,7 +4670,7 @@ describe('Probe offline & resource alerts (v1.8)', () => {
   it('keeps the existing siteOrigin when settings are saved from another origin (e.g. a preview URL)', async () => {
     const kv = createMemoryKV();
     const botToken = '123:ORIGIN';
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001', BOT_USERNAME: 'RoseTest_bot' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001', BOT_USERNAME: 'RoseTest_bot' });
     const now = Math.floor(Date.now() / 1000);
     const adminInit = await signInitData(
       { auth_date: String(now), user: JSON.stringify({ id: 10001, first_name: 'Owner' }) },
@@ -4646,7 +4703,7 @@ describe('Probe offline & resource alerts (v1.8)', () => {
 
 describe('Share card poster & Open Graph link preview (v1.8)', () => {
   function createHtmlAssetsEnv(kv, extra = {}) {
-    return {
+    return makeEnv({
       TOPIC_MAP: kv,
       ASSETS: {
         async fetch() {
@@ -4657,7 +4714,7 @@ describe('Share card poster & Open Graph link preview (v1.8)', () => {
         },
       },
       ...extra,
-    };
+    });
   }
 
   it('injects OG meta tags, single <title>, and truncates og:description to 160 chars', async () => {
@@ -4760,11 +4817,11 @@ describe('Share card poster & Open Graph link preview (v1.8)', () => {
 
   it('computes shareUrl using t.me direct link when BOT_USERNAME & APP_SHORT_NAME are set, else site origin', async () => {
     const kv = createMemoryKV();
-    const config = await loadPanelConfig({ TOPIC_MAP: kv });
+    const config = await loadPanelConfig(makeEnv({ TOPIC_MAP: kv }));
 
     const withDirect = sanitizePublicConfig(
       config,
-      { TOPIC_MAP: kv, BOT_USERNAME: '@Rose202_bot', APP_SHORT_NAME: 'panel' },
+      makeEnv({ TOPIC_MAP: kv, BOT_USERNAME: '@Rose202_bot', APP_SHORT_NAME: 'panel' }),
       false,
       'https://panel.example.com'
     );
@@ -4772,13 +4829,13 @@ describe('Share card poster & Open Graph link preview (v1.8)', () => {
 
     const withoutAppShort = sanitizePublicConfig(
       config,
-      { TOPIC_MAP: kv, BOT_USERNAME: 'Rose202_bot' },
+      makeEnv({ TOPIC_MAP: kv, BOT_USERNAME: 'Rose202_bot' }),
       false,
       'https://panel.example.com'
     );
     expect(withoutAppShort.shareUrl).toBe('https://panel.example.com/');
 
-    const withoutBot = sanitizePublicConfig(config, { TOPIC_MAP: kv }, false, 'https://panel.example.com');
+    const withoutBot = sanitizePublicConfig(config, makeEnv({ TOPIC_MAP: kv }), false, 'https://panel.example.com');
     expect(withoutBot.shareUrl).toBe('https://panel.example.com/');
   });
 });
@@ -4809,11 +4866,11 @@ describe('Visitor source parameter attribution & promo links (v1.8)', () => {
 
   it('records src:{uid} during /start before verification, persists onto profile on first message, and deletes src:{uid}', async () => {
     const kv = createMemoryKV();
-    const env = {
+    const env = makeEnv({
       TOPIC_MAP: kv,
       BOT_TOKEN: '123456:TEST_TOKEN',
       ADMIN_IDS: '999001',
-    };
+    });
     await savePanelConfig(env, {
       pmBot: { enableVerification: true, verificationMode: 'emoji', enableCasCheck: false },
     });
@@ -4887,11 +4944,11 @@ describe('Visitor source parameter attribution & promo links (v1.8)', () => {
 
   it('keeps first-touch source only: never overwrites pending src:{uid} or existing visitor source', async () => {
     const kv = createMemoryKV();
-    const env = {
+    const env = makeEnv({
       TOPIC_MAP: kv,
       BOT_TOKEN: '123456:TEST_TOKEN',
       ADMIN_IDS: '999001',
-    };
+    });
     await savePanelConfig(env, {
       pmBot: { enableVerification: false, verificationMode: 'off', enableCasCheck: false },
     });
@@ -4948,11 +5005,11 @@ describe('Visitor source parameter attribution & promo links (v1.8)', () => {
 
   it('ignores /start panel, bare /start, invalid /start src_<script>, and admin /start src_site', async () => {
     const kv = createMemoryKV();
-    const env = {
+    const env = makeEnv({
       TOPIC_MAP: kv,
       BOT_TOKEN: '123456:TEST_TOKEN',
       ADMIN_IDS: '999001',
-    };
+    });
     await savePanelConfig(env, {
       pmBot: { enableVerification: true, verificationMode: 'emoji', enableCasCheck: false },
     });
@@ -5009,11 +5066,11 @@ describe('Visitor source parameter attribution & promo links (v1.8)', () => {
   it('records valid source from POST /api/chat/start and ignores invalid source', async () => {
     const kv = createMemoryKV();
     const botToken = '123456:CHAT_SRC_SECRET';
-    const env = {
+    const env = makeEnv({
       TOPIC_MAP: kv,
       BOT_TOKEN: botToken,
       ADMIN_IDS: '999001',
-    };
+    });
     await savePanelConfig(env, {
       pmBot: { enableVerification: true, verificationMode: 'emoji', enableCasCheck: false },
     });
@@ -5090,7 +5147,7 @@ describe('Visitor source parameter attribution & promo links (v1.8)', () => {
 
   it('computes source stats on the fly with legacy visitors grouped under 未知 and zero KV writes on read', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, ADMIN_IDS: '999001' };
+    const env = makeEnv({ TOPIC_MAP: kv, ADMIN_IDS: '999001' });
 
     await rememberPendingSource(env, '60101', 'poster');
     await upsertVisitorProfile(env, { id: 60101, first_name: 'U1' }, { incrementMsg: true });
@@ -5144,7 +5201,7 @@ describe('Monthly unique visitor counter (v1.8)', () => {
   it('counts a returning visitor once per month and performs zero KV writes on repeat opens', async () => {
     const kv = createMemoryKV();
     const botToken = '123456:VISIT_SECRET';
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '900001' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '900001' });
 
     const visitorInit = await signInitData(
       { user: JSON.stringify({ id: 70001, first_name: 'Alice' }), auth_date: Math.floor(Date.now() / 1000) },
@@ -5188,7 +5245,7 @@ describe('Monthly unique visitor counter (v1.8)', () => {
   it('counts two distinct Telegram visitors as 2 and ignores admin, preview, and anonymous web visits', async () => {
     const kv = createMemoryKV();
     const botToken = '123456:VISIT_MULTI';
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '900001', DEV_PREVIEW: 'true' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '900001', DEV_PREVIEW: 'true' });
 
     const u1Init = await signInitData(
       { user: JSON.stringify({ id: 71001, first_name: 'One' }), auth_date: Math.floor(Date.now() / 1000) },
@@ -5234,7 +5291,7 @@ describe('Monthly unique visitor counter (v1.8)', () => {
 
   it('calculates month rollover using owner timezoneOffsetHours and exposes lastMonth accurately', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv };
+    const env = makeEnv({ TOPIC_MAP: kv });
     const cfg = { community: { timezoneOffsetHours: 8 } };
 
     // UTC 2026-01-31 15:30 = UTC+8 2026-01-31 23:30 -> January (202601)
@@ -5258,7 +5315,7 @@ describe('Monthly unique visitor counter (v1.8)', () => {
   it('fails open on KV write errors so /api/bootstrap still succeeds normally', async () => {
     const kv = createMemoryKV();
     const botToken = '123456:VISIT_FAILOPEN';
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '900001' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '900001' });
 
     vi.spyOn(kv, 'put').mockRejectedValue(new Error('KV daily write quota exceeded'));
 
@@ -5278,7 +5335,7 @@ describe('Monthly unique visitor counter (v1.8)', () => {
   it('hides visitStats when showVisitCounter is false, exposes only thisMonth when true, and always gives admin both numbers', async () => {
     const kv = createMemoryKV();
     const botToken = '123456:VISIT_VISIBILITY';
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '900001' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '900001' });
 
     const cfgDefault = await loadPanelConfig(env);
     expect(cfgDefault.profile.showVisitCounter).toBe(false);
@@ -5343,7 +5400,7 @@ describe('Monthly unique visitor counter (v1.8)', () => {
 describe('Card footer signature & Get-Same-Card config (v1.8)', () => {
   it('defaults showPoweredBy to true in public config', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv };
+    const env = makeEnv({ TOPIC_MAP: kv });
     const cfg = await loadPanelConfig(env);
     expect(cfg.profile.showPoweredBy).toBe(true);
 
@@ -5353,7 +5410,7 @@ describe('Card footer signature & Get-Same-Card config (v1.8)', () => {
 
   it('persists showPoweredBy: false and normalizes non-boolean values to strict booleans', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv };
+    const env = makeEnv({ TOPIC_MAP: kv });
 
     // Disable explicitly
     await savePanelConfig(env, { profile: { showPoweredBy: false } });
@@ -5383,7 +5440,7 @@ describe('Card footer signature & Get-Same-Card config (v1.8)', () => {
 
   it('defaults showPoweredBy to true when loading legacy KV config without the field', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv };
+    const env = makeEnv({ TOPIC_MAP: kv });
     await kv.put(
       'config:panel',
       JSON.stringify({
@@ -5422,12 +5479,12 @@ describe('Bidirectional Telegram reaction sync & panel display (v1.9)', () => {
 
   it('registers message_reaction in /setup allowed_updates using WEBHOOK_ALLOWED_UPDATES', async () => {
     const kv = createMemoryKV();
-    const env = {
+    const env = makeEnv({
       TOPIC_MAP: kv,
       BOT_TOKEN: '123456:SETUP_REACT',
       WEBHOOK_SECRET: 'setup-secret-123',
       ADMIN_IDS: '10001',
-    };
+    });
     const tg = mockTgForReactions();
     try {
       const res = await worker.fetch(new Request('https://panel.test/setup?secret=setup-secret-123'), env);
@@ -5447,12 +5504,12 @@ describe('Bidirectional Telegram reaction sync & panel display (v1.9)', () => {
     // 1. Missing message_reaction + WEBHOOK_SECRET set -> resets with SAME url & secret_token
     {
       const kv = createMemoryKV();
-      const env = {
+      const env = makeEnv({
         TOPIC_MAP: kv,
         BOT_TOKEN: '123456:AUTO_UPGRADE',
         WEBHOOK_SECRET: 'sec-keep-me',
         ADMIN_IDS: '10001',
-      };
+      });
       const tg = mockTgForReactions((method) => {
         if (method === 'getWebhookInfo') {
           return new Response(
@@ -5491,7 +5548,7 @@ describe('Bidirectional Telegram reaction sync & panel display (v1.9)', () => {
     // 2. Webhook already contains message_reaction -> does NOT call setWebhook, still records rev
     {
       const kv = createMemoryKV();
-      const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:ALREADY_OK', WEBHOOK_SECRET: 'sec-1', ADMIN_IDS: '10001' };
+      const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123456:ALREADY_OK', WEBHOOK_SECRET: 'sec-1', ADMIN_IDS: '10001' });
       const tg = mockTgForReactions((method) => {
         if (method === 'getWebhookInfo') {
           return new Response(
@@ -5518,7 +5575,7 @@ describe('Bidirectional Telegram reaction sync & panel display (v1.9)', () => {
     // 3. No WEBHOOK_SECRET -> NEVER calls setWebhook or getWebhookInfo, and exposes webhookNeedsResync to admin
     {
       const kv = createMemoryKV();
-      const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:NO_SECRET', ADMIN_IDS: '10001' };
+      const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123456:NO_SECRET', ADMIN_IDS: '10001' });
       const tg = mockTgForReactions();
       try {
         const res = await ensureWebhookReactionSubscription(env);
@@ -5548,12 +5605,12 @@ describe('Bidirectional Telegram reaction sync & panel display (v1.9)', () => {
   it('Direction A: syncs visitor reactions on topic reply, panel reply mirror, dm reply, own message, and clears on removal', async () => {
     const kv = createMemoryKV();
     const botToken = '123456:DIR_A';
-    const topicEnv = {
+    const topicEnv = makeEnv({
       TOPIC_MAP: kv,
       BOT_TOKEN: botToken,
       ADMIN_IDS: '10001',
       SUPERGROUP_ID: '-100777888',
-    };
+    });
     const uid = '30001';
     await kv.put(
       `history:${uid}`,
@@ -5668,7 +5725,7 @@ describe('Bidirectional Telegram reaction sync & panel display (v1.9)', () => {
       expect(histAfterClear.messages.find((m) => m.pmMessageId === 102)?.visitorReaction).toBe('🔥');
 
       // DM mode: visitor reacts to owner DM reply (dmMsgId) and own message (dmCopyId)
-      const dmEnv = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001' };
+      const dmEnv = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001' });
       await kv.put(
         'history:30002',
         JSON.stringify({
@@ -5724,7 +5781,7 @@ describe('Bidirectional Telegram reaction sync & panel display (v1.9)', () => {
 
   it('Direction A: does nothing and calls zero Telegram APIs when mapping is missing', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:MISSING_MAP', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777888' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123456:MISSING_MAP', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777888' });
     await kv.put(
       'history:30003',
       JSON.stringify({
@@ -5777,12 +5834,12 @@ describe('Bidirectional Telegram reaction sync & panel display (v1.9)', () => {
   it('Direction B (Topic mode): writes tmsg:* with 30d TTL, syncs admin reactions to visitor, ignores non-admins and admin-own messages', async () => {
     const kv = createMemoryKV();
     const botToken = '123456:DIR_B_TOPIC';
-    const env = {
+    const env = makeEnv({
       TOPIC_MAP: kv,
       BOT_TOKEN: botToken,
       ADMIN_IDS: '10001',
       SUPERGROUP_ID: '-100777888',
-    };
+    });
     await kv.put('verified:30010', 'emoji:v1');
 
     let nextId = 700;
@@ -5814,10 +5871,21 @@ describe('Bidirectional Telegram reaction sync & panel display (v1.9)', () => {
       );
 
       const tmsgPut = putSpy.mock.calls.find(([k]) => k.startsWith(TOPIC_MSG_MAP_PREFIX));
-      expect(tmsgPut).toBeTruthy();
-      expect(JSON.parse(tmsgPut[1])).toEqual({ g: '-100777888', u: '30010', p: 55 });
-      expect(tmsgPut[2]).toEqual({ expirationTtl: TOPIC_MSG_MAP_TTL_SECONDS });
-      const topicCopyId = Number(tmsgPut[0].slice(TOPIC_MSG_MAP_PREFIX.length));
+      let topicCopyId;
+      if (storageMode === 'kv') {
+        expect(tmsgPut).toBeTruthy();
+        expect(JSON.parse(tmsgPut[1])).toEqual({ g: '-100777888', u: '30010', p: 55 });
+        expect(tmsgPut[2]).toEqual({ expirationTtl: TOPIC_MSG_MAP_TTL_SECONDS });
+        topicCopyId = Number(tmsgPut[0].slice(TOPIC_MSG_MAP_PREFIX.length));
+      } else {
+        expect(tmsgPut).toBeUndefined();
+        const tmsgRow = await env.DB.prepare(
+          `SELECT group_id, topic_msg_id, uid, pm_message_id FROM topic_map WHERE group_id = '-100777888' AND uid = '30010'`
+        ).first();
+        expect(tmsgRow).toBeTruthy();
+        expect(tmsgRow.pm_message_id).toBe(55);
+        topicCopyId = Number(tmsgRow.topic_msg_id);
+      }
 
       // 2. Non-admin reacts to topic copy -> ignored
       tg.calls.length = 0;
@@ -5896,7 +5964,7 @@ describe('Bidirectional Telegram reaction sync & panel display (v1.9)', () => {
 
   it('Direction B (DM mode): syncs owner reactions on visitor copy, skips legacy plain-uid dmmap without error', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:DIR_B_DM', ADMIN_IDS: '10001' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123456:DIR_B_DM', ADMIN_IDS: '10001' });
     await kv.put(`${DM_MAP_PREFIX}501`, '30020'); // legacy plain uid (or header card)
     await kv.put(`${DM_MAP_PREFIX}502`, JSON.stringify({ u: '30020', p: 77 }));
     await kv.put(
@@ -5955,7 +6023,7 @@ describe('Bidirectional Telegram reaction sync & panel display (v1.9)', () => {
 
   it('handles custom_emoji and paid reactions by clearing bot reaction and storing ✨ in panel, and swallows setMessageReaction errors', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:SPECIAL_REACT', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777888' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123456:SPECIAL_REACT', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777888' });
     await kv.put(
       'history:30030',
       JSON.stringify({
@@ -6028,7 +6096,7 @@ describe('Bidirectional Telegram reaction sync & panel display (v1.9)', () => {
 
   it('ignores topic message mappings from a previously bound group in both directions', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:REBIND_REACT', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100222' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123456:REBIND_REACT', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100222' });
     // Recorded while group -100111 was bound; owner has since rebound to -100222
     await kv.put(
       'history:30040',
@@ -6091,7 +6159,7 @@ describe('Bidirectional Telegram reaction sync & panel display (v1.9)', () => {
 
   it('caps how many reactions per minute a visitor can sync', async () => {
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:REACT_LIMIT', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777888' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123456:REACT_LIMIT', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777888' });
     await kv.put(
       'history:30050',
       JSON.stringify({
@@ -6130,7 +6198,7 @@ describe('Panel chat sticker rendering & signed media proxy (v1.9)', () => {
   it('records stickerFileId & stickerFormat (webp/webm/tgs), returns signed /api/media stickerUrl, and serves all 3 formats privately', async () => {
     const kv = createMemoryKV();
     const botToken = '123456:STICKER_CHAT_TOKEN';
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001' });
     const uid = '40001';
 
     await upsertVisitorProfile(env, { id: 40001, first_name: 'StickerFan' }, { incrementMsg: false });
@@ -6309,7 +6377,7 @@ describe('New visitor probation & pending message review (v1.10)', () => {
 
   it('starts probation on inline & Turnstile verification pass, skips trusted/admin/legacy visitors, and clears probation on trust', async () => {
     const kv = createTrackingKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:PROB_START', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100888999' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123456:PROB_START', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100888999' });
     const tg = mockTelegramProbation();
 
     try {
@@ -6394,7 +6462,7 @@ describe('New visitor probation & pending message review (v1.10)', () => {
 
   it('holds suspicious messages during probation without forwarding, sends silent alert, and decrements/clears on clean messages', async () => {
     const kv = createTrackingKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:PROB_HOLD', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100888999' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123456:PROB_HOLD', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100888999' });
     const tg = mockTelegramProbation();
 
     try {
@@ -6539,7 +6607,7 @@ describe('New visitor probation & pending message review (v1.10)', () => {
   it('approves in exact order, bans & counts spam, blocks non-admins, and keeps callback buttons & panel API in sync', async () => {
     const kv = createTrackingKV();
     const botToken = '123456:PROB_REVIEW';
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001', SUPERGROUP_ID: '-100888999' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001', SUPERGROUP_ID: '-100888999' });
     const tg = mockTelegramProbation();
 
     try {
@@ -6728,7 +6796,7 @@ describe('New visitor probation & pending message review (v1.10)', () => {
 
   it('keeps blocked keywords higher priority than probation: matched messages are dropped silently without entering pendingReview', async () => {
     const kv = createTrackingKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:PROB_KW', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100888999' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123456:PROB_KW', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100888999' });
     await savePanelConfig(env, { pmBot: { blockedKeywords: '稳赚不赔, 合约喊单' } });
     await kv.put('verified:53001', 'emoji:v1');
     await kv.put('probation:53001', JSON.stringify({ left: 3, until: Date.now() + 3600 * 1000 }));
@@ -6761,7 +6829,7 @@ describe('New visitor probation & pending message review (v1.10)', () => {
 
   it('sends silent DM review alert and handles rv:ban callback in Bot DM mode', async () => {
     const kv = createTrackingKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:PROB_DM', ADMIN_IDS: '10001' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123456:PROB_DM', ADMIN_IDS: '10001' });
     await kv.put('verified:54001', 'emoji:v1');
     await kv.put('probation:54001', JSON.stringify({ left: 3, until: Date.now() + 3600 * 1000 }));
 
@@ -6827,7 +6895,7 @@ describe('Daily blocked spam counter & admin bootstrap status fields (v1.10)', (
         return base.put(key, value, opts);
       },
     };
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:DAILY_SPAM', ADMIN_IDS: '10001' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123456:DAILY_SPAM', ADMIN_IDS: '10001' });
     const cfgUtc8 = { community: { timezoneOffsetHours: 8 } };
     const cfgUtcMinus5 = { community: { timezoneOffsetHours: -5 } };
 
@@ -6916,7 +6984,7 @@ describe('Customizable navigation order (v1.10)', () => {
 
     // Legacy KV config without `ui` field upgrades with unchanged default order
     const kv = createMemoryKV();
-    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:NAV_TEST', ADMIN_IDS: '10001' };
+    const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123456:NAV_TEST', ADMIN_IDS: '10001' });
     await kv.put('config:panel', JSON.stringify({ profile: { displayName: 'LegacyOwner' } }));
     const loadedLegacy = await loadPanelConfig(env);
     expect(loadedLegacy.ui.navOrder).toEqual(['profile', 'sites', 'probe', 'visitors', 'leaderboard']);
@@ -7115,7 +7183,7 @@ describe('Komari probe latency & packet loss display (v1.11)', () => {
     });
 
     try {
-      const env = { TOPIC_MAP: createMemoryKV() };
+      const env = makeEnv({ TOPIC_MAP: createMemoryKV() });
       const res = await fetchKomariStatus(env, {
         ...DEFAULT_CONFIG.probe,
         url: 'https://komari.example.com',
@@ -7253,7 +7321,7 @@ describe('Komari probe latency & packet loss display (v1.11)', () => {
       });
 
       try {
-        const env = { TOPIC_MAP: createMemoryKV() };
+        const env = makeEnv({ TOPIC_MAP: createMemoryKV() });
         const res = await fetchKomariStatus(env, { ...DEFAULT_CONFIG.probe, url: 'https://komari.example.com' });
         expect(res.protocol).toBe('rpc2');
         expect(res.error).toBeUndefined();
@@ -7278,7 +7346,7 @@ describe('Komari probe latency & packet loss display (v1.11)', () => {
     });
 
     try {
-      const env = { TOPIC_MAP: createMemoryKV() };
+      const env = makeEnv({ TOPIC_MAP: createMemoryKV() });
       const res = await fetchProbeStatus(env, {
         ...DEFAULT_CONFIG.probe,
         provider: 'json',
@@ -7348,7 +7416,7 @@ describe('Komari probe latency & packet loss display (v1.11)', () => {
     });
 
     try {
-      const env = { TOPIC_MAP: kv };
+      const env = makeEnv({ TOPIC_MAP: kv });
       const cfg = { ...DEFAULT_CONFIG.probe, url: 'https://komari.example.com', cacheTtlSeconds: 60 };
 
       const live = await fetchKomariStatus(env, cfg);
@@ -7370,5 +7438,799 @@ describe('Komari probe latency & packet loss display (v1.11)', () => {
     } finally {
       globalThis.fetch = origFetch;
     }
+  });
+});
+
+});
+
+describe('Cloudflare D1 storage layer, schema idempotency, map fallback & daily cleanup (v2.0 Stage 1)', () => {
+  it('initializes schema idempotently, records schema_version, caches per isolate, and preserves data on forced re-run', async () => {
+    const db = createD1Shim();
+    const env = { TOPIC_MAP: createMemoryKV(), DB: db };
+
+    const v1 = await ensureSchema(env);
+    expect(v1).toBe(SCHEMA_VERSION);
+    expect(db._stats.batches).toBe(1);
+
+    const versionVal = await db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).first('value');
+    expect(versionVal).toBe('1');
+
+    const tablesRes = await db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+      .all();
+    expect(tablesRes.results.map((r) => r.name)).toEqual([
+      'dm_map',
+      'message_links',
+      'messages',
+      'meta',
+      'migrated_visitors',
+      'topic_map',
+    ]);
+
+    // Second call on the same DB binding uses the per-isolate Promise cache (0 extra batches)
+    await ensureSchema(env);
+    expect(db._stats.batches).toBe(1);
+
+    // Insert a message, then force-rerun DDL (simulating a fresh isolate cold start against an existing DB)
+    await getStore(env).appendExchange('88001', {
+      sender: 'visitor',
+      nowMs: 1700000000000,
+      nowIso: new Date(1700000000000).toISOString(),
+      text: 'hello d1',
+      pmMessageId: 101,
+    });
+    const batchesBeforeForce = db._stats.batches;
+    const v2 = await ensureSchema(env, { force: true });
+    expect(v2).toBe(SCHEMA_VERSION);
+    expect(db._stats.batches).toBe(batchesBeforeForce + 1);
+
+    const hist = await getStore(env).getHistory('88001');
+    expect(hist.messages).toHaveLength(1);
+    expect(hist.messages[0].text).toBe('hello d1');
+    expect(await db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).first('value')).toBe('1');
+  });
+
+  it('retains >60 messages in D1 without writing history:* to KV while returning newest 60 by default', async () => {
+    const kv = createMemoryKV();
+    const db = createD1Shim();
+    const env = { TOPIC_MAP: kv, DB: db };
+
+    const baseMs = 1700000000000;
+    for (let i = 1; i <= 75; i += 1) {
+      await recordVisitorExchange(
+        env,
+        '88002',
+        { message_id: i, text: `msg #${i}` },
+        { sender: i % 2 === 0 ? 'admin' : 'visitor', pmMessageId: i, preview: `msg #${i}` }
+      );
+    }
+
+    // D1 mode never writes `history:88002` to KV
+    expect(await kv.get('history:88002')).toBeNull();
+
+    // Total rows in D1 `messages` is all 75 (not truncated at 60)
+    const countRow = await db.prepare(`SELECT COUNT(*) AS cnt FROM messages WHERE uid = ?`).bind('88002').first();
+    expect(countRow.cnt).toBe(75);
+
+    // Default getVisitorHistory returns newest 60 in oldest->newest order (#16 .. #75)
+    const defaultHist = await getVisitorHistory(env, '88002');
+    expect(defaultHist.messages).toHaveLength(60);
+    expect(defaultHist.messages[0].text).toBe('msg #16');
+    expect(defaultHist.messages[59].text).toBe('msg #75');
+
+    // Explicit higher limit retrieves all 75
+    const fullHist = await getVisitorHistory(env, '88002', { limit: 100 });
+    expect(fullHist.messages).toHaveLength(75);
+    expect(fullHist.messages[0].text).toBe('msg #1');
+    expect(fullHist.messages[74].text).toBe('msg #75');
+  });
+
+  it('falls back to KV for legacy tmsg:* and dmmap:* entries on D1 miss and returns null when absent in both', async () => {
+    const kv = createMemoryKV();
+    const db = createD1Shim();
+    const env = { TOPIC_MAP: kv, DB: db };
+    const store = getStore(env);
+
+    // Seed pre-upgrade mappings in KV only
+    await kv.put(`${TOPIC_MSG_MAP_PREFIX}901`, JSON.stringify({ g: '-100555', u: '70001', p: 42 }));
+    await kv.put(`${DM_MAP_PREFIX}801`, JSON.stringify({ u: '70002', p: 55 }));
+    await kv.put(`${DM_MAP_PREFIX}802`, '70003');
+
+    // D1 miss -> KV fallback succeeds
+    expect(await store.getTopicMap('-100555', 901)).toEqual({ uid: '70001', pmMessageId: 42 });
+    // Group mismatch on KV fallback still rejected
+    expect(await store.getTopicMap('-100999', 901)).toBeNull();
+
+    expect(await store.getDmMap(801)).toEqual({ uid: '70002', pmMessageId: 55 });
+    expect(await store.getDmMap(802)).toEqual({ uid: '70003', pmMessageId: null });
+
+    // Neither D1 nor KV has entry -> returns null cleanly
+    expect(await store.getTopicMap('-100555', 9999)).toBeNull();
+    expect(await store.getDmMap(9999)).toBeNull();
+  });
+
+  it('purges only expired topic_map (>30d) and dm_map (>7d) rows once daily on scheduled cron even with probe alerts off', async () => {
+    const kv = createMemoryKV();
+    const db = createD1Shim();
+    const env = { TOPIC_MAP: kv, DB: db };
+    await ensureSchema(env);
+
+    const dayMs = 86400 * 1000;
+    const midnightUtc = Date.UTC(2026, 5, 15, 0, 2, 0); // 00:02 UTC -> runs daily cleanup
+    const fivePastUtc = Date.UTC(2026, 5, 15, 0, 5, 0); // 00:05 UTC -> skips daily cleanup
+
+    expect(shouldRunDailyCleanup(midnightUtc)).toBe(true);
+    expect(shouldRunDailyCleanup(fivePastUtc)).toBe(false);
+
+    // Insert 1 expired (31d) + 1 fresh (29d) topic_map row, and 1 expired (8d) + 1 fresh (6d) dm_map row
+    await db.batch([
+      db
+        .prepare(`INSERT INTO topic_map (group_id, topic_msg_id, uid, pm_message_id, created_at) VALUES (?, ?, ?, ?, ?)`)
+        .bind('-1001', 10, '5001', 100, midnightUtc - 31 * dayMs),
+      db
+        .prepare(`INSERT INTO topic_map (group_id, topic_msg_id, uid, pm_message_id, created_at) VALUES (?, ?, ?, ?, ?)`)
+        .bind('-1001', 11, '5001', 101, midnightUtc - 29 * dayMs),
+      db
+        .prepare(`INSERT INTO dm_map (owner_msg_id, uid, pm_message_id, created_at) VALUES (?, ?, ?, ?)`)
+        .bind(20, '5002', 200, midnightUtc - 8 * dayMs),
+      db
+        .prepare(`INSERT INTO dm_map (owner_msg_id, uid, pm_message_id, created_at) VALUES (?, ?, ?, ?)`)
+        .bind(21, '5002', null, midnightUtc - 6 * dayMs),
+    ]);
+
+    const kvPutSpy = vi.spyOn(kv, 'put');
+
+    // At 00:05 UTC, scheduled cron skips map cleanup
+    await worker.scheduled({ scheduledTime: fivePastUtc }, env, null);
+    expect((await db.prepare(`SELECT COUNT(*) AS cnt FROM topic_map`).first()).cnt).toBe(2);
+    expect((await db.prepare(`SELECT COUNT(*) AS cnt FROM dm_map`).first()).cnt).toBe(2);
+
+    // At 00:02 UTC (with probe alerts disabled by default), scheduled cron deletes ONLY expired rows and writes 0 KV keys
+    await worker.scheduled({ scheduledTime: midnightUtc }, env, null);
+    const remainingTopics = (await db.prepare(`SELECT topic_msg_id FROM topic_map`).all()).results;
+    const remainingDms = (await db.prepare(`SELECT owner_msg_id FROM dm_map`).all()).results;
+    expect(remainingTopics.map((r) => r.topic_msg_id)).toEqual([11]);
+    expect(remainingDms.map((r) => r.owner_msg_id)).toEqual([21]);
+    expect(kvPutSpy).not.toHaveBeenCalled();
+
+    // Without env.DB, scheduled cron & cleanupExpiredMaps skip cleanly
+    const noDbRes = await cleanupExpiredMaps({ TOPIC_MAP: kv }, midnightUtc);
+    expect(noDbRes).toEqual({ skipped: true, reason: 'no_d1' });
+    await expect(worker.scheduled({ scheduledTime: midnightUtc }, { TOPIC_MAP: kv }, null)).resolves.toBeUndefined();
+  });
+
+  it('auto-migrates legacy KV history on first read with exact parity, skips KV on subsequent reads, and never deletes KV data', async () => {
+    const kv = createMemoryKV();
+    const kvOnlyEnv = { TOPIC_MAP: kv };
+    const uid = '77001';
+
+    // 1. Build realistic multi-message history in KV-only mode (v1.11.0 format)
+    await recordVisitorExchange(
+      kvOnlyEnv,
+      uid,
+      {
+        message_id: 11,
+        photo: [{ file_id: 'thumb_a' }, { file_id: 'full_a' }],
+        caption: '看看这两条链接 https://one.example.com 和 https://two.example.com',
+      },
+      {
+        sender: 'visitor',
+        pmMessageId: 11,
+        topicCopyId: 301,
+        topicThreadId: 88,
+        topicChatId: '-100777',
+        preview: '[图片]',
+      }
+    );
+    await recordVisitorExchange(
+      kvOnlyEnv,
+      uid,
+      {
+        message_id: 12,
+        sticker: { file_id: 'CAAC_STICKER_1', emoji: '🌸', is_animated: true },
+      },
+      {
+        sender: 'admin',
+        pmMessageId: 212,
+        topicMsgId: 302,
+        topicChatId: '-100777',
+        dmMsgId: 402,
+        preview: '[贴纸 🌸]',
+      }
+    );
+    await updateVisitorMessageReaction(kvOnlyEnv, uid, 11, 'owner', '❤️');
+    await updateVisitorMessageReaction(kvOnlyEnv, uid, 212, 'visitor', '🔥');
+
+    // Also prepend an archive-only legacy photo (`p_legacy`) and legacy PM entry (`pmId = 5`) into KV
+    const seededKvHist = await kv.get(`history:${uid}`, { type: 'json' });
+    seededKvHist.photos.push({
+      id: 'p_legacy_99',
+      fileId: 'legacy_photo_full',
+      thumbFileId: 'legacy_photo_thumb',
+      caption: '很早以前的图片',
+      sender: 'visitor',
+      at: '2025-01-02T03:04:05.000Z',
+    });
+    seededKvHist.pmMessageIds.push({
+      id: 5,
+      topicMsgId: 205,
+      sender: 'admin',
+      at: 1735787045000,
+    });
+    await kv.put(`history:${uid}`, JSON.stringify(seededKvHist));
+
+    const kvSnapshot = await getVisitorHistory(kvOnlyEnv, uid);
+    const kvRawBackup = await kv.get(`history:${uid}`);
+
+    // 2. Bind D1 (`env.DB`) — first read triggers lazy migration automatically
+    const db = createD1Shim();
+    const d1Env = { TOPIC_MAP: kv, DB: db };
+    const kvGetSpy = vi.spyOn(kv, 'get');
+    const kvDeleteSpy = vi.spyOn(kv, 'delete');
+
+    const d1FirstRead = await getVisitorHistory(d1Env, uid);
+
+    expect(d1FirstRead.messages).toEqual(kvSnapshot.messages);
+    expect(
+      d1FirstRead.photos.map(({ fileId, thumbFileId, caption, sender, at }) => ({
+        fileId,
+        thumbFileId,
+        caption,
+        sender,
+        at,
+      }))
+    ).toEqual(
+      kvSnapshot.photos.map(({ fileId, thumbFileId, caption, sender, at }) => ({
+        fileId,
+        thumbFileId,
+        caption,
+        sender,
+        at,
+      }))
+    );
+    expect(
+      d1FirstRead.links.map(({ url, snippet, sender, at }) => ({ url, snippet, sender, at }))
+    ).toEqual(
+      kvSnapshot.links.map(({ url, snippet, sender, at }) => ({ url, snippet, sender, at }))
+    );
+    expect(d1FirstRead.pmMessageIds).toEqual(kvSnapshot.pmMessageIds);
+
+    // 3. Second read hits D1 directly with ZERO KV reads
+    kvGetSpy.mockClear();
+    const d1SecondRead = await getVisitorHistory(d1Env, uid);
+    expect(kvGetSpy).not.toHaveBeenCalled();
+    expect(d1SecondRead.messages).toEqual(kvSnapshot.messages);
+
+    // 4. Clearing history in D1 mode clears D1 without deleting KV backup and without re-importing on next read
+    await clearVisitorHistory(d1Env, uid, 'archive');
+    expect(kvDeleteSpy.mock.calls.some(([k]) => k === `history:${uid}`)).toBe(false);
+    expect(await kv.get(`history:${uid}`)).toBe(kvRawBackup);
+    const afterClear = await getVisitorHistory(d1Env, uid);
+    expect(afterClear.messages).toEqual([]);
+    expect(afterClear.photos).toEqual([]);
+    expect(afterClear.links).toEqual([]);
+    expect(afterClear.pmMessageIds).toEqual([]);
+  });
+
+  it('migrates visitors in batches via /api/admin/storage/migrate, recovers from mid-batch failures without duplicates, and enforces admin auth', async () => {
+    const botToken = '123456:STORAGE_MIGRATE_TEST';
+    const kv = createMemoryKV();
+    const nowSec = Math.floor(Date.now() / 1000);
+    const adminInit = await signInitData(
+      { auth_date: String(nowSec), user: JSON.stringify({ id: 10001, first_name: 'Owner' }) },
+      botToken
+    );
+    const guestInit = await signInitData(
+      { auth_date: String(nowSec), user: JSON.stringify({ id: 20002, first_name: 'Guest' }) },
+      botToken
+    );
+
+    // Seed 45 visitors in KV-only mode (each with 2 messages + 1 photo + 2 links, plus visitor 60025 with 95 messages > chunk size 80)
+    const kvOnlyEnv = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001' };
+    for (let i = 1; i <= 45; i += 1) {
+      const uid = String(60000 + i);
+      await upsertVisitorProfile(kvOnlyEnv, { id: Number(uid), first_name: `V${i}` });
+      if (i === 25) {
+        // Seed >80 items so multi-chunk batching inside migrateVisitor is also exercised on failure & retry
+        const bigMsgs = [];
+        for (let m = 1; m <= 60; m += 1) {
+          bigMsgs.push({
+            id: `m_big_${m}`,
+            sender: m % 2 === 0 ? 'admin' : 'visitor',
+            text: `bulk msg ${m}`,
+            mediaTag: '',
+            photoFileId: '',
+            thumbFileId: '',
+            pmMessageId: m,
+            topicMsgId: null,
+            at: new Date(1700000000000 + m * 1000).toISOString(),
+          });
+        }
+        const bigLinks = [];
+        for (let l = 1; l <= 35; l += 1) {
+          bigLinks.push({
+            id: `l_big_${l}`,
+            url: `https://example.com/item/${l}`,
+            snippet: `link ${l}`,
+            sender: 'visitor',
+            at: new Date(1700000100000 + l * 1000).toISOString(),
+          });
+        }
+        await kv.put(
+          `history:${uid}`,
+          JSON.stringify({ photos: [], links: bigLinks, pmMessageIds: [], messages: bigMsgs })
+        );
+      } else {
+        await recordVisitorExchange(
+          kvOnlyEnv,
+          uid,
+          {
+            message_id: i * 10 + 1,
+            photo: [{ file_id: `th_${i}` }, { file_id: `ph_${i}` }],
+            caption: `来自 ${uid} https://site-${i}.test/a https://site-${i}.test/b`,
+          },
+          { sender: 'visitor', pmMessageId: i * 10 + 1, preview: '[图片]' }
+        );
+        await recordVisitorExchange(
+          kvOnlyEnv,
+          uid,
+          { message_id: i * 10 + 2, text: `回复 ${uid}` },
+          { sender: 'admin', pmMessageId: i * 10 + 2, preview: `回复 ${uid}` }
+        );
+      }
+    }
+
+    // 1. Non-admin is blocked with 403
+    const deniedGet = await worker.fetch(
+      new Request('https://panel.test/api/admin/storage', { headers: { 'X-Telegram-Init-Data': guestInit } }),
+      kvOnlyEnv
+    );
+    expect(deniedGet.status).toBe(403);
+    const deniedPost = await worker.fetch(
+      new Request('https://panel.test/api/admin/storage/migrate', {
+        method: 'POST',
+        headers: { 'X-Telegram-Init-Data': guestInit },
+      }),
+      kvOnlyEnv
+    );
+    expect(deniedPost.status).toBe(403);
+
+    // 2. KV-only mode reports d1Bound: false and rejects /migrate cleanly with 400
+    const kvBoot = await (
+      await worker.fetch(
+        new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': adminInit } }),
+        kvOnlyEnv
+      )
+    ).json();
+    expect(kvBoot.adminConfig.d1Bound).toBe(false);
+
+    const kvStatus = await (
+      await worker.fetch(
+        new Request('https://panel.test/api/admin/storage', { headers: { 'X-Telegram-Init-Data': adminInit } }),
+        kvOnlyEnv
+      )
+    ).json();
+    expect(kvStatus).toEqual({ ok: true, mode: 'kv', d1Bound: false, done: 0, total: 0, finished: true });
+
+    const kvMigrateRes = await worker.fetch(
+      new Request('https://panel.test/api/admin/storage/migrate', {
+        method: 'POST',
+        headers: { 'X-Telegram-Init-Data': adminInit, 'Content-Type': 'application/json' },
+        body: '{}',
+      }),
+      kvOnlyEnv
+    );
+    expect(kvMigrateRes.status).toBe(400);
+
+    // 3. Bind D1 and verify initial status (0 / 45) + bootstrap d1Bound: true
+    const db = createD1Shim();
+    const d1Env = { ...kvOnlyEnv, DB: db };
+
+    const d1Boot = await (
+      await worker.fetch(
+        new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': adminInit } }),
+        d1Env
+      )
+    ).json();
+    expect(d1Boot.adminConfig.d1Bound).toBe(true);
+
+    const initialStatus = await (
+      await worker.fetch(
+        new Request('https://panel.test/api/admin/storage', { headers: { 'X-Telegram-Init-Data': adminInit } }),
+        d1Env
+      )
+    ).json();
+    expect(initialStatus).toEqual({ ok: true, mode: 'd1', d1Bound: true, done: 0, total: 45, finished: false });
+
+    // 4. Batch 1 on a fresh DB (even when caller requests batchSize: 50) stays strictly <= 50 D1 queries
+    const coldDb = createD1Shim();
+    const coldEnv = { ...kvOnlyEnv, DB: coldDb };
+    coldDb.resetStats();
+    const coldFirstBatch = await (
+      await worker.fetch(
+        new Request('https://panel.test/api/admin/storage/migrate', {
+          method: 'POST',
+          headers: { 'X-Telegram-Init-Data': adminInit, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ batchSize: 50 }),
+        }),
+        coldEnv
+      )
+    ).json();
+    expect(coldFirstBatch.ok).toBe(true);
+    expect(coldFirstBatch.batchMigrated).toBeGreaterThanOrEqual(1);
+    expect(coldFirstBatch.batchMigrated).toBeLessThan(25);
+    expect(coldFirstBatch.finished).toBe(false);
+    expect(coldDb._stats.queries).toBeLessThanOrEqual(50);
+
+    // Also verify on `d1Env` that every batch stays <= 50 D1 queries and recovers from mid-batch failures
+    db.resetStats();
+    const b1 = await (
+      await worker.fetch(
+        new Request('https://panel.test/api/admin/storage/migrate', {
+          method: 'POST',
+          headers: { 'X-Telegram-Init-Data': adminInit, 'Content-Type': 'application/json' },
+          body: '{}',
+        }),
+        d1Env
+      )
+    ).json();
+    expect(b1.ok).toBe(true);
+    expect(b1.mode).toBe('d1');
+    expect(b1.batchMigrated).toBe(19);
+    expect(b1.done).toBe(19);
+    expect(b1.total).toBe(45);
+    expect(b1.finished).toBe(false);
+    expect(db._stats.queries).toBeLessThanOrEqual(50);
+
+    // 5. Simulate mid-batch D1 failure during Batch 2 right on the 2nd chunk of the 95-row visitor (`60025`)
+    const origBatch = db.batch.bind(db);
+    let sawFirstChunkOfBigVisitor = false;
+    db.batch = async (stmts) => {
+      const hasBigMsg = stmts.some((s) => Array.isArray(s._args) && s._args[0] === 'm_big_1');
+      const hasMigratedMark = stmts.some(
+        (s) => String(s._sql).includes('INSERT OR IGNORE INTO migrated_visitors') && s._args?.[0] === '60025'
+      );
+      if (hasBigMsg) {
+        sawFirstChunkOfBigVisitor = true;
+      } else if (sawFirstChunkOfBigVisitor && hasMigratedMark) {
+        throw new Error('D1 transient network error mid-migration');
+      }
+      return origBatch(stmts);
+    };
+
+    const failedRes = await worker.fetch(
+      new Request('https://panel.test/api/admin/storage/migrate', {
+        method: 'POST',
+        headers: { 'X-Telegram-Init-Data': adminInit, 'Content-Type': 'application/json' },
+        body: '{}',
+      }),
+      d1Env
+    );
+    expect(failedRes.status).toBe(500);
+    expect(sawFirstChunkOfBigVisitor).toBe(true);
+
+    // Restore D1 batch and run remaining batches to completion, verifying <= 50 D1 queries on EVERY request
+    db.batch = origBatch;
+    let latest = await getStorageStatus(d1Env);
+    expect(latest.finished).toBe(false);
+    expect(latest.done).toBeGreaterThanOrEqual(19);
+    expect(latest.done).toBeLessThan(45);
+
+    let safetyLoops = 0;
+    while (!latest.finished && safetyLoops < 10) {
+      safetyLoops += 1;
+      db.resetStats();
+      latest = await (
+        await worker.fetch(
+          new Request('https://panel.test/api/admin/storage/migrate', {
+            method: 'POST',
+            headers: { 'X-Telegram-Init-Data': adminInit, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ batchSize: 50 }),
+          }),
+          d1Env
+        )
+      ).json();
+      expect(db._stats.queries).toBeLessThanOrEqual(50);
+      expect(latest.batchMigrated).toBeGreaterThanOrEqual(1);
+    }
+    expect(latest).toMatchObject({ ok: true, done: 45, total: 45, finished: true });
+
+    // 6. Verify ZERO duplicate rows in D1 (44 visitors * 2 msgs + 1 visitor * 60 msgs = 148 msgs;
+    //    44 visitors * 2 links + 1 visitor * 35 links = 123 links; 45 migrated_visitors)
+    expect((await db.prepare(`SELECT COUNT(*) AS cnt FROM migrated_visitors`).first()).cnt).toBe(45);
+    expect((await db.prepare(`SELECT COUNT(*) AS cnt FROM messages`).first()).cnt).toBe(44 * 2 + 60);
+    expect((await db.prepare(`SELECT COUNT(*) AS cnt FROM message_links`).first()).cnt).toBe(44 * 2 + 35);
+
+    // Calling migrate again after completion is a clean no-op (`batchMigrated: 0, finished: true`)
+    const extraRun = await migrateVisitorsBatch(d1Env);
+    expect(extraRun).toMatchObject({ ok: true, batchMigrated: 0, done: 45, total: 45, finished: true });
+
+    // All 45 legacy KV `history:*` keys remain untouched in KV
+    const listedKvHist = await kv.list({ prefix: 'history:' });
+    expect(listedKvHist.keys).toHaveLength(45);
+  });
+
+  it('keeps v1.10 / v1.11 KV data (probation, pendingReview, blockedToday, Komari latency cache) working alongside D1', async () => {
+    const kv = createMemoryKV();
+    const db = createD1Shim();
+    const env = { TOPIC_MAP: kv, DB: db, BOT_TOKEN: '123456:COEXIST', ADMIN_IDS: '10001' };
+
+    const cfg = await savePanelConfig(env, {
+      pmBot: { probation: { enabled: true, maxMessages: 2 } },
+      probe: { provider: 'komari', url: 'https://komari.example.com', demoMode: true },
+    });
+
+    // 1. Probation & pendingReview remain in KV
+    await startVisitorProbation(env, '91001', cfg, { prevVerified: null });
+    const probState = await kv.get('probation:91001', { type: 'json' });
+    expect(probState?.left).toBe(2);
+
+    await addPendingReviewMessage(
+      env,
+      { id: 91001, first_name: 'ProbUser' },
+      { pmMessageId: 76, chatId: 91001, preview: 'https://suspicious.test', reasons: ['link'] }
+    );
+    const detail = await getVisitorDetail(env, '91001');
+    expect(detail.pendingReviewCount).toBe(1);
+    expect(detail.pendingReview[0].pmMessageId).toBe(76);
+
+    // 2. Daily blocked spam counter remains in KV
+    await recordBlockedSpam(env, cfg, new Date('2026-11-26T08:00:00Z'));
+    expect(await getBlockedSpamToday(env, cfg, new Date('2026-11-26T09:00:00Z'))).toBe(1);
+    expect(await getBlockedSpamCount(env)).toBe(1);
+
+    // 3. Komari probe live fetch + KV cache (`cache:komari_probe`) with per-line latency still works cleanly
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (_url, init) => {
+      const body = JSON.parse(init?.body || '{}');
+      if (body.method === 'common:getNodes') {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            result: { n1: { uuid: 'n1', name: 'HK-01', region: '🇭🇰', mem_total: 1024, disk_total: 2048 } },
+          }),
+          { status: 200 }
+        );
+      }
+      if (body.method === 'common:getNodesLatestStatus') {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: 2,
+            result: { n1: { cpu: 15, ram: 256, disk: 512, online: true, uptime: 3600 } },
+          }),
+          { status: 200 }
+        );
+      }
+      if (body.method === 'public:getPingMetricStats') {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            result: {
+              stats: [{ entity_id: 'n1', task_id: '1', name: '上海电信', type: 'tcp', loss: 0, avg: 32.4, latest: 31 }],
+            },
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: 2, result: [] }), { status: 200 });
+    });
+    try {
+      const probeRes = await fetchKomariStatus(env, { ...cfg.probe, demoMode: false, cacheTtlSeconds: 60 });
+      expect(probeRes.nodes).toHaveLength(1);
+      expect(probeRes.nodes[0].latency[0]).toMatchObject({ name: '上海电信', latest: 31 });
+      expect(await kv.get('cache:komari_probe')).toBeTruthy();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+
+    // 4. Visitor chat history simultaneously goes to D1 (0 `history:*` writes in KV)
+    await recordVisitorExchange(
+      env,
+      '91001',
+      { message_id: 77, text: 'D1 + KV 协同正常' },
+      { sender: 'visitor', pmMessageId: 77, preview: 'D1 + KV 协同正常' }
+    );
+    expect(await kv.get('history:91001')).toBeNull();
+    const hist = await getVisitorHistory(env, '91001');
+    expect(hist.messages.map((m) => m.text)).toEqual(['D1 + KV 协同正常']);
+  });
+
+  it('isolates composite PRIMARY KEY (uid, id) across visitors on identical message IDs (including p-prefixed IDs) and scopes reactions to uid', async () => {
+    const kv = createMemoryKV();
+    const db = createD1Shim();
+    const d1Env = { TOPIC_MAP: kv, DB: db };
+
+    // Two distinct visitors share identical KV message IDs (`m_1700000000000_42` and `p1`) and identical `pmMessageId: 101`
+    await kv.put(
+      'history:81001',
+      JSON.stringify({
+        photos: [],
+        links: [],
+        pmMessageIds: [{ id: 101, topicMsgId: null, sender: 'visitor', at: 1700000000000 }],
+        messages: [
+          {
+            id: 'm_1700000000000_42',
+            sender: 'visitor',
+            text: 'Alice 的第一条消息',
+            mediaTag: '',
+            photoFileId: '',
+            thumbFileId: '',
+            pmMessageId: 101,
+            topicMsgId: null,
+            at: '2023-11-14T22:13:20.000Z',
+          },
+          {
+            id: 'p1',
+            sender: 'admin',
+            text: '以 p 开头但非 p_/p:/pm: 的气泡消息',
+            mediaTag: '',
+            photoFileId: '',
+            thumbFileId: '',
+            pmMessageId: 102,
+            topicMsgId: null,
+            at: '2023-11-14T22:13:21.000Z',
+          },
+        ],
+      })
+    );
+    await kv.put(
+      'history:81002',
+      JSON.stringify({
+        photos: [],
+        links: [],
+        pmMessageIds: [{ id: 101, topicMsgId: null, sender: 'visitor', at: 1700000000000 }],
+        messages: [
+          {
+            id: 'm_1700000000000_42',
+            sender: 'visitor',
+            text: 'Bob 的同名 ID 消息',
+            mediaTag: '',
+            photoFileId: '',
+            thumbFileId: '',
+            pmMessageId: 101,
+            topicMsgId: null,
+            at: '2023-11-14T22:13:20.000Z',
+          },
+          {
+            id: 'p1',
+            sender: 'admin',
+            text: 'Bob 的 p1 消息',
+            mediaTag: '',
+            photoFileId: '',
+            thumbFileId: '',
+            pmMessageId: 102,
+            topicMsgId: null,
+            at: '2023-11-14T22:13:21.000Z',
+          },
+        ],
+      })
+    );
+
+    const histA = await getVisitorHistory(d1Env, '81001');
+    const histB = await getVisitorHistory(d1Env, '81002');
+    expect(histA.messages.map((m) => ({ id: m.id, text: m.text }))).toEqual([
+      { id: 'm_1700000000000_42', text: 'Alice 的第一条消息' },
+      { id: 'p1', text: '以 p 开头但非 p_/p:/pm: 的气泡消息' },
+    ]);
+    expect(histB.messages.map((m) => ({ id: m.id, text: m.text }))).toEqual([
+      { id: 'm_1700000000000_42', text: 'Bob 的同名 ID 消息' },
+      { id: 'p1', text: 'Bob 的 p1 消息' },
+    ]);
+
+    // Reacting on visitor 81001's message (`m_1700000000000_42` and `p1`) MUST NOT leak onto visitor 81002
+    expect(await updateVisitorMessageReaction(d1Env, '81001', 101, 'owner', '❤️')).toBe(true);
+    expect(await updateVisitorMessageReaction(d1Env, '81001', 102, 'visitor', '👍')).toBe(true);
+
+    const afterA = await getVisitorHistory(d1Env, '81001');
+    const afterB = await getVisitorHistory(d1Env, '81002');
+    expect(afterA.messages.find((m) => m.id === 'm_1700000000000_42')?.ownerReaction).toBe('❤️');
+    expect(afterA.messages.find((m) => m.id === 'p1')?.visitorReaction).toBe('👍');
+    expect(afterB.messages.find((m) => m.id === 'm_1700000000000_42')?.ownerReaction).toBeUndefined();
+    expect(afterB.messages.find((m) => m.id === 'p1')?.visitorReaction).toBeUndefined();
+  });
+
+  it('deduplicates messages and message_links under concurrent migrateVisitor calls and advances at least 1 visitor under tight queryBudget', async () => {
+    const kv = createMemoryKV();
+    const db = createD1Shim();
+    const env = { TOPIC_MAP: kv, DB: db };
+
+    await kv.put(
+      'history:82001',
+      JSON.stringify({
+        photos: [
+          {
+            id: 'p_old_1',
+            fileId: 'old_photo_file',
+            thumbFileId: 'old_photo_thumb',
+            caption: '旧图',
+            sender: 'visitor',
+            at: '2024-05-01T00:00:00.000Z',
+          },
+        ],
+        links: [
+          {
+            id: 'l_100',
+            url: 'https://concurrent.example.com/a',
+            snippet: '并发测试 A',
+            sender: 'visitor',
+            at: '2024-06-01T00:00:00.000Z',
+          },
+          {
+            id: 'l_100',
+            url: 'https://concurrent.example.com/b',
+            snippet: '并发测试 B',
+            sender: 'visitor',
+            at: '2024-06-01T00:00:00.000Z',
+          },
+        ],
+        pmMessageIds: [{ id: 301, topicMsgId: null, sender: 'visitor', at: 1717200000000 }],
+        messages: [
+          {
+            id: 'm_conc_1',
+            sender: 'visitor',
+            text: '并发消息 https://concurrent.example.com/a https://concurrent.example.com/b',
+            mediaTag: '',
+            photoFileId: '',
+            thumbFileId: '',
+            pmMessageId: 301,
+            topicMsgId: null,
+            at: '2024-06-01T00:00:00.000Z',
+          },
+        ],
+      })
+    );
+
+    // Delay KV get slightly so both concurrent callers pass `SELECT 1 FROM migrated_visitors` before either writes
+    const origGet = kv.get.bind(kv);
+    kv.get = async (...args) => {
+      await new Promise((r) => setTimeout(r, 8));
+      return origGet(...args);
+    };
+
+    const [r1, r2] = await Promise.all([migrateVisitor(env, '82001'), migrateVisitor(env, '82001')]);
+    expect(r1.ok).toBe(true);
+    expect(r2.ok).toBe(true);
+
+    // Both `messages` (1 bubble + 1 archive photo = 2) and `message_links` (2 URLs) must have ZERO duplicates
+    expect((await db.prepare(`SELECT COUNT(*) AS cnt FROM messages WHERE uid = '82001'`).first()).cnt).toBe(2);
+    expect((await db.prepare(`SELECT COUNT(*) AS cnt FROM message_links WHERE uid = '82001'`).first()).cnt).toBe(2);
+    expect((await db.prepare(`SELECT COUNT(*) AS cnt FROM migrated_visitors WHERE uid = '82001'`).first()).cnt).toBe(1);
+
+    // Also verify `appendExchange` with duplicate URLs in a single message never throws on idx_links_uniq
+    await getStore(env).appendExchange('82001', {
+      sender: 'visitor',
+      nowMs: 1717300000000,
+      nowIso: new Date(1717300000000).toISOString(),
+      text: 'dup urls',
+      urls: ['https://dup.example.com/x', 'https://dup.example.com/x'],
+      pmMessageId: 302,
+    });
+    const linksAfter = (
+      await db.prepare(`SELECT url FROM message_links WHERE uid = '82001' AND url = 'https://dup.example.com/x'`).all()
+    ).results;
+    expect(linksAfter).toHaveLength(1);
+
+    // Seed one more large visitor and verify `migrateVisitorsBatch` still migrates at least 1 visitor even if queryBudget is tiny
+    const largeMsgs = Array.from({ length: 60 }, (_, idx) => ({
+      id: `m_lg_${idx}`,
+      sender: 'visitor',
+      text: `msg ${idx}`,
+      mediaTag: '',
+      photoFileId: '',
+      thumbFileId: '',
+      pmMessageId: idx + 1,
+      topicMsgId: null,
+      at: new Date(1718000000000 + idx * 1000).toISOString(),
+    }));
+    await kv.put('history:82002', JSON.stringify({ photos: [], links: [], pmMessageIds: [], messages: largeMsgs }));
+    await kv.put('history:82003', JSON.stringify({ photos: [], links: [], pmMessageIds: [], messages: [] }));
+
+    const tightBatch = await migrateVisitorsBatch(env, { batchSize: 20, queryBudget: 1 });
+    expect(tightBatch.ok).toBe(true);
+    expect(tightBatch.batchMigrated).toBe(1);
+    expect(tightBatch.finished).toBe(false);
   });
 });

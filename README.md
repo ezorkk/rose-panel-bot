@@ -26,8 +26,8 @@
 </div>
 
 > - **🔄 部署前必看（Fork 才能一键同步更新）**：**强烈建议先点击右上角 `Fork` 仓库，再导入 Cloudflare Workers 部署**——只有通过 Fork 部署，后续才能在 TG 面板里**一键同步更新**（KV 数据 100% 保留）；「检查新版本」所有部署方式均可用，但直接复制的独立仓库没有 GitHub `Sync fork`，需按教程 FAQ 手动合并上游。
-> - **🔒 零数据收集承诺**：不经过作者或任何第三方中转，所有 Token、配置、小站与访客记录 **100% 保存在你自己的 Cloudflare Workers + KV**，代码全开源可审计（仅在开启对应功能时请求公开只读 CAS、CF Turnstile 或 GitHub 公开 Release 接口）。
-> - **🧭 快速上手**：[🐣 零基础 5 分钟教程](docs/SETUP_GUIDE.md) · [⚡ 老手 1 分钟速通](docs/SETUP_GUIDE.md#-老手速通通道已有-bot-token--cloudflare) · [🚀 四种部署方式（网页 / AI / 终端 / VPS）](#-极简部署5-分钟免费上线) · [🔄 老用户升级](#-老用户如何升级到最新版100-保留-kv-数据)
+> - **🔒 零数据收集承诺**：不经过作者或任何第三方中转，所有 Token、配置、小站与访客记录 **100% 保存在你自己的 Cloudflare Workers + KV / D1**，代码全开源可审计（仅在开启对应功能时请求公开只读 CAS、CF Turnstile 或 GitHub 公开 Release 接口）。
+> - **🧭 快速上手**：[🎒 1 分钟备齐 4 样 & 极简部署](#deploy) · [🐣 零基础 5 分钟教程](docs/SETUP_GUIDE.md) · [⚡ 老手 1 分钟速通](docs/SETUP_GUIDE.md#-老手速通通道已有-bot-token--cloudflare) · [🔄 老用户升级](#upgrade)
 
 ---
 
@@ -94,6 +94,8 @@
 </div>
 </details>
 
+> **🚀 看完心动了？免费部署到你自己的 Cloudflare 只需 4 步** → **[先看「1 分钟备齐 4 样」直接上手](#deploy)** ｜ **[🐣 零基础保姆教程](docs/SETUP_GUIDE.md)**
+
 ---
 
 ## 🛡️ 四层防骚扰架构 & 4 种人机验证
@@ -138,23 +140,40 @@ flowchart LR
 
 ---
 
+<a id="deploy"></a>
 ## 🚀 极简部署（5 分钟免费上线）
 
-> **🐣 第一次申请 Telegram 机器人？** 跟着 **[零基础 5 分钟保姆教程](docs/SETUP_GUIDE.md)** 从 `@BotFather` 拿到第一个 Token 到群内 `/bind` 上线零门槛！
+> **🐣 第一次申请 Telegram 机器人？** 看完下面「1 分钟备齐 4 样」直接按 4 步走即可，或打开 **[零基础保姆教程](docs/SETUP_GUIDE.md)** 看更细的图文指引。
 
-### 方式一：Fork 网页零环境部署（最推荐 ★ · 仅 Fork 部署支持面板内一键同步更新）
+### 🎒 动手前：1 分钟先备齐这 4 样（其他全部自动建好）
 
-1. 点击本页右上角 **Fork**，将 `rose-panel-bot` 复制到你自己的 GitHub 账号下。
-2. 打开 Cloudflare Dashboard → **Workers & Pages → Create → Workers → Import a repository**，选择你刚 Fork 的仓库：
-   - **Build command**：`npm run build`
-   - **Deploy command**：`npx wrangler deploy`
-3. 部署后进入 Worker 的 **Settings → Variables & Bindings**，确认绑定了 `TOPIC_MAP` KV，并填入 4 个核心变量：
-   - `BOT_TOKEN`（**Secret**）· `WEBHOOK_SECRET`（**Secret**，随机填一串英文数字）
-   - `ADMIN_IDS`（**务必选 Text 文本变量**，填你的纯数字 UID）· `BOT_USERNAME`（**Text**，不含 `@`）
-4. 浏览器访问一次 `https://<你的Worker域名>/setup?secret=<WEBHOOK_SECRET>` 看到 `"ok": true` 即上线！此时给你的 Bot 发一次 `/start` 即可直接启用 **Bot 私聊直推**（配好 `ADMIN_IDS` 就能收发私信与开启人机验证，无需建群）；*(可选 · 推荐高频用户)* 如需为每位访客分独立话题，再建开启「话题 (Topics)」的私密群、把机器人设为管理员后发一句 **`/bind`** 即可自动切换！
-5. *(推荐)* 在 `@BotFather` 发 `/newapp`，URL 填 `https://<你的Worker域名>/`，短名与 `APP_SHORT_NAME` 一致（如 `panel`），群内与话题按钮才能直接打开面板。
+| 要准备的东西 | Cloudflare 变量类型 | 从哪里拿（1 分钟备齐） | ⚠️ 避坑重点 |
+| :--- | :---: | :--- | :--- |
+| **`BOT_TOKEN`** | **Secret（加密）** | TG 搜索官方蓝标 **[@BotFather](https://t.me/BotFather)** → 发 `/newbot` 按提示建机器人拿到（已有机器人发 `/mybots → API Token`） | **切勿发到公开群或提交到 GitHub** |
+| **`BOT_USERNAME`** | **Text（文本）** | 刚在 `@BotFather` 给机器人起的英文用户名（以 `bot` 结尾，如 `my_rose_bot`） | **不要带开头的 `@`** |
+| **`ADMIN_IDS`** | **Text（文本）** | TG 搜索 **[@userinfobot](https://t.me/userinfobot)** 点 **Start**，复制 `Id:` 后的**纯数字**（如 `1234567890`） | 是**你本人**的数字 ID，不是 Bot ID；**务必选 Text 不能选 Secret**，否则面板看不到 ⚙️ 设置 |
+| **`WEBHOOK_SECRET`** | **Secret（加密）** | **不用去任何后台找！自己随手编一串密码即可**（如 `rose2026pass`） | 仅用**字母、数字、`-`、`_`**（勿含空格或 `& ? #`），第 4 步激活要用到 |
 
-> 💡 **为什么不直接用一键部署按钮？** Cloudflare 一键按钮会建一个**独立副本（非 Fork）**，后续既没有 GitHub `Sync fork` 按钮，也无法在 TG 面板里一键同步更新；先点右上角 Fork 再导入只需多点一下，以后永久省心。
+### 方式一：Fork 网页零环境部署（最推荐 ★ · 4 步上线）
+
+1. **先 Fork 仓库**：点本页右上角 **Fork** 复制到自己的 GitHub 账号下（**⚠️ 务必先 Fork**，只有 Fork 部署支持后续面板内一键同步更新）。
+2. **导入 Cloudflare 部署**：打开 Cloudflare Dashboard → **Workers & Pages → Create → Workers → Import a repository**，选刚 Fork 的仓库，保持 **Build command** 为 `npm run build`、**Deploy command** 为 `npx wrangler deploy`，点 **Save and Deploy**（**首次部署会自动建好 `TOPIC_MAP` KV 与 `rose-panel-bot` D1 数据库，无需手动建库**）。
+3. **填入上面的 4 个变量**：进入 Worker **Settings → Variables & Bindings**，把刚备齐的 4 项按上表类型（**Secret / Text**）逐一填入并点击 **Deploy / Save**。
+4. **打开 `/setup` 激活上线**：浏览器访问一次：
+   ```text
+   https://<你的Worker域名>/setup?secret=<你的WEBHOOK_SECRET>
+   ```
+   看到 **`"ok": true`** 就 **🎉 正式上线了！** 回到 Telegram **私聊你的 Bot 发一次 `/start`**，即可免建群收发私信、点左下角打开个人面板。
+
+<details>
+<summary><b>✨ 上线后可选进阶（/newapp 群内直达 · /bind 话题群 · 手动补绑 KV/D1 · 多实例注意）</b></summary>
+
+- **让分享海报二维码与群内按钮直达面板（推荐）**：去 `@BotFather` 发 `/newapp`，URL 填 `https://<你的Worker域名>/`，短名填 `panel`（并在 Cloudflare 填 Text 变量 `APP_SHORT_NAME = panel`）。
+- **高频私信分独立话题（可选）**：新建开启 **「话题 (Topics)」** 的私密群 → 拉 Bot 当管理员（勾选管理话题 & 删除消息）→ 群内发一句 **`/bind`** 即可自动切换（随时 `/unbind` 退回私聊直推）。
+- **如果 Bindings 里没看到 `DB` 或 `TOPIC_MAP`**：Wrangler v4 默认会自动创建；若列表里缺 `DB`，可按 [手动绑定 D1 步骤](docs/SETUP_GUIDE.md#d1-storage) 30 秒补绑（不绑也会自动走 KV，完全不影响使用）。
+- **⚠️ 同账号部署多个实例**：Wrangler 未写 `database_id` 时会按 `database_name` 关联同名 D1 库，同一 Cloudflare 账号下若部署第 2 个实例，请把该仓库 `wrangler.toml` 中的 `database_name` 改为不同名字（如 `rose-panel-bot-2`）。
+- **为什么不建议用 Cloudflare 一键部署按钮？** 一键按钮建的是独立副本（非 Fork），后续没有 `Sync fork` 也不能在面板里一键同步更新；先点右上角 Fork 再导入只需多点一下，以后永久省心。
+</details>
 
 ### 方式二：AI 懒人按需部署（Antigravity / Claude Code / Codex / Cursor）
 
@@ -170,7 +189,7 @@ flowchart LR
 # 1. 拉取代码并安装依赖（需 Node.js 20+）
 git clone https://github.com/mango0114/rose-panel-bot.git && cd rose-panel-bot && npm ci
 
-# 2. 登录 Cloudflare 并构建部署（Wrangler v4 自动创建 TOPIC_MAP KV）
+# 2. 登录 Cloudflare 并构建部署（Wrangler v4 自动创建 TOPIC_MAP KV 与 rose-panel-bot D1 数据库）
 npx wrangler login
 npm run build && npx wrangler deploy --var ADMIN_IDS:你的数字UID --var BOT_USERNAME:你的Bot用户名
 
@@ -226,9 +245,11 @@ npx wrangler dev --ip 127.0.0.1 --port 8787 --persist-to ./.wrangler/state --sho
 
 ---
 
-## 🔄 老用户如何升级到最新版（100% 保留 KV 数据）
+<a id="upgrade"></a>
+## 🔄 老用户如何升级到最新版（KV 数据保留，聊天数据自动迁移到 D1）
 
-> **✅ 无需修改 Cloudflare KV！** 升级只更新代码，原有的名片、小站、探针、访客与通知群绑定 **100% 原样保留**（`wrangler.toml` 已开启 `keep_vars = true`，重部署不误清普通变量）。⚠️ **切勿新建 Worker 或重新点击一键部署按钮**，否则会建出全新的空实例。
+> **✅ KV 数据 100% 保留不删！** 升级只更新代码，原有的名片、小站、探针、访客与通知群绑定 **100% 原样保留**（`wrangler.toml` 已开启 `keep_vars = true`，重部署不误清普通变量）；绑定 D1 数据库（`DB`）后，聊天记录会自动按需迁移到 D1（也可在 **⚙️ 设置 → 版本更新 → 数据存储** 点「一键迁移」），未绑定 D1 则继续走原有 KV，完全不受影响。  
+> **⚠️ 两点注意**：① **切勿新建 Worker 或重新点击一键部署按钮**，否则会建出全新的空实例；② **同一 Cloudflare 账号下部署了 2 个及以上实例**时，请在各自仓库 `wrangler.toml` 中修改 `database_name`（如 `rose-panel-bot-2`）以免共用同一个 D1 库。
 
 - **🔀 Fork 部署用户（最简单）**：打开小程序 **⚙️ 设置 → 版本更新** 点 **「检查新版本」**；在「我 Fork 的 GitHub 仓库」填入 `你的用户名/rose-panel-bot` 后，点 **「前往我的 Fork 点 Sync fork」**（零密钥），或再填单仓 Fine-grained Token 点 **「一键同步 Fork 并触发云端更新」**，约 30 秒云端重建上线。
 - **🤖 独立副本 / AI 部署用户**：把下面这段话发给你的 AI 助手：
@@ -243,13 +264,14 @@ npx wrangler dev --ip 127.0.0.1 --port 8787 --persist-to ./.wrangler/state --sho
 
 | 变量名 | 类型 | 必填 | 说明 |
 | :--- | :--- | :---: | :--- |
-| `TOPIC_MAP` | KV Binding | ✅ | 持久化面板配置、小站、访客与媒体归档、签到数据 |
+| `TOPIC_MAP` | KV Binding | ✅ | 持久化面板配置、小站、访客资料与验证状态、签到数据（未绑定 `DB` 时同时承载聊天记录） |
+| `DB` | D1 Binding | 推荐 | 绑定名为 `rose-panel-bot` 的 Cloudflare D1 数据库，用于无限量存储聊天记录与消息映射、大幅节省每日 KV 写入配额（自动建表与迁移；未绑定时自动走 KV） |
 | `BOT_TOKEN` | Secret | ✅ | `@BotFather` 颁发的 Telegram Bot Token |
 | `ADMIN_IDS` | Text | ✅ | 站长数字 UID，多个用英文逗号分隔（`<0.1ms` 内存极速鉴权） |
 | `WEBHOOK_SECRET` | Secret | ✅ | 随机密钥，保护 Webhook（含 `/` 与 `/webhook`）与 `/setup` |
 | `BOT_USERNAME` | Text | 推荐 | 机器人用户名（不含 `@`） |
 | `APP_SHORT_NAME` | Text | 推荐 | BotFather `/newapp` 设置的小程序短名（如 `panel`） |
-| `SUPERGROUP_ID` | Text | 可选 | 话题通知群 ID（不绑群时只要配了 `ADMIN_IDS` 即自动走 Bot 私聊直推；高频用户推荐在话题群发 `/bind` 绑定，免手填。注：私聊直推模式每条访客消息会多 1～3 次 KV 写入，Cloudflare 免费额度 1000 次/天，个人日常使用充足） |
+| `SUPERGROUP_ID` | Text | 可选 | 话题通知群 ID（不绑群时只要配了 `ADMIN_IDS` 即自动走 Bot 私聊直推；高频用户推荐在话题群发 `/bind` 绑定，免手填。仅在未绑定 D1 的纯 KV 模式下私聊直推会多 1～3 次 KV 写入，绑定 D1 后无此消耗） |
 | `TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET` | Text / Secret | 可选 | 开启 CF Turnstile 严格验证模式时填写 |
 | `PROBE_PROVIDER` | Text | 可选 | 探针类型：`komari`（默认）/ `nezha` / `nodeget` / `json` |
 | `PROBE_URL` / `PROBE_API_KEY` | Text / Secret | 可选 | 探针地址与私有凭证（兼容旧名 `KOMARI_URL` / `KOMARI_API_KEY`，也可在小程序内填写） |

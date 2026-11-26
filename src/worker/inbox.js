@@ -5,14 +5,14 @@
 
 import { parseAdminIds } from './auth.js';
 import { resolveSupergroupId, safeGetJSON, safePutJSON } from './config.js';
+import { DM_MAP_PREFIX, DM_MAP_TTL_SECONDS, getStore } from './store/index.js';
 import { buildPanelButton, escapeHtml, tgCall } from './telegram.js';
 import { formatDisplayName, formatSourceLabel, recordVisitorExchange, upsertVisitorProfile } from './visitors.js';
 
+export { DM_MAP_PREFIX, DM_MAP_TTL_SECONDS };
 export const DM_LAST_HEADER_KEY = 'dm:last_header';
 export const DM_OWNER_UNREACHABLE_KEY = 'dm:owner_unreachable';
-export const DM_MAP_PREFIX = 'dmmap:';
 export const DM_HEADER_INTERVAL_MS = 10 * 60 * 1000;
-export const DM_MAP_TTL_SECONDS = 7 * 86400;
 
 export function previewTextOfMessage(msg = {}) {
   if (msg.text) return msg.text.slice(0, 100);
@@ -81,32 +81,15 @@ export async function clearOwnerUnreachable(env) {
 export async function saveDmMessageMap(env, ownerMsgId, visitorUid, visitorPmMsgId = null) {
   const msgId = Number(ownerMsgId);
   const uid = String(visitorUid || '').trim();
-  if (!env?.TOPIC_MAP || !Number.isFinite(msgId) || msgId <= 0 || !/^\d+$/.test(uid)) return;
-  const pmId = Number(visitorPmMsgId);
-  // Store JSON `{ u, p }` only for copied visitor messages so reactions can map back to the
-  // visitor's original private-chat message; header cards & owner replies keep plain `uid`.
-  const value = Number.isInteger(pmId) && pmId > 0 ? JSON.stringify({ u: uid, p: pmId }) : uid;
-  await env.TOPIC_MAP.put(`${DM_MAP_PREFIX}${msgId}`, value, { expirationTtl: DM_MAP_TTL_SECONDS });
+  if ((!env?.TOPIC_MAP && !env?.DB) || !Number.isFinite(msgId) || msgId <= 0 || !/^\d+$/.test(uid)) return;
+  await getStore(env).putDmMap(msgId, uid, visitorPmMsgId);
 }
 
 export async function lookupDmMessageEntry(env, ownerMsgId) {
   const msgId = Number(ownerMsgId);
-  if (!env?.TOPIC_MAP || !Number.isFinite(msgId) || msgId <= 0) return null;
+  if ((!env?.TOPIC_MAP && !env?.DB) || !Number.isFinite(msgId) || msgId <= 0) return null;
   try {
-    const raw = await env.TOPIC_MAP.get(`${DM_MAP_PREFIX}${msgId}`);
-    if (!raw) return null;
-    const trimmed = String(raw).trim();
-    if (/^\d+$/.test(trimmed)) {
-      return { uid: trimmed, pmMessageId: null };
-    }
-    const parsed = JSON.parse(trimmed);
-    const uid = String(parsed?.u || '').trim();
-    if (!/^\d+$/.test(uid)) return null;
-    const pmId = Number(parsed?.p);
-    return {
-      uid,
-      pmMessageId: Number.isInteger(pmId) && pmId > 0 ? pmId : null,
-    };
+    return await getStore(env).getDmMap(msgId);
   } catch {
     return null;
   }
