@@ -58,7 +58,7 @@
 </div>
 
 - **224×84 Pixel Day/Night Bubble Slider**: scrub the crystal magnifier to toggle **Dark / Follow Telegram / Light** with a full-screen circular View Transition ripple synced to Telegram chrome; edge-injected splash + local SWR cache open in 0.2s, with **customizable bottom navigation order & default landing tab** (auto-skipping tabs hidden from guests while preserving deep links) and an automatic **What's New** modal after upgrades;
-- Filter exchanged photos by sender; inspect live **Komari / Nezha (v1·v0) / NodeGet / Generic JSON** server metrics (with optional offline & resource alerts, off by default) and **Public / 🔒 Private** site bookmarks; generate **light/dark shareable QR card posters with Open Graph previews, `src_` referral tracking, and monthly unique visitor counts**; swap animated `.webp` / `.webm` / `.tgs` emblems via `/set` with 3-way private avatar options.
+- Filter exchanged photos by sender; inspect live **Komari / Nezha (v1·v0) / NodeGet / Generic JSON** server metrics (with per-line **latency & packet loss display** for Komari — requires adding Ping Tasks in the Komari dashboard, currently Komari-only — plus optional offline & resource alerts, off by default) and **Public / 🔒 Private** site bookmarks; generate **light/dark shareable QR card posters with Open Graph previews, `src_` referral tracking, and monthly unique visitor counts**; swap animated `.webp` / `.webm` / `.tgs` emblems via `/set` with 3-way private avatar options.
 
 ---
 
@@ -132,7 +132,7 @@ Unused modules stay completely hidden and add zero overhead:
 | :--- | :---: | :--- | :--- |
 | **🪪 Personal Card + 🌐 Public/Private Sites** | Core | `BOT_TOKEN` + `TOPIC_MAP` KV | 0.2s panel with pixel Day/Night slider, animated emblems, dual-layer sites, shareable QR poster, Open Graph link previews, `src_<channel>` referral tracking, per-user monthly visitor count (admin-only by default; fail-open if Cloudflare KV's ~500 new visitors/day free write quota is exceeded, never blocking card loads), and a visitor-only footer signature with a "Want one?" deployment guide (toggleable off anytime in Settings) |
 | **👤 Bidirectional PM Bot + 4-Layer Shield** | Optional | Works with `ADMIN_IDS` (Bot DM push), or `/bind` in a Topics group (optional, recommended for high volume) | Ready out-of-the-box via Bot DM push (quote-reply to respond), direct in-panel chat/photos & signed sticker rendering, bidirectional emoji reaction sync (in Topics mode, adds 1 KV write per visitor message for a 30-day `tmsg:*` reverse map), archive, CAS & sticker quizzes; `/bind` switches automatically to per-visitor Forum Topics |
-| **📡 Pluggable Server Probe** | Optional | Pick provider & URL in Mini App | **Komari / Nezha (v1·v0) / NodeGet / Generic JSON**; Admin-Only toggle & optional offline/resource alerts (off by default) |
+| **📡 Pluggable Server Probe** | Optional | Pick provider & URL in Mini App | **Komari / Nezha (v1·v0) / NodeGet / Generic JSON**; per-line **latency & packet loss display** (requires configuring Ping Tasks in the Komari dashboard; currently Komari-only), Admin-Only toggle & optional offline/resource alerts (off by default) |
 | **🛡️ CF Turnstile Strict Mode** | Optional | `TURNSTILE_SITE_KEY` & `SECRET` | Auto-escalates high-risk ads or toggle manually in Settings |
 | **🌸 Group Check-in, Points & Badges** | Optional | `ENABLE_CHECKIN="true"` or in-app switch | Off by default for personal cards; 1-click on for group communities |
 

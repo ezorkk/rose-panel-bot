@@ -554,9 +554,12 @@ export default function SettingsDrawer({
         method: 'POST',
         body: draft.probe,
       });
+      const latencyHint = res.latencyUnsupported
+        ? '；当前 Komari 版本不支持批量延迟统计，升级 Komari 后可显示延迟'
+        : '';
       setProbeTestResult({
         ok: true,
-        text: `连接成功 (${res.protocol})！读取到 ${res.summary?.total || 0} 台节点（在线 ${res.summary?.online || 0} 台）`,
+        text: `连接成功 (${res.protocol})！读取到 ${res.summary?.total || 0} 台节点（在线 ${res.summary?.online || 0} 台）${latencyHint}`,
       });
       if (Array.isArray(res.nodes) && !res.demo) {
         setAlertNodes(res.nodes);
