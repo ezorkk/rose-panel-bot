@@ -274,6 +274,11 @@ export async function recordVisitorExchange(env, userId, msg, options = {}) {
     pmMessageId = null,
     topicMsgId = undefined,
     dmMsgId = null,
+    // Real message ID of the visitor's copied message inside its forum topic (+ that topic's ID),
+    // used to quote the visitor when mirroring panel replies. Kept separate from `topicMsgId`,
+    // which older visitor entries filled with the visitor's private-chat message ID.
+    topicCopyId = null,
+    topicThreadId = null,
     incrementCount = true,
     preview = '',
   } = options;
@@ -331,6 +336,12 @@ export async function recordVisitorExchange(env, userId, msg, options = {}) {
     };
     if (numericDmId) {
       entry.dmMsgId = numericDmId;
+    }
+    const numericCopyId = Number(topicCopyId);
+    const numericThreadId = Number(topicThreadId);
+    if (Number.isInteger(numericCopyId) && numericCopyId > 0 && Number.isInteger(numericThreadId) && numericThreadId > 0) {
+      entry.topicCopyId = numericCopyId;
+      entry.topicThreadId = numericThreadId;
     }
     history.pmMessageIds.unshift(entry);
     history.pmMessageIds = history.pmMessageIds.slice(0, MAX_PM_IDS);
@@ -411,6 +422,23 @@ export async function recordVisitorExchange(env, userId, msg, options = {}) {
     totalCount: rec.msg_count,
     message: addedMessage,
   };
+}
+
+/**
+ * Returns the newest visitor message copied into forum topic `threadId` as
+ * `{ topicMsgId }`, or null. Only entries recorded with `topicCopyId` qualify, so older entries
+ * whose `topicMsgId` holds a private-chat ID are never used to quote. 1 KV read, 0 writes.
+ */
+export async function findLatestVisitorTopicMessage(env, userId, threadId) {
+  const uid = String(userId || '');
+  const tid = Number(threadId);
+  if (!env?.TOPIC_MAP || !/^\d+$/.test(uid) || !Number.isInteger(tid) || tid <= 0) return null;
+  const history = await safeGetJSON(env.TOPIC_MAP, `history:${uid}`, null);
+  const list = Array.isArray(history?.pmMessageIds) ? history.pmMessageIds : [];
+  const hit = list.find(
+    (m) => m?.sender === 'visitor' && Number(m.topicThreadId) === tid && Number(m.topicCopyId) > 0
+  );
+  return hit ? { topicMsgId: Number(hit.topicCopyId) } : null;
 }
 
 export async function getVisitorHistory(env, userId) {

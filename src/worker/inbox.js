@@ -219,7 +219,13 @@ export async function deliverVisitorMessage(env, origin, msg, options = {}) {
     }
     const topicRes = await options.forwardToTopic(env, origin, msg, preview);
     delivery = topicRes
-      ? { mode: 'topic', delivered: true, supergroupId: topicRes.supergroupId, threadId: topicRes.threadId }
+      ? {
+          mode: 'topic',
+          delivered: true,
+          supergroupId: topicRes.supergroupId,
+          threadId: topicRes.threadId,
+          topicMsgId: topicRes.topicMsgId || null,
+        }
       : { mode: 'topic', delivered: false };
   } else {
     delivery = await pushToOwner(env, origin, msg, preview, profile?.source || '');
@@ -229,6 +235,9 @@ export async function deliverVisitorMessage(env, origin, msg, options = {}) {
     sender: 'visitor',
     pmMessageId: msg.message_id,
     ...(mode === 'dm' ? { topicMsgId: null } : {}),
+    ...(mode === 'topic' && delivery?.topicMsgId
+      ? { topicCopyId: delivery.topicMsgId, topicThreadId: delivery.threadId }
+      : {}),
     incrementCount: true,
     preview,
   }).catch(() => {});

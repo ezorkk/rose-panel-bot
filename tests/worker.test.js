@@ -2811,6 +2811,90 @@ describe('Mini App in-panel visitor chat log, direct text/photo reply & recall',
       globalThis.fetch = origFetch;
     }
   });
+
+  it('mirrors panel replies to the topic with a bold label, blockquote, and a quote of the latest visitor message', async () => {
+    const kv = createMemoryKV();
+    const botToken = '999222:MIRROR_STYLE';
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777' };
+    await upsertVisitorProfile(env, { id: 91919, first_name: 'Momo' }, { threadId: 55, incrementMsg: false });
+    await kv.put('thread:55', '91919');
+    await kv.put('verified:91919', 'emoji:v1');
+    // Legacy entry recorded before topicCopyId existed: its topicMsgId is the visitor's PM ID and must never be quoted
+    await recordVisitorExchange(env, '91919', { message_id: 3, text: 'old' }, { sender: 'visitor', pmMessageId: 3 });
+
+    const tgCalls = [];
+    let nextId = 640;
+    let lastCopyId = null;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url, init) => {
+      const method = String(url).split('/').pop();
+      const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
+      tgCalls.push({ method, body });
+      if (method === 'copyMessage' || method === 'sendMessage') {
+        nextId += 1;
+        if (method === 'copyMessage') lastCopyId = nextId;
+        return new Response(JSON.stringify({ ok: true, result: { message_id: nextId } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+    });
+
+    const adminInit = await signInitData(
+      { auth_date: String(Math.floor(Date.now() / 1000)), user: JSON.stringify({ id: 10001, first_name: 'Owner' }) },
+      botToken
+    );
+    const panelReply = (text) =>
+      worker.fetch(
+        new Request('https://panel.example.com/api/admin/visitors/91919/reply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': adminInit },
+          body: JSON.stringify({ text }),
+        }),
+        env
+      );
+    const topicMirror = () =>
+      tgCalls.find((c) => c.method === 'sendMessage' && c.body.chat_id === '-100777' && c.body.message_thread_id === 55);
+
+    try {
+      // 1. Only a legacy entry exists -> mirror is styled but quotes nothing
+      expect((await panelReply('hello')).status).toBe(200);
+      expect(topicMirror().body.reply_parameters).toBeUndefined();
+
+      // 2. Visitor message copied into topic 55 (copy gets ID 642 there) -> recorded as topicCopyId
+      tgCalls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 500,
+            from: { id: 91919, first_name: 'Momo' },
+            chat: { id: 91919, type: 'private' },
+            text: '机器人很好用，感谢',
+          },
+        },
+        env,
+        'https://panel.example.com'
+      );
+      const copy = tgCalls.find((c) => c.method === 'copyMessage');
+      expect(copy.body.message_thread_id).toBe(55);
+      const copyId = lastCopyId;
+      expect(copyId).toBeGreaterThan(0);
+
+      // 3. Panel reply -> labelled blockquote, HTML-escaped, quoting the visitor's copied message in the same topic
+      tgCalls.length = 0;
+      expect((await panelReply('感动 <b>不是标签</b>')).status).toBe(200);
+      const mirror = topicMirror();
+      expect(mirror.body.parse_mode).toBe('HTML');
+      expect(mirror.body.text).toContain('<b>我在面板回复</b>');
+      expect(mirror.body.text).toContain('<blockquote>感动 &lt;b&gt;不是标签&lt;/b&gt;</blockquote>');
+      expect(mirror.body.reply_parameters).toEqual({ message_id: copyId, allow_sending_without_reply: true });
+      expect(mirror.body.disable_notification).toBe(true);
+      // The visitor's own private chat still gets the plain text
+      const toVisitor = tgCalls.find((c) => c.method === 'sendMessage' && Number(c.body.chat_id) === 91919);
+      expect(toVisitor.body.text).toBe('感动 <b>不是标签</b>');
+      expect(toVisitor.body.parse_mode).toBeUndefined();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
 });
 
 describe('Bot DM direct push inbox (dm-inbox)', () => {

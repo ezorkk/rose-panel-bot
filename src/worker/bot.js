@@ -40,6 +40,7 @@ import {
 } from './telegram.js';
 import {
   applyVisitorAction,
+  findLatestVisitorTopicMessage,
   formatDisplayName,
   formatSourceLabel,
   getVisitorDetail,
@@ -587,8 +588,9 @@ async function forwardMessageToTopic(env, requestOrigin, msg, knownPreview = und
   const preview = knownPreview !== undefined ? knownPreview : previewTextOfMessage(msg);
 
   let { threadId } = await ensureVisitorTopic(env, requestOrigin, user, preview);
+  let copied = null;
   try {
-    await tgCall(env, 'copyMessage', {
+    copied = await tgCall(env, 'copyMessage', {
       chat_id: supergroupId,
       message_thread_id: threadId,
       from_chat_id: msg.chat.id,
@@ -601,7 +603,7 @@ async function forwardMessageToTopic(env, requestOrigin, msg, knownPreview = und
       await safePutJSON(env.TOPIC_MAP, `user:${uid}`, rec);
       await env.TOPIC_MAP.delete(`thread:${threadId}`);
       ({ threadId } = await ensureVisitorTopic(env, requestOrigin, user, preview));
-      await tgCall(env, 'copyMessage', {
+      copied = await tgCall(env, 'copyMessage', {
         chat_id: supergroupId,
         message_thread_id: threadId,
         from_chat_id: msg.chat.id,
@@ -612,7 +614,7 @@ async function forwardMessageToTopic(env, requestOrigin, msg, knownPreview = und
     }
   }
 
-  return { supergroupId, threadId };
+  return { supergroupId, threadId, topicMsgId: copied?.result?.message_id || null };
 }
 
 async function processVisitorMessage(env, requestOrigin, msg, config = null) {
@@ -2575,6 +2577,8 @@ export async function syncTelegramBotSurface(env, requestOrigin, config = null, 
  * directly to the visitor in private chat, while silently mirroring into the Forum Supergroup Topic
  * (if bound) and archiving into `history:<uid>` so Mini App and Telegram Topics stay 100% synced.
  */
+const PANEL_MIRROR_LABEL = '📱 <b>我在面板回复</b>';
+
 export async function sendAdminDirectVisitorReply(env, requestOrigin, targetUid, payload = {}) {
   const uid = String(targetUid || '').trim();
   if (!/^\d+$/.test(uid)) {
@@ -2654,22 +2658,35 @@ export async function sendAdminDirectVisitorReply(env, requestOrigin, targetUid,
         preview
       );
 
+      // The mirror is posted by the bot, like the visitor's own copied messages, so Telegram groups
+      // them under the same sender. A bold label + blockquote, and a quote of the visitor message
+      // being answered, keep the owner's panel replies visually distinct from what the visitor said.
       const mirrorOnce = async (tid) => {
+        const quoted = await findLatestVisitorTopicMessage(env, uid, tid).catch(() => null);
+        const replyPart = quoted?.topicMsgId
+          ? { reply_parameters: { message_id: quoted.topicMsgId, allow_sending_without_reply: true } }
+          : {};
         if (photoFile && Array.isArray(sentPm?.photo) && sentPm.photo.length > 0) {
           const largestId = sentPm.photo[sentPm.photo.length - 1].file_id;
           return tgCall(env, 'sendPhoto', {
             chat_id: supergroupId,
             message_thread_id: tid,
             photo: largestId,
-            caption: rawText ? `📱 [面板回复] ${rawText}`.slice(0, 1024) : '📱 [面板发出图片]',
+            caption: rawText
+              ? `${PANEL_MIRROR_LABEL}\n<blockquote>${escapeHtml(rawText.slice(0, 900))}</blockquote>`
+              : `${PANEL_MIRROR_LABEL}（图片）`,
+            parse_mode: 'HTML',
             disable_notification: true,
+            ...replyPart,
           });
         }
         return tgCall(env, 'sendMessage', {
           chat_id: supergroupId,
           message_thread_id: tid,
-          text: `📱 [面板回复]\n${rawText}`.slice(0, 4096),
+          text: `${PANEL_MIRROR_LABEL}\n<blockquote>${escapeHtml(rawText.slice(0, 3800))}</blockquote>`,
+          parse_mode: 'HTML',
           disable_notification: true,
+          ...replyPart,
         });
       };
 
