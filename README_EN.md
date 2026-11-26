@@ -14,7 +14,7 @@
 <p>
   <a href="README.md">🇨🇳 简体中文</a> ·
   <b>🇺🇸 English</b> ·
-  <a href="docs/SETUP_GUIDE.md">🐣 5-Min Guide (ZH)</a> ·
+  <a href="docs/SETUP_GUIDE.md">🐣 Beginner Guide (ZH)</a> ·
   <a href="AGENTS.md">🤖 AI Auto-Deploy</a> ·
   <a href="CHANGELOG.md">📋 Changelog</a> ·
   <a href="https://t.me/Rose202_bot">💬 Live Demo</a> ·
@@ -27,7 +27,7 @@
 
 > - **🔄 Fork First for 1-Click Updates (Important)**: **Always click `Fork` at the top right before importing into Cloudflare Workers** — only Fork-based deployments support **1-click in-panel Fork sync updates** (100% KV data preserved). Release checks work for every deployment, but standalone copies have no GitHub `Sync fork` and must merge upstream manually (see the guide's FAQ).
 > - **🔒 Zero Data Collection Promise**: Zero third-party relays — your Bot Token, config, sites, and visitor archive live **100% inside your own Cloudflare Workers & KV / D1** (external calls occur only when enabled for read-only CAS, CF Turnstile, or public GitHub Release checks).
-> - **🧭 Quick Links**: [🎒 4 Things Ready in 1 Min & Fast Deploy](#deploy) · [🔄 Safe Upgrade Guide](#upgrade) · [🐣 5-Min Guide (ZH)](docs/SETUP_GUIDE.md)
+> - **🧭 Quick Links**: [🎒 4 Things Ready in 1 Min & Fast Deploy](#deploy) · [🔄 Safe Upgrade Guide](#upgrade) · [🐣 Beginner Guide (ZH)](docs/SETUP_GUIDE.md)
 
 ---
 
@@ -141,9 +141,9 @@ Unused modules stay completely hidden and add zero overhead:
 ---
 
 <a id="deploy"></a>
-## 🚀 Fast Deployment (Free in 5 Minutes)
+## 🚀 Fast Deployment (Free on Cloudflare)
 
-> **🐣 First Telegram bot?** Grab the 4 items below first, then follow the 4 steps — or check the **[5-Minute Beginner Guide (ZH)](docs/SETUP_GUIDE.md)**.
+> **🐣 First Telegram bot?** Grab the 4 items below first, then follow the 4 steps (around **10–20 minutes** from scratch, or check the **[Beginner Guide (ZH)](docs/SETUP_GUIDE.md)**).
 
 ### 🎒 Before You Start: 4 Values Ready in 1 Minute (Everything Else Auto-Provisions)
 

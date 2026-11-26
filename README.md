@@ -14,7 +14,7 @@
 <p>
   <b>🇨🇳 简体中文</b> ·
   <a href="README_EN.md">🇺🇸 English</a> ·
-  <a href="docs/SETUP_GUIDE.md">🐣 零基础 5 分钟教程</a> ·
+  <a href="docs/SETUP_GUIDE.md">🐣 零基础保姆教程</a> ·
   <a href="AGENTS.md">🤖 AI 一键部署协议</a> ·
   <a href="CHANGELOG.md">📋 更新日志</a> ·
   <a href="https://t.me/Rose202_bot">💬 在线体验 / 联系作者</a> ·
@@ -27,7 +27,7 @@
 
 > - **🔄 部署前必看（Fork 才能一键同步更新）**：**强烈建议先点击右上角 `Fork` 仓库，再导入 Cloudflare Workers 部署**——只有通过 Fork 部署，后续才能在 TG 面板里**一键同步更新**（KV 数据 100% 保留）；「检查新版本」所有部署方式均可用，但直接复制的独立仓库没有 GitHub `Sync fork`，需按教程 FAQ 手动合并上游。
 > - **🔒 零数据收集承诺**：不经过作者或任何第三方中转，所有 Token、配置、小站与访客记录 **100% 保存在你自己的 Cloudflare Workers + KV / D1**，代码全开源可审计（仅在开启对应功能时请求公开只读 CAS、CF Turnstile 或 GitHub 公开 Release 接口）。
-> - **🧭 快速上手**：[🎒 1 分钟备齐 4 样 & 极简部署](#deploy) · [🐣 零基础 5 分钟教程](docs/SETUP_GUIDE.md) · [⚡ 老手 1 分钟速通](docs/SETUP_GUIDE.md#-老手速通通道已有-bot-token--cloudflare) · [🔄 老用户升级](#upgrade)
+> - **🧭 快速上手**：[🎒 1 分钟备齐 4 样 & 极简部署](#deploy) · [🐣 零基础保姆教程](docs/SETUP_GUIDE.md) · [⚡ 老手速通](docs/SETUP_GUIDE.md#-老手速通通道已有-bot-token--cloudflare) · [🔄 老用户升级](#upgrade)
 
 ---
 
@@ -141,7 +141,7 @@ flowchart LR
 ---
 
 <a id="deploy"></a>
-## 🚀 极简部署（5 分钟免费上线）
+## 🚀 极简部署（免费上线）
 
 > **🐣 第一次申请 Telegram 机器人？** 看完下面「1 分钟备齐 4 样」直接按 4 步走即可，或打开 **[零基础保姆教程](docs/SETUP_GUIDE.md)** 看更细的图文指引。
 
