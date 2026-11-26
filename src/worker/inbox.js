@@ -257,7 +257,7 @@ export async function deliverVisitorMessage(env, origin, msg, options = {}) {
     pmMessageId: msg.message_id,
     ...(mode === 'dm' ? { topicMsgId: null } : {}),
     ...(mode === 'topic' && delivery?.topicMsgId
-      ? { topicCopyId: delivery.topicMsgId, topicThreadId: delivery.threadId }
+      ? { topicCopyId: delivery.topicMsgId, topicThreadId: delivery.threadId, topicChatId: delivery.supergroupId }
       : {}),
     ...(mode === 'dm' && delivery?.copiedMsgId ? { dmCopyId: delivery.copiedMsgId } : {}),
     incrementCount: true,

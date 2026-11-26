@@ -280,6 +280,9 @@ export async function recordVisitorExchange(env, userId, msg, options = {}) {
     // which older visitor entries filled with the visitor's private-chat message ID.
     topicCopyId = null,
     topicThreadId = null,
+    // Group the topic message IDs (`topicMsgId` / `topicCopyId`) belong to. Forum message IDs are
+    // per chat, so reaction sync only trusts them while the same group is still bound.
+    topicChatId = null,
     incrementCount = true,
     preview = '',
   } = options;
@@ -343,6 +346,10 @@ export async function recordVisitorExchange(env, userId, msg, options = {}) {
     };
     if (numericDmId) {
       entry.dmMsgId = numericDmId;
+    }
+    const cleanTopicChatId = String(topicChatId ?? '').trim();
+    if (/^-?\d+$/.test(cleanTopicChatId)) {
+      entry.topicChatId = cleanTopicChatId;
     }
     const numericDmCopyId = Number(dmCopyId);
     if (Number.isInteger(numericDmCopyId) && numericDmCopyId > 0) {

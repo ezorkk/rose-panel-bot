@@ -12,6 +12,7 @@ import { signMediaToken, verifyMediaToken, verifyTelegramInitData } from '../src
 import {
   TOPIC_MSG_MAP_PREFIX,
   TOPIC_MSG_MAP_TTL_SECONDS,
+  VISITOR_REACTION_LIMIT_PER_MIN,
   WEBHOOK_UPDATES_REV,
   WEBHOOK_UPDATES_REV_KEY,
   buildVisitorCardCaption,
@@ -5383,9 +5384,9 @@ describe('Bidirectional Telegram reaction sync & panel display (v1.9)', () => {
         photos: [],
         links: [],
         pmMessageIds: [
-          { id: 101, sender: 'admin', topicMsgId: 901, at: Date.now() }, // direct topic reply
-          { id: 102, sender: 'admin', topicMsgId: 902, at: Date.now() }, // panel reply mirror
-          { id: 103, sender: 'visitor', topicMsgId: 103, topicCopyId: 903, topicThreadId: 55, at: Date.now() }, // visitor own msg
+          { id: 101, sender: 'admin', topicMsgId: 901, topicChatId: '-100777888', at: Date.now() }, // direct topic reply
+          { id: 102, sender: 'admin', topicMsgId: 902, topicChatId: '-100777888', at: Date.now() }, // panel reply mirror
+          { id: 103, sender: 'visitor', topicMsgId: 103, topicCopyId: 903, topicThreadId: 55, topicChatId: '-100777888', at: Date.now() }, // visitor own msg
         ],
         messages: [
           { id: 'm1', sender: 'admin', text: '话题回复', pmMessageId: 101, topicMsgId: 901, at: new Date().toISOString() },
@@ -5637,7 +5638,7 @@ describe('Bidirectional Telegram reaction sync & panel display (v1.9)', () => {
 
       const tmsgPut = putSpy.mock.calls.find(([k]) => k.startsWith(TOPIC_MSG_MAP_PREFIX));
       expect(tmsgPut).toBeTruthy();
-      expect(JSON.parse(tmsgPut[1])).toEqual({ u: '30010', p: 55 });
+      expect(JSON.parse(tmsgPut[1])).toEqual({ g: '-100777888', u: '30010', p: 55 });
       expect(tmsgPut[2]).toEqual({ expirationTtl: TOPIC_MSG_MAP_TTL_SECONDS });
       const topicCopyId = Number(tmsgPut[0].slice(TOPIC_MSG_MAP_PREFIX.length));
 
@@ -5784,8 +5785,8 @@ describe('Bidirectional Telegram reaction sync & panel display (v1.9)', () => {
         photos: [],
         links: [],
         pmMessageIds: [
-          { id: 81, sender: 'admin', topicMsgId: 981, at: Date.now() },
-          { id: 82, sender: 'admin', topicMsgId: 982, at: Date.now() },
+          { id: 81, sender: 'admin', topicMsgId: 981, topicChatId: '-100777888', at: Date.now() },
+          { id: 82, sender: 'admin', topicMsgId: 982, topicChatId: '-100777888', at: Date.now() },
         ],
         messages: [
           { id: 'm81', sender: 'admin', text: 'msg1', pmMessageId: 81, at: new Date().toISOString() },
@@ -5843,6 +5844,105 @@ describe('Bidirectional Telegram reaction sync & panel display (v1.9)', () => {
         )
       ).resolves.toBeUndefined();
       expect((await getVisitorHistory(env, '30030')).messages.find((m) => m.pmMessageId === 82)?.visitorReaction).toBe('✨');
+    } finally {
+      tg.restore();
+    }
+  });
+
+  it('ignores topic message mappings from a previously bound group in both directions', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:REBIND_REACT', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100222' };
+    // Recorded while group -100111 was bound; owner has since rebound to -100222
+    await kv.put(
+      'history:30040',
+      JSON.stringify({
+        photos: [],
+        links: [],
+        pmMessageIds: [
+          { id: 401, sender: 'admin', topicMsgId: 57, topicChatId: '-100111', at: Date.now() },
+          { id: 402, sender: 'visitor', topicMsgId: 402, topicCopyId: 58, topicThreadId: 9, topicChatId: '-100111', at: Date.now() },
+        ],
+        messages: [
+          { id: 'a1', sender: 'admin', text: 'old reply', pmMessageId: 401, at: new Date().toISOString() },
+          { id: 'v1', sender: 'visitor', text: 'old msg', pmMessageId: 402, at: new Date().toISOString() },
+        ],
+      })
+    );
+    await kv.put(`${TOPIC_MSG_MAP_PREFIX}58`, JSON.stringify({ g: '-100111', u: '30040', p: 402 }));
+
+    const tg = mockTgForReactions();
+    try {
+      // Direction A: visitor reacts to the old admin reply -> no reaction in the new group, panel still updated
+      await handleTelegramUpdate(
+        {
+          message_reaction: {
+            chat: { id: 30040, type: 'private' },
+            message_id: 401,
+            user: { id: 30040, first_name: 'Rebind' },
+            date: 1700000100,
+            old_reaction: [],
+            new_reaction: [{ type: 'emoji', emoji: '👍' }],
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(tg.calls.filter((c) => c.method === 'setMessageReaction')).toHaveLength(0);
+      const hist = await getVisitorHistory(env, '30040');
+      expect(hist.messages.find((m) => m.id === 'a1').visitorReaction).toBe('👍');
+
+      // Direction B: admin reacts to message 58 in the NEW group -> old mapping must not hit visitor 30040
+      await handleTelegramUpdate(
+        {
+          message_reaction: {
+            chat: { id: -100222, type: 'supergroup' },
+            message_id: 58,
+            user: { id: 10001, first_name: 'Owner' },
+            date: 1700000101,
+            old_reaction: [],
+            new_reaction: [{ type: 'emoji', emoji: '❤' }],
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(tg.calls.filter((c) => c.method === 'setMessageReaction')).toHaveLength(0);
+    } finally {
+      tg.restore();
+    }
+  });
+
+  it('caps how many reactions per minute a visitor can sync', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:REACT_LIMIT', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777888' };
+    await kv.put(
+      'history:30050',
+      JSON.stringify({
+        photos: [],
+        links: [],
+        pmMessageIds: [{ id: 501, sender: 'admin', topicMsgId: 951, topicChatId: '-100777888', at: Date.now() }],
+        messages: [{ id: 'a1', sender: 'admin', text: 'hi', pmMessageId: 501, at: new Date().toISOString() }],
+      })
+    );
+    const tg = mockTgForReactions();
+    try {
+      for (let i = 0; i < VISITOR_REACTION_LIMIT_PER_MIN + 3; i += 1) {
+        await handleTelegramUpdate(
+          {
+            message_reaction: {
+              chat: { id: 30050, type: 'private' },
+              message_id: 501,
+              user: { id: 30050, first_name: 'Spammy' },
+              date: 1700000200 + i,
+              old_reaction: [],
+              new_reaction: i % 2 === 0 ? [{ type: 'emoji', emoji: '👍' }] : [],
+            },
+          },
+          env,
+          'https://panel.test'
+        );
+      }
+      expect(tg.calls.filter((c) => c.method === 'setMessageReaction')).toHaveLength(VISITOR_REACTION_LIMIT_PER_MIN);
     } finally {
       tg.restore();
     }

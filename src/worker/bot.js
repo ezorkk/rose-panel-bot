@@ -58,6 +58,7 @@ export const WEBHOOK_UPDATES_REV_KEY = 'webhook:updates_rev';
 export const WEBHOOK_UPDATES_REV = '1';
 export const TOPIC_MSG_MAP_PREFIX = 'tmsg:';
 export const TOPIC_MSG_MAP_TTL_SECONDS = 30 * 86400;
+export const VISITOR_REACTION_LIMIT_PER_MIN = 10;
 
 const LOCAL_QUESTIONS = [
   { q: '冰融化后会变成什么？', ok: '水', bad: ['石头', '木头', '火'] },
@@ -629,7 +630,7 @@ async function forwardMessageToTopic(env, requestOrigin, msg, knownPreview = und
     // Only visitor copies are written here; admin replies & panel mirrors are intentionally excluded.
     await env.TOPIC_MAP.put(
       `${TOPIC_MSG_MAP_PREFIX}${topicMsgId}`,
-      JSON.stringify({ u: uid, p: visitorPmId }),
+      JSON.stringify({ g: String(supergroupId), u: uid, p: visitorPmId }),
       { expirationTtl: TOPIC_MSG_MAP_TTL_SECONDS }
     ).catch(() => {});
   }
@@ -1435,6 +1436,7 @@ async function handleAdminSupergroupMessage(env, requestOrigin, msg, config) {
     await recordVisitorExchange(env, targetUid, msg, {
       sender: 'admin',
       pmMessageId: copied?.result?.message_id || null,
+      topicChatId: msg.chat.id,
       incrementCount: true,
       preview: previewTextOfMessage(msg),
     }).catch(() => {});
@@ -1970,6 +1972,9 @@ export async function handleMessageReaction(env, reaction) {
       const actorUid = reaction.user?.id ? String(reaction.user.id) : chatIdStr;
       if (await isUserAdmin(env, actorUid, tgCall)) return;
       if ((await env.TOPIC_MAP.get(`banned:${chatIdStr}`)) === '1') return;
+      // Each synced reaction costs a Telegram call and a history write; cap toggling so a visitor
+      // can't burn the KV free-tier write quota by flipping reactions on and off.
+      if (!(await checkRateLimit(env, `rl:react:${chatIdStr}`, VISITOR_REACTION_LIMIT_PER_MIN, 60))) return;
 
       const history = await safeGetJSON(env.TOPIC_MAP, `history:${chatIdStr}`, null);
       const pmList = Array.isArray(history?.pmMessageIds) ? history.pmMessageIds : [];
@@ -1979,8 +1984,10 @@ export async function handleMessageReaction(env, reaction) {
       let targetChatId = '';
       let targetMsgId = 0;
 
+      // Topic message IDs only count while the group they were recorded in is still bound
+      const sameGroup = Boolean(supergroupId) && String(matched.topicChatId || '') === String(supergroupId);
       if (matched.sender === 'admin') {
-        if (supergroupId && Number(matched.topicMsgId) > 0) {
+        if (sameGroup && Number(matched.topicMsgId) > 0) {
           targetChatId = supergroupId;
           targetMsgId = Number(matched.topicMsgId);
         } else if (ownerId && Number(matched.dmMsgId) > 0) {
@@ -1988,7 +1995,7 @@ export async function handleMessageReaction(env, reaction) {
           targetMsgId = Number(matched.dmMsgId);
         }
       } else if (matched.sender === 'visitor') {
-        if (inboxMode === 'topic' && supergroupId && Number(matched.topicCopyId) > 0) {
+        if (inboxMode === 'topic' && sameGroup && Number(matched.topicCopyId) > 0) {
           targetChatId = supergroupId;
           targetMsgId = Number(matched.topicCopyId);
         } else if (inboxMode === 'dm' && ownerId && Number(matched.dmCopyId) > 0) {
@@ -1997,13 +2004,15 @@ export async function handleMessageReaction(env, reaction) {
         }
       }
 
-      if (!targetChatId || !Number.isInteger(targetMsgId) || targetMsgId <= 0) return;
-
-      await tgCall(env, 'setMessageReaction', {
-        chat_id: Number(targetChatId),
-        message_id: targetMsgId,
-        reaction: tgReactionPayload,
-      }).catch(() => {});
+      // No known counterpart on the owner's side (panel-only reply in DM mode, legacy entry, or a
+      // topic from a previously bound group): skip the mirror, but still show it in the panel.
+      if (targetChatId && Number.isInteger(targetMsgId) && targetMsgId > 0) {
+        await tgCall(env, 'setMessageReaction', {
+          chat_id: Number(targetChatId),
+          message_id: targetMsgId,
+          reaction: tgReactionPayload,
+        }).catch(() => {});
+      }
       await updateVisitorMessageReaction(env, chatIdStr, messageId, 'visitor', panelReaction).catch(() => {});
       return;
     }
@@ -2018,6 +2027,9 @@ export async function handleMessageReaction(env, reaction) {
       if (!(await isUserAdmin(env, reaction.user.id, tgCall))) return;
 
       const mapping = await safeGetJSON(env.TOPIC_MAP, `${TOPIC_MSG_MAP_PREFIX}${messageId}`, null);
+      // Message IDs are per chat: a mapping written for a previously bound group must never be
+      // applied to the same ID in the current group (it would react on an unrelated visitor's message).
+      if (String(mapping?.g || '') !== String(supergroupId)) return;
       const targetUid = String(mapping?.u || '').trim();
       const targetPmId = Number(mapping?.p);
       if (!/^\d+$/.test(targetUid) || !Number.isInteger(targetPmId) || targetPmId <= 0) return;
@@ -2926,6 +2938,7 @@ export async function sendAdminDirectVisitorReply(env, requestOrigin, targetUid,
   const exchanged = await recordVisitorExchange(env, uid, syntheticMsg, {
     sender: 'admin',
     pmMessageId: sentPm?.message_id || null,
+    ...(topicMsgId && supergroupId ? { topicChatId: supergroupId } : {}),
     incrementCount: true,
     preview: previewTextOfMessage(syntheticMsg),
   });
