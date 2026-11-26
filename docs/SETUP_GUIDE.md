@@ -26,20 +26,21 @@ flowchart TD
 
   VET --> DEPLOY{"选择部署方式"}
   DEPLOY -- "🤖 最省心：交给 AI 助手" --> AI["复制 AGENTS.md 提示词发给 AI<br/>等 AI 问你要 Token 时直接贴给它"]
-  DEPLOY -- "🖱️ 手动：点网页一键按钮" --> CF["点击 Deploy to Cloudflare<br/>填 4 个核心变量并保存"]
+  DEPLOY -- "🖱️ 手动：Fork + Cloudflare 导入（推荐）" --> CF["先点右上角 Fork 仓库<br/>导入 Cloudflare 并填 4 个核心变量"]
 
   AI --> ACTIVATE["🔗 浏览器访问一次 /setup 激活"]
   CF --> ACTIVATE
-  ACTIVATE --> BIND{"需要防广告双向私聊吗？"}
-  BIND -- "不需要（仅个人名片/小站/探针）" --> DONE["🎉 全部上线！点左下角打开 0 秒个人面板"]
-  BIND -- "需要（强烈推荐）" --> GROUP["新建私密群 → 开「话题」→ 拉 Bot 当管理 → 发 /bind"]
+  ACTIVATE --> START["💬 私聊 Bot 发一次 /start<br/>即开箱启用「Bot 私聊直推 + 防骚扰验证」"]
+  START --> BIND{"高频联系需要按访客分独立话题吗？"}
+  BIND -- "不需要（直接用 Bot 私聊直推 & 面板回复）" --> DONE["🎉 全部上线！点左下角打开 0.2 秒个人面板"]
+  BIND -- "需要（可选 · 推荐高频用户）" --> GROUP["新建私密群 → 开「话题」→ 拉 Bot 当管理 → 发 /bind"]
   GROUP --> DONE
 ```
 
 **快捷直达：**
 - 👉 **[⚡ 老手速通通道（已有 Bot Token + Cloudflare）](#-老手速通通道已有-bot-token--cloudflare)**
 - 👉 **[🐣 小白零基础通道（还没有机器人或还没注册 Cloudflare）](#-小白零基础通道还没有机器人或-cloudflare)**
-- 👉 **[✨ 上线后 30 秒玩转表情包验证与动态徽章](#-上线后-30-秒玩转表情包验证与动态徽章)**
+- 👉 **[✨ 上线后 30 秒玩转核心亮点](#-上线后-30-秒玩转核心亮点)**
 - 👉 **[❓ 常见问题排错 (FAQ)](#-常见问题排错-faq)**
 
 ---
@@ -54,12 +55,13 @@ flowchart TD
 请阅读仓库里的 AGENTS.md，先询问我需要开启哪些模块（或选择轻量化安装），再帮我一步步部署 RosePanel Bot。
 ```
 
-### 方案 B · 🖱️ 一键点按钮手动上线（4 步搞定）
-1. 点击 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/mango0114/rose-panel-bot)（Build：`npm run build`，Deploy：`npx wrangler deploy`）。
-2. 在 Worker **Settings → Variables & Bindings** 确认绑定了 `TOPIC_MAP` KV，并填入 4 个核心变量：
-   - `BOT_TOKEN`（Secret）· `WEBHOOK_SECRET`（Secret，任意随机串）· `ADMIN_IDS`（你的数字 UID）· `BOT_USERNAME`（不含 `@`）。
-3. 浏览器打开 `https://<你的域名>/setup?secret=<WEBHOOK_SECRET>`，看到 `"ok": true` 即激活。
-4. 新建开启 **「话题 (Topics)」** 的私密群、把机器人设为管理员（勾选管理话题 & 删除消息），群内发一句 **`/bind`** 秒完成通知群绑定！
+### 方案 B · 🖱️ Fork + Cloudflare 网页导入（最推荐，支持以后面板内一键更新）
+1. 在 [仓库主页](https://github.com/mango0114/rose-panel-bot) 点击右上角 **Fork**，将项目复制到自己的 GitHub 账号下。
+2. 打开 Cloudflare Dashboard → **Workers & Pages → Create → Workers → Import a repository**，选择刚 Fork 的仓库（Build：`npm run build`，Deploy：`npx wrangler deploy`）。
+3. 在 Worker **Settings → Variables & Bindings** 确认绑定了 `TOPIC_MAP` KV，并填入 4 个核心变量：
+   - `BOT_TOKEN`（Secret）· `WEBHOOK_SECRET`（Secret，任意随机串）· `ADMIN_IDS`（**Text 文本变量**，你的数字 UID）· `BOT_USERNAME`（Text，不含 `@`）。
+4. 浏览器打开 `https://<你的域名>/setup?secret=<WEBHOOK_SECRET>`，看到 `"ok": true` 即激活；给 Bot 发一次 `/start` 即可**免建群直接收发私信**（Bot 私聊引用回复 + 面板内聊天）。
+5. *(可选 · 推荐高频用户)* 想给每位访客建独立话题，再新建开启 **「话题 (Topics)」** 的私密群、拉机器人当管理员并群内发一句 **`/bind`** 即可自动切换！
 
 ---
 
@@ -86,9 +88,12 @@ flowchart TD
 
 1. 免费注册登录 [GitHub](https://github.com/) 和 [Cloudflare](https://dash.cloudflare.com/)（Cloudflare Workers 免费额度完全够个人永久使用）。
 2. **如果你有 AI 助手（最省心）**：现在你已经拿到 `BOT_TOKEN` 和 `ADMIN_IDS` 了，直接跳回上面的 **[方案 A · 丢给 AI 全自动部署](#方案-a--丢给-ai-助手全自动部署推荐)**，AI 会带你走完剩下全部步骤！
-3. **自己动手点网页部署**：
-   - 点击一键部署按钮：[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/mango0114/rose-panel-bot)
-   - 构建参数保持默认（Build：`npm run build`，Deploy：`npx wrangler deploy`），点 **Save and Deploy** 等待约 30 秒。
+3. **自己动手点网页部署（强烈推荐先 Fork，后续才能在面板内一键同步更新）**：
+   - 打开 [RosePanel Bot 仓库主页](https://github.com/mango0114/rose-panel-bot)，点右上角 **Fork** 复制到自己的 GitHub 账号下。
+   - 登录 Cloudflare Dashboard → **Workers & Pages → Create → Workers → Import a repository**，选择你刚 Fork 的仓库：
+     - **Build command**：`npm run build`
+     - **Deploy command**：`npx wrangler deploy`
+   - 点 **Save and Deploy** 等待约 30 秒完成首次部署。
    - 进入 Worker 的 **Settings → Variables & Bindings**：
      - 确认已绑定名为 `TOPIC_MAP` 的 KV Namespace（没有就新建一个 KV 并绑定命名为 `TOPIC_MAP`）；
      - 填入以下 4 个核心变量：
@@ -96,11 +101,11 @@ flowchart TD
        | :--- | :--- | :--- |
        | `BOT_TOKEN` | **Secret (加密)** | 第 1 步从 `@BotFather` 拿到的 Token |
        | `WEBHOOK_SECRET` | **Secret (加密)** | 自己随便写一串英文+数字密码（如 `rose2026pass`） |
-       | `ADMIN_IDS` | **Text (变量文本)** | 第 2 步查到的你自己的数字 UID（**⚠️ 若一键部署默认建成了 Secret 密钥，务必删掉重加为 Text 文本，否则右上角看不到 ⚙️ 设置按钮**） |
+       | `ADMIN_IDS` | **Text (变量文本)** | 第 2 步查到的你自己的数字 UID（**⚠️ 务必选 Text 文本，不要选成 Secret，否则右上角看不到 ⚙️ 设置按钮**） |
        | `BOT_USERNAME` | Text | 你的机器人用户名（**不要带 `@`**） |
    - *(强烈推荐)* 在 Worker 的 **Settings → Domains & Routes** 绑定自己的域名（如 `panel.yourdomain.com`）。
 
-### 第 4 步：10 秒一键激活（`/setup`）
+### 第 4 步：10 秒一键激活（`/setup`）—— 立即开箱可用！
 
 在浏览器里打开一次下面这个网址（换成你的域名和密码）：
 
@@ -110,11 +115,13 @@ https://你的域名/setup?secret=你刚填的WEBHOOK_SECRET
 
 看到页面显示 `"ok": true`，机器人就正式连上线啦！左下角也会自动出现 **「个人面板」** 小程序入口。
 
-> *(可选：支持在群里滑出小程序)* 去 `@BotFather` 发 `/newapp` → 选你的机器人 → 填标题简介图标 → Web App URL 填 `https://你的域名/` → 短名填 `panel`（然后把变量 `APP_SHORT_NAME` 设为 `panel`）。
+此时回到 Telegram **私聊你的机器人发一次 `/start`**，就立刻启用了 **免建群 Bot 私聊直推**：陌生人私聊会自动触发四层防骚扰与人机验证，通过后的消息会直接推给你，你**引用推送回复**（或在面板点开「💬 聊过」直接打字/发图）就能和对方双向聊天，支持表情回应双向同步！
 
-### 第 5 步：30 秒一键绑定「私聊通知群」（`/bind`，免查群 ID！）
+> *(推荐：让名片海报二维码与群内按钮直达小程序)* 去 `@BotFather` 发 `/newapp` → 选你的机器人 → 填标题简介图标 → Web App URL 填 `https://你的域名/` → 短名填 `panel`（然后把环境变量 `APP_SHORT_NAME` 设为 `panel`）。
 
-> 如果你只想用「个人名片 + 小站 + 探针」，不需要别人私聊你，可以跳过这一步。
+### 第 5 步：*(可选 · 推荐高频用户)* 30 秒升级为独立话题收件箱（`/bind`）
+
+> 已经用上「Bot 私聊直推」了？日常消息不多可以完全跳过这一步！如果你经常同时和多位访客聊天，希望给每人分独立话题，再做这 4 步（随时 `/unbind` 可无缝退回私聊直推）：
 
 1. 在 Telegram 里**新建一个私密群**（如 `我的通知群`），只拉进你刚建的机器人（全群 2 人）。
 2. 点群名称 → **编辑** → 打开 **「话题 (Topics)」**。
@@ -123,18 +130,19 @@ https://你的域名/setup?secret=你刚填的WEBHOOK_SECRET
    ```text
    /bind
    ```
-5. 看到机器人回复 **「🎉 私聊通知群绑定成功！」** 就全部完成！完全不用查 `-100...` 群 ID。
+5. 看到机器人回复 **「🎉 私聊通知群绑定成功！」** 就自动切换完成，完全不用查 `-100...` 群 ID。
 
 ---
 
-## ✨ 上线后 30 秒玩转表情包验证与动态徽章
+## ✨ 上线后 30 秒玩转核心亮点
 
-打开你的机器人，点左下角 **「个人面板」** → 右上角 **⚙️ 设置**，所有东西都能在手机上可视化调整：
+打开你的机器人，点左下角 **「个人面板」** → 右上角 **⚙️ 设置**，所有功能都能在手机上可视化开关与调整：
 
 - **🎭 一键发静/动态贴纸设图形验证题**：私聊发 `/add` → 发一张收藏表情包 → 用空格隔开发 `题目 正确答案 错1 错2 错3`，3 秒做好一道防广告题！
-- **✨ 秒换动态贴纸主徽章**：私聊发 `/set` → 发任意静/动态 TG 贴纸或自定义表情，自动同步为 0 秒开屏呼吸徽章！
-- **🌐 管公开/私密小站 & 📡 多协议节点探针**：在小程序设置里随手增删小站，探针原生支持 **Komari / 哪吒 (v1/v0) / NodeGet / 通用 JSON** 并可一键测试连接，私密小站与探针均可设为 **🔒 仅自己可见**；
-- **💬 免会员自动回复、关键词秒回 & `/start` 开关**：在 `⚙️ 设置 → 社区与防骚扰` 可开启忙碌自动回执、添加最多 50 条关键词自动回复、开关 `/start` 欢迎卡片或开启「话题资料卡附带对方头像大图」。
+- **✨ 秒换动态贴纸主徽章 & 分享海报**：私聊发 `/set` 换动图徽章；名片页点 **「分享名片」** 一键生成浅/深色二维码海报；在 **⚙️ 设置 → 名片与徽章** 可复制带 `src_` 来源追踪的推广链接，以及按需开启「公开本月访客数」或关闭底部署名。
+- **💬 面板内直接聊天、贴纸展示与表情回应同步**：点开任意访客 **「💬 聊过」** 直接打字/相册发图/查看静动态贴纸与一键撤回；访客与站长双边点赞等 Emoji 回应自动双向同步。
+- **🌐 管公开/私密小站 & 📡 多协议探针与掉线告警**：在小程序设置里随手增删小站，探针原生支持 **Komari / 哪吒 (v1/v0) / NodeGet / 通用 JSON**，可在 **⚙️ 设置 → 节点探针** 按需开启掉线与 CPU/内存/磁盘超限告警（默认关闭）。
+- **🤖 免会员自动回复与防骚扰策略**：在 **⚙️ 设置 → 防骚扰验证** 切换 4 种人机验证模式；在 **⚙️ 设置 → 欢迎与回复** 配置忙碌自动回执、最多 50 条关键词自动回复、开关 `/start` 欢迎卡片或开启「话题资料卡附带对方头像大图」。
 
 ---
 
@@ -152,7 +160,7 @@ https://你的域名/setup?secret=你刚填的WEBHOOK_SECRET
 **解决**：Cloudflare 控制台 → 你的域名 → **Rules → Configuration Rules** 新建规则，条件匹配探针域名和面板域名，把 **SSL** 单独改为 **Full** 即可，不影响同域名下其他子站。
 
 ### Q3：后续项目发布新版本，怎么更新？需要改 Cloudflare KV 吗？
-**完全不需要去 Cloudflare KV 里改任何东西！** 升级只更新代码，原有的名片、小站、探针、访客记录与通知群绑定都会 **100% 原样保留**（⚠️ **请勿重新点击 Deploy to Cloudflare 按钮**，那会新建一个空的 Worker 和 KV）。升级完后如旧版存下的 `Cloudflare Edge` 副标仍在，进 **⚙️ 设置 → 名片与徽章** 清空「右侧票根副标」保存即可。
+**完全不需要去 Cloudflare KV 里改任何东西！** 升级只更新代码，原有的名片、小站、探针、访客记录与通知群绑定都会 **100% 原样保留**（⚠️ **请勿重新点击 Deploy to Cloudflare 按钮**，那会新建一个空的 Worker 和 KV）。升级到 `v1.9.0+` 后，在面板 **⚙️ 设置** 里点一次「保存全部设置」即可自动补齐 Webhook 订阅、启用表情回应同步。
 - **方式 A · 通过 GitHub Fork 部署（最简单）**：
   - 前往你的 GitHub Fork 页面点击 **`Sync fork → Update branch`**（升至 `v1.4.0+` 后也可直接在小程序 **⚙️ 设置 → 版本更新** 内查看红点并一键同步），Cloudflare 约 30 秒自动完成重建上线。
 - **方式 B · 直接交给 AI 一键更新（适合一键按钮独立副本 / AI 部署用户）**：
