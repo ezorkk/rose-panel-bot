@@ -693,6 +693,9 @@ export function sanitizeAdminConfig(config, env = {}, inboxStatus = {}) {
     if (inboxStatus.ownerUnreachable !== undefined) {
       cloned.ownerUnreachable = Boolean(inboxStatus.ownerUnreachable);
     }
+    if (inboxStatus.webhookNeedsResync !== undefined) {
+      cloned.webhookNeedsResync = Boolean(inboxStatus.webhookNeedsResync);
+    }
   }
   return cloned;
 }

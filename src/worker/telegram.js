@@ -1,5 +1,7 @@
 // Telegram Bot API client, avatar proxy & sticker/emoji (WebP/WebM/TGS) proxy helpers
 
+export const WEBHOOK_ALLOWED_UPDATES = ['message', 'edited_message', 'callback_query', 'message_reaction'];
+
 export async function tgCall(env, method, payload = {}) {
   if (!env.BOT_TOKEN) {
     throw new Error('BOT_TOKEN is not configured');

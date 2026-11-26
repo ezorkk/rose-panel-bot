@@ -1640,6 +1640,21 @@ export default function SettingsDrawer({
                     ⚠️ 请先私聊 Bot 发送 /start，否则收不到推送（消息仍可在面板查看）
                   </div>
                 )}
+                {adminConfig.webhookNeedsResync && (
+                  <div
+                    style={{
+                      marginTop: 6,
+                      fontSize: 12,
+                      padding: '8px 11px',
+                      borderRadius: 12,
+                      background: 'var(--amber-soft)',
+                      color: 'var(--amber)',
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    💡 请重新运行一次 /setup 以启用表情回应同步
+                  </div>
+                )}
               </div>
             )}
             <div>

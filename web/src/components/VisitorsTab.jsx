@@ -638,6 +638,24 @@ export default function VisitorsTab({
                             ) : null}
                           </div>
                           <div className="chat-meta">
+                            {m.visitorReaction && (
+                              <span
+                                className="chat-reaction-pill"
+                                title="对方的回应"
+                                aria-label={`对方的回应：${m.visitorReaction}`}
+                              >
+                                {m.visitorReaction}
+                              </span>
+                            )}
+                            {m.ownerReaction && (
+                              <span
+                                className="chat-reaction-pill mine"
+                                title="我的回应"
+                                aria-label={`我的回应：${m.ownerReaction}`}
+                              >
+                                {m.ownerReaction}
+                              </span>
+                            )}
                             <span>{formatTimeAgo(m.at)}</span>
                             {isMe && m.pmMessageId && (
                               <button

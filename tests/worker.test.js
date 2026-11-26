@@ -10,15 +10,21 @@ import {
 import { assessIncomingRisk, checkCasBlacklist, normalizeAntiSpamText } from '../src/worker/antispam.js';
 import { signMediaToken, verifyMediaToken, verifyTelegramInitData } from '../src/worker/auth.js';
 import {
+  TOPIC_MSG_MAP_PREFIX,
+  TOPIC_MSG_MAP_TTL_SECONDS,
+  WEBHOOK_UPDATES_REV,
+  WEBHOOK_UPDATES_REV_KEY,
   buildVisitorCardCaption,
   buildVisitorCardText,
   completeTurnstileVerification,
+  ensureWebhookReactionSubscription,
   generateInlineChallenge,
   generateStickerChallenge,
   handleTelegramUpdate,
   initiateChatFromMiniApp,
   matchKeywordReply,
   parseStickerQuizInput,
+  syncTelegramBotSurface,
 } from '../src/worker/bot.js';
 import { getLeaderboard, getMemberTicket, performCheckin, resolveLevel } from '../src/worker/checkin.js';
 import {
@@ -34,9 +40,10 @@ import {
   DM_MAP_PREFIX,
   DM_OWNER_UNREACHABLE_KEY,
   getOwnerChatId,
+  lookupDmMessageMap,
   resolveInboxMode,
 } from '../src/worker/inbox.js';
-import worker from '../src/worker/index.js';
+import worker, { WEBHOOK_ALLOWED_UPDATES } from '../src/worker/index.js';
 import { fetchKomariStatus, normalizeNodeMetrics } from '../src/worker/komari.js';
 import { normalizeStickerObject, parseStickerPackName } from '../src/worker/telegram.js';
 import { renderTurnstileVerifyPage } from '../src/worker/turnstile.js';
@@ -3104,9 +3111,10 @@ describe('Bot DM direct push inbox (dm-inbox)', () => {
       expect(copyCall.body.message_id).toBe(11);
       // Must NOT push to second admin 10002
       expect(calls.some((c) => Number(c.body.chat_id) === 10002)).toBe(false);
-      // Both header card and copied message mapped to visitor 20001
+      // Both header card and copied message mapped to visitor 20001 (copied visitor msg carries `{ u, p }`)
       expect(await kv.get(`${DM_MAP_PREFIX}501`)).toBe('20001');
-      expect(await kv.get(`${DM_MAP_PREFIX}502`)).toBe('20001');
+      expect(JSON.parse(await kv.get(`${DM_MAP_PREFIX}502`))).toEqual({ u: '20001', p: 11 });
+      expect(await lookupDmMessageMap(env, 502)).toBe('20001');
 
       // Visitor profile & archive saved cleanly without thread_id
       const detail = await getVisitorDetail(env, '20001');
@@ -3131,7 +3139,8 @@ describe('Bot DM direct push inbox (dm-inbox)', () => {
       );
       expect(calls.filter((c) => c.method === 'sendMessage' && c.body.chat_id === 10001)).toHaveLength(0);
       expect(calls.filter((c) => c.method === 'copyMessage' && c.body.chat_id === 10001)).toHaveLength(1);
-      expect(await kv.get(`${DM_MAP_PREFIX}503`)).toBe('20001');
+      expect(JSON.parse(await kv.get(`${DM_MAP_PREFIX}503`))).toEqual({ u: '20001', p: 12 });
+      expect(await lookupDmMessageMap(env, 503)).toBe('20001');
 
       // 3. Same visitor sends after >10 minutes -> re-sends header card
       await kv.put(DM_LAST_HEADER_KEY, JSON.stringify({ uid: '20001', at: Date.now() - 11 * 60 * 1000 }));
@@ -5211,5 +5220,631 @@ describe('Card footer signature & Get-Same-Card config (v1.8)', () => {
     expect(loaded.profile.displayName).toBe('LegacyCard');
     expect(loaded.profile.showPoweredBy).toBe(true);
     expect(sanitizePublicConfig(loaded, env, false).profile.showPoweredBy).toBe(true);
+  });
+});
+
+describe('Bidirectional Telegram reaction sync & panel display (v1.9)', () => {
+  function mockTgForReactions(handler = null) {
+    const calls = [];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, opts) => {
+      const method = String(url).split('/').pop();
+      const body = opts?.body && typeof opts.body === 'string' ? JSON.parse(opts.body) : {};
+      calls.push({ method, body });
+      if (handler) {
+        const custom = await handler(method, body, calls);
+        if (custom) return custom;
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 800 + calls.length } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    return { calls, restore: () => fetchSpy.mockRestore() };
+  }
+
+  it('registers message_reaction in /setup allowed_updates using WEBHOOK_ALLOWED_UPDATES', async () => {
+    const kv = createMemoryKV();
+    const env = {
+      TOPIC_MAP: kv,
+      BOT_TOKEN: '123456:SETUP_REACT',
+      WEBHOOK_SECRET: 'setup-secret-123',
+      ADMIN_IDS: '10001',
+    };
+    const tg = mockTgForReactions();
+    try {
+      const res = await worker.fetch(new Request('https://panel.test/setup?secret=setup-secret-123'), env);
+      expect(res.status).toBe(200);
+      const setWebhookCall = tg.calls.find((c) => c.method === 'setWebhook');
+      expect(setWebhookCall).toBeTruthy();
+      expect(setWebhookCall.body.allowed_updates).toEqual(WEBHOOK_ALLOWED_UPDATES);
+      expect(setWebhookCall.body.allowed_updates).toContain('message_reaction');
+      expect(setWebhookCall.body.secret_token).toBe('setup-secret-123');
+      expect(await kv.get(WEBHOOK_UPDATES_REV_KEY)).toBe(WEBHOOK_UPDATES_REV);
+    } finally {
+      tg.restore();
+    }
+  });
+
+  it('auto-upgrades old Webhook on settings save when WEBHOOK_SECRET is set, skips when already present or missing secret, and respects webhook:updates_rev', async () => {
+    // 1. Missing message_reaction + WEBHOOK_SECRET set -> resets with SAME url & secret_token
+    {
+      const kv = createMemoryKV();
+      const env = {
+        TOPIC_MAP: kv,
+        BOT_TOKEN: '123456:AUTO_UPGRADE',
+        WEBHOOK_SECRET: 'sec-keep-me',
+        ADMIN_IDS: '10001',
+      };
+      const tg = mockTgForReactions((method) => {
+        if (method === 'getWebhookInfo') {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              result: {
+                url: 'https://custom-old.example.com/webhook',
+                allowed_updates: ['message', 'edited_message', 'callback_query'],
+              },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        return null;
+      });
+      try {
+        await syncTelegramBotSurface(env, 'https://panel.test', null, { persistUsername: false });
+        const setCalls = tg.calls.filter((c) => c.method === 'setWebhook');
+        expect(setCalls).toHaveLength(1);
+        expect(setCalls[0].body.url).toBe('https://custom-old.example.com/webhook');
+        expect(setCalls[0].body.secret_token).toBe('sec-keep-me');
+        expect(setCalls[0].body.allowed_updates).toEqual(WEBHOOK_ALLOWED_UPDATES);
+        expect(await kv.get(WEBHOOK_UPDATES_REV_KEY)).toBe(WEBHOOK_UPDATES_REV);
+
+        // Once webhook:updates_rev is set, subsequent calls NEVER call getWebhookInfo again
+        tg.calls.length = 0;
+        const second = await ensureWebhookReactionSubscription(env);
+        expect(second.skipped).toBe(true);
+        expect(tg.calls.filter((c) => c.method === 'getWebhookInfo')).toHaveLength(0);
+        expect(tg.calls.filter((c) => c.method === 'setWebhook')).toHaveLength(0);
+      } finally {
+        tg.restore();
+      }
+    }
+
+    // 2. Webhook already contains message_reaction -> does NOT call setWebhook, still records rev
+    {
+      const kv = createMemoryKV();
+      const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:ALREADY_OK', WEBHOOK_SECRET: 'sec-1', ADMIN_IDS: '10001' };
+      const tg = mockTgForReactions((method) => {
+        if (method === 'getWebhookInfo') {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              result: { url: 'https://panel.test/webhook', allowed_updates: WEBHOOK_ALLOWED_UPDATES },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        return null;
+      });
+      try {
+        const res = await ensureWebhookReactionSubscription(env);
+        expect(res.ok).toBe(true);
+        expect(res.updated).toBe(false);
+        expect(tg.calls.filter((c) => c.method === 'setWebhook')).toHaveLength(0);
+        expect(await kv.get(WEBHOOK_UPDATES_REV_KEY)).toBe(WEBHOOK_UPDATES_REV);
+      } finally {
+        tg.restore();
+      }
+    }
+
+    // 3. No WEBHOOK_SECRET -> NEVER calls setWebhook or getWebhookInfo, and exposes webhookNeedsResync to admin
+    {
+      const kv = createMemoryKV();
+      const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:NO_SECRET', ADMIN_IDS: '10001' };
+      const tg = mockTgForReactions();
+      try {
+        const res = await ensureWebhookReactionSubscription(env);
+        expect(res.skipped).toBe(true);
+        expect(res.reason).toBe('no_webhook_secret');
+        expect(tg.calls).toHaveLength(0);
+        expect(await kv.get(WEBHOOK_UPDATES_REV_KEY)).toBeNull();
+
+        const adminInit = await signInitData(
+          { user: JSON.stringify({ id: 10001, first_name: 'Owner' }), auth_date: Math.floor(Date.now() / 1000) },
+          env.BOT_TOKEN
+        );
+        const cfgRes = await worker.fetch(
+          new Request('https://panel.test/api/admin/config', {
+            headers: { 'X-Telegram-Init-Data': adminInit },
+          }),
+          env
+        );
+        const cfgJson = await cfgRes.json();
+        expect(cfgJson.config.webhookNeedsResync).toBe(true);
+      } finally {
+        tg.restore();
+      }
+    }
+  });
+
+  it('Direction A: syncs visitor reactions on topic reply, panel reply mirror, dm reply, own message, and clears on removal', async () => {
+    const kv = createMemoryKV();
+    const botToken = '123456:DIR_A';
+    const topicEnv = {
+      TOPIC_MAP: kv,
+      BOT_TOKEN: botToken,
+      ADMIN_IDS: '10001',
+      SUPERGROUP_ID: '-100777888',
+    };
+    const uid = '30001';
+    await kv.put(
+      `history:${uid}`,
+      JSON.stringify({
+        photos: [],
+        links: [],
+        pmMessageIds: [
+          { id: 101, sender: 'admin', topicMsgId: 901, at: Date.now() }, // direct topic reply
+          { id: 102, sender: 'admin', topicMsgId: 902, at: Date.now() }, // panel reply mirror
+          { id: 103, sender: 'visitor', topicMsgId: 103, topicCopyId: 903, topicThreadId: 55, at: Date.now() }, // visitor own msg
+        ],
+        messages: [
+          { id: 'm1', sender: 'admin', text: '话题回复', pmMessageId: 101, topicMsgId: 901, at: new Date().toISOString() },
+          { id: 'm2', sender: 'admin', text: '面板回复', pmMessageId: 102, topicMsgId: 902, at: new Date().toISOString() },
+          { id: 'm3', sender: 'visitor', text: '访客消息', pmMessageId: 103, topicMsgId: 103, at: new Date().toISOString() },
+        ],
+      })
+    );
+
+    const tg = mockTgForReactions();
+    try {
+      // React to topic reply (101 -> group -100777888 msg 901) with multiple emojis -> uses LAST emoji
+      await handleTelegramUpdate(
+        {
+          message_reaction: {
+            chat: { id: 30001, type: 'private' },
+            message_id: 101,
+            user: { id: 30001, first_name: 'Alice' },
+            date: 1700000001,
+            old_reaction: [],
+            new_reaction: [
+              { type: 'emoji', emoji: '👍' },
+              { type: 'emoji', emoji: '❤️' },
+            ],
+          },
+        },
+        topicEnv,
+        'https://panel.test'
+      );
+
+      // React to panel reply mirror (102 -> group -100777888 msg 902)
+      await handleTelegramUpdate(
+        {
+          message_reaction: {
+            chat: { id: 30001, type: 'private' },
+            message_id: 102,
+            user: { id: 30001, first_name: 'Alice' },
+            date: 1700000002,
+            old_reaction: [],
+            new_reaction: [{ type: 'emoji', emoji: '🔥' }],
+          },
+        },
+        topicEnv,
+        'https://panel.test'
+      );
+
+      // React to visitor's own message (103 -> group -100777888 topicCopyId 903)
+      await handleTelegramUpdate(
+        {
+          message_reaction: {
+            chat: { id: 30001, type: 'private' },
+            message_id: 103,
+            user: { id: 30001, first_name: 'Alice' },
+            date: 1700000003,
+            old_reaction: [],
+            new_reaction: [{ type: 'emoji', emoji: '🎉' }],
+          },
+        },
+        topicEnv,
+        'https://panel.test'
+      );
+
+      const reactCalls = tg.calls.filter((c) => c.method === 'setMessageReaction');
+      expect(reactCalls).toHaveLength(3);
+      expect(reactCalls[0].body).toEqual({
+        chat_id: -100777888,
+        message_id: 901,
+        reaction: [{ type: 'emoji', emoji: '❤️' }],
+      });
+      expect(reactCalls[1].body).toEqual({
+        chat_id: -100777888,
+        message_id: 902,
+        reaction: [{ type: 'emoji', emoji: '🔥' }],
+      });
+      expect(reactCalls[2].body).toEqual({
+        chat_id: -100777888,
+        message_id: 903,
+        reaction: [{ type: 'emoji', emoji: '🎉' }],
+      });
+
+      // Remove reaction on 101 -> sends reaction: [] and clears visitorReaction in history
+      tg.calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message_reaction: {
+            chat: { id: 30001, type: 'private' },
+            message_id: 101,
+            user: { id: 30001, first_name: 'Alice' },
+            date: 1700000004,
+            old_reaction: [{ type: 'emoji', emoji: '❤️' }],
+            new_reaction: [],
+          },
+        },
+        topicEnv,
+        'https://panel.test'
+      );
+      expect(tg.calls.filter((c) => c.method === 'setMessageReaction')).toEqual([
+        { method: 'setMessageReaction', body: { chat_id: -100777888, message_id: 901, reaction: [] } },
+      ]);
+      const histAfterClear = await getVisitorHistory(topicEnv, uid);
+      expect(histAfterClear.messages.find((m) => m.pmMessageId === 101)?.visitorReaction).toBeUndefined();
+      expect(histAfterClear.messages.find((m) => m.pmMessageId === 102)?.visitorReaction).toBe('🔥');
+
+      // DM mode: visitor reacts to owner DM reply (dmMsgId) and own message (dmCopyId)
+      const dmEnv = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001' };
+      await kv.put(
+        'history:30002',
+        JSON.stringify({
+          photos: [],
+          links: [],
+          pmMessageIds: [
+            { id: 201, sender: 'admin', topicMsgId: null, dmMsgId: 601, at: Date.now() },
+            { id: 202, sender: 'visitor', topicMsgId: null, dmCopyId: 602, at: Date.now() },
+          ],
+          messages: [
+            { id: 'dm1', sender: 'admin', text: '私聊回复', pmMessageId: 201, at: new Date().toISOString() },
+            { id: 'dm2', sender: 'visitor', text: '我的消息', pmMessageId: 202, at: new Date().toISOString() },
+          ],
+        })
+      );
+      tg.calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message_reaction: {
+            chat: { id: 30002, type: 'private' },
+            message_id: 201,
+            user: { id: 30002, first_name: 'Bob' },
+            date: 1700000005,
+            old_reaction: [],
+            new_reaction: [{ type: 'emoji', emoji: '👍' }],
+          },
+        },
+        dmEnv,
+        'https://panel.test'
+      );
+      await handleTelegramUpdate(
+        {
+          message_reaction: {
+            chat: { id: 30002, type: 'private' },
+            message_id: 202,
+            user: { id: 30002, first_name: 'Bob' },
+            date: 1700000006,
+            old_reaction: [],
+            new_reaction: [{ type: 'emoji', emoji: '👏' }],
+          },
+        },
+        dmEnv,
+        'https://panel.test'
+      );
+      expect(tg.calls.filter((c) => c.method === 'setMessageReaction')).toEqual([
+        { method: 'setMessageReaction', body: { chat_id: 10001, message_id: 601, reaction: [{ type: 'emoji', emoji: '👍' }] } },
+        { method: 'setMessageReaction', body: { chat_id: 10001, message_id: 602, reaction: [{ type: 'emoji', emoji: '👏' }] } },
+      ]);
+    } finally {
+      tg.restore();
+    }
+  });
+
+  it('Direction A: does nothing and calls zero Telegram APIs when mapping is missing', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:MISSING_MAP', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777888' };
+    await kv.put(
+      'history:30003',
+      JSON.stringify({
+        photos: [],
+        links: [],
+        pmMessageIds: [
+          // Legacy visitor message without topicCopyId must NOT fall back to topicMsgId
+          { id: 301, sender: 'visitor', topicMsgId: 301, at: Date.now() },
+        ],
+        messages: [{ id: 'old1', sender: 'visitor', text: 'old', pmMessageId: 301, at: new Date().toISOString() }],
+      })
+    );
+
+    const tg = mockTgForReactions();
+    try {
+      await handleTelegramUpdate(
+        {
+          message_reaction: {
+            chat: { id: 30003, type: 'private' },
+            message_id: 99999,
+            user: { id: 30003, first_name: 'Ghost' },
+            date: 1700000010,
+            old_reaction: [],
+            new_reaction: [{ type: 'emoji', emoji: '👍' }],
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      await handleTelegramUpdate(
+        {
+          message_reaction: {
+            chat: { id: 30003, type: 'private' },
+            message_id: 301,
+            user: { id: 30003, first_name: 'Ghost' },
+            date: 1700000011,
+            old_reaction: [],
+            new_reaction: [{ type: 'emoji', emoji: '👍' }],
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(tg.calls.filter((c) => c.method === 'setMessageReaction')).toHaveLength(0);
+    } finally {
+      tg.restore();
+    }
+  });
+
+  it('Direction B (Topic mode): writes tmsg:* with 30d TTL, syncs admin reactions to visitor, ignores non-admins and admin-own messages', async () => {
+    const kv = createMemoryKV();
+    const botToken = '123456:DIR_B_TOPIC';
+    const env = {
+      TOPIC_MAP: kv,
+      BOT_TOKEN: botToken,
+      ADMIN_IDS: '10001',
+      SUPERGROUP_ID: '-100777888',
+    };
+    await kv.put('verified:30010', 'emoji:v1');
+
+    let nextId = 700;
+    const tg = mockTgForReactions((method) => {
+      if (method === 'createForumTopic') {
+        return new Response(JSON.stringify({ ok: true, result: { message_thread_id: 42 } }), { status: 200 });
+      }
+      if (method === 'getChatMember') {
+        return new Response(JSON.stringify({ ok: true, result: { status: 'member' } }), { status: 200 });
+      }
+      nextId += 1;
+      return new Response(JSON.stringify({ ok: true, result: { message_id: nextId } }), { status: 200 });
+    });
+
+    const putSpy = vi.spyOn(kv, 'put');
+    try {
+      // 1. Visitor sends message 55 -> copied into topic as topicMsgId -> writes tmsg:{topicMsgId} with 30d TTL
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 55,
+            from: { id: 30010, first_name: 'VisitorT' },
+            chat: { id: 30010, type: 'private' },
+            text: '你好呀',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+
+      const tmsgPut = putSpy.mock.calls.find(([k]) => k.startsWith(TOPIC_MSG_MAP_PREFIX));
+      expect(tmsgPut).toBeTruthy();
+      expect(JSON.parse(tmsgPut[1])).toEqual({ u: '30010', p: 55 });
+      expect(tmsgPut[2]).toEqual({ expirationTtl: TOPIC_MSG_MAP_TTL_SECONDS });
+      const topicCopyId = Number(tmsgPut[0].slice(TOPIC_MSG_MAP_PREFIX.length));
+
+      // 2. Non-admin reacts to topic copy -> ignored
+      tg.calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message_reaction: {
+            chat: { id: -100777888, type: 'supergroup' },
+            message_id: topicCopyId,
+            user: { id: 88888, first_name: 'NotAdmin' },
+            date: 1700000020,
+            old_reaction: [],
+            new_reaction: [{ type: 'emoji', emoji: '👍' }],
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(tg.calls.filter((c) => c.method === 'setMessageReaction')).toHaveLength(0);
+
+      // 3. Admin reacts to an unmapped message (e.g. admin's own reply or panel mirror) -> ignored
+      tg.calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message_reaction: {
+            chat: { id: -100777888, type: 'supergroup' },
+            message_id: 999999,
+            user: { id: 10001, first_name: 'Owner' },
+            date: 1700000021,
+            old_reaction: [],
+            new_reaction: [{ type: 'emoji', emoji: '👍' }],
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(tg.calls.filter((c) => c.method === 'setMessageReaction')).toHaveLength(0);
+
+      // 4. Admin reacts to visitor's topic copy -> syncs to visitor chat 30010 msg 55 & stores ownerReaction
+      tg.calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message_reaction: {
+            chat: { id: -100777888, type: 'supergroup' },
+            message_id: topicCopyId,
+            user: { id: 10001, first_name: 'Owner' },
+            date: 1700000022,
+            old_reaction: [],
+            new_reaction: [{ type: 'emoji', emoji: '👍' }],
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(tg.calls.filter((c) => c.method === 'setMessageReaction')).toEqual([
+        { method: 'setMessageReaction', body: { chat_id: 30010, message_id: 55, reaction: [{ type: 'emoji', emoji: '👍' }] } },
+      ]);
+
+      // History API returns ownerReaction
+      const adminInit = await signInitData(
+        { user: JSON.stringify({ id: 10001, first_name: 'Owner' }), auth_date: Math.floor(Date.now() / 1000) },
+        botToken
+      );
+      const histRes = await worker.fetch(
+        new Request('https://panel.test/api/admin/visitors/30010/history', {
+          headers: { 'X-Telegram-Init-Data': adminInit },
+        }),
+        env
+      );
+      const histJson = await histRes.json();
+      expect(histJson.ok).toBe(true);
+      expect(histJson.messages.find((m) => m.pmMessageId === 55)?.ownerReaction).toBe('👍');
+    } finally {
+      tg.restore();
+    }
+  });
+
+  it('Direction B (DM mode): syncs owner reactions on visitor copy, skips legacy plain-uid dmmap without error', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:DIR_B_DM', ADMIN_IDS: '10001' };
+    await kv.put(`${DM_MAP_PREFIX}501`, '30020'); // legacy plain uid (or header card)
+    await kv.put(`${DM_MAP_PREFIX}502`, JSON.stringify({ u: '30020', p: 77 }));
+    await kv.put(
+      'history:30020',
+      JSON.stringify({
+        photos: [],
+        links: [],
+        pmMessageIds: [{ id: 77, sender: 'visitor', topicMsgId: null, dmCopyId: 502, at: Date.now() }],
+        messages: [{ id: 'm77', sender: 'visitor', text: 'DM 访客消息', pmMessageId: 77, at: new Date().toISOString() }],
+      })
+    );
+
+    const tg = mockTgForReactions();
+    try {
+      // Legacy plain uid -> skip silently
+      await handleTelegramUpdate(
+        {
+          message_reaction: {
+            chat: { id: 10001, type: 'private' },
+            message_id: 501,
+            user: { id: 10001, first_name: 'Owner' },
+            date: 1700000030,
+            old_reaction: [],
+            new_reaction: [{ type: 'emoji', emoji: '👍' }],
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(tg.calls.filter((c) => c.method === 'setMessageReaction')).toHaveLength(0);
+
+      // JSON dmmap entry with p -> syncs to visitor chat 30020 msg 77
+      await handleTelegramUpdate(
+        {
+          message_reaction: {
+            chat: { id: 10001, type: 'private' },
+            message_id: 502,
+            user: { id: 10001, first_name: 'Owner' },
+            date: 1700000031,
+            old_reaction: [],
+            new_reaction: [{ type: 'emoji', emoji: '🥰' }],
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(tg.calls.filter((c) => c.method === 'setMessageReaction')).toEqual([
+        { method: 'setMessageReaction', body: { chat_id: 30020, message_id: 77, reaction: [{ type: 'emoji', emoji: '🥰' }] } },
+      ]);
+      const hist = await getVisitorHistory(env, '30020');
+      expect(hist.messages[0].ownerReaction).toBe('🥰');
+    } finally {
+      tg.restore();
+    }
+  });
+
+  it('handles custom_emoji and paid reactions by clearing bot reaction and storing ✨ in panel, and swallows setMessageReaction errors', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:SPECIAL_REACT', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777888' };
+    await kv.put(
+      'history:30030',
+      JSON.stringify({
+        photos: [],
+        links: [],
+        pmMessageIds: [
+          { id: 81, sender: 'admin', topicMsgId: 981, at: Date.now() },
+          { id: 82, sender: 'admin', topicMsgId: 982, at: Date.now() },
+        ],
+        messages: [
+          { id: 'm81', sender: 'admin', text: 'msg1', pmMessageId: 81, at: new Date().toISOString() },
+          { id: 'm82', sender: 'admin', text: 'msg2', pmMessageId: 82, at: new Date().toISOString() },
+        ],
+      })
+    );
+
+    const tg = mockTgForReactions((method, body) => {
+      if (method === 'setMessageReaction' && body.message_id === 982) {
+        return new Response(JSON.stringify({ ok: false, error_code: 400, description: 'Bad Request: REACTION_INVALID' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return null;
+    });
+
+    try {
+      // Custom emoji -> clears bot reaction ([]) and stores '✨'
+      await handleTelegramUpdate(
+        {
+          message_reaction: {
+            chat: { id: 30030, type: 'private' },
+            message_id: 81,
+            user: { id: 30030, first_name: 'PremiumUser' },
+            date: 1700000040,
+            old_reaction: [],
+            new_reaction: [{ type: 'custom_emoji', custom_emoji_id: '5368324170671202286' }],
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(tg.calls.filter((c) => c.method === 'setMessageReaction')).toEqual([
+        { method: 'setMessageReaction', body: { chat_id: -100777888, message_id: 981, reaction: [] } },
+      ]);
+      expect((await getVisitorHistory(env, '30030')).messages.find((m) => m.pmMessageId === 81)?.visitorReaction).toBe('✨');
+
+      // Paid reaction + Telegram REACTION_INVALID failure -> does NOT throw, still stores '✨'
+      await expect(
+        handleTelegramUpdate(
+          {
+            message_reaction: {
+              chat: { id: 30030, type: 'private' },
+              message_id: 82,
+              user: { id: 30030, first_name: 'PremiumUser' },
+              date: 1700000041,
+              old_reaction: [],
+              new_reaction: [{ type: 'paid' }],
+            },
+          },
+          env,
+          'https://panel.test'
+        )
+      ).resolves.toBeUndefined();
+      expect((await getVisitorHistory(env, '30030')).messages.find((m) => m.pmMessageId === 82)?.visitorReaction).toBe('✨');
+    } finally {
+      tg.restore();
+    }
   });
 });

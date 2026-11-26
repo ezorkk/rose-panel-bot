@@ -1488,6 +1488,26 @@ select {
   padding: 0 3px;
 }
 
+.chat-reaction-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+}
+
+.chat-reaction-pill.mine {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+}
+
 .chat-row.pending .chat-bubble {
   opacity: 0.72;
 }

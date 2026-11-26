@@ -5,14 +5,18 @@ import { runProbeAlerts } from './alerts.js';
 import { handleApiRequest } from './api.js';
 import { parseAdminIds } from './auth.js';
 import {
+  WEBHOOK_UPDATES_REV,
+  WEBHOOK_UPDATES_REV_KEY,
   completeTurnstileVerification,
   handleTelegramUpdate,
   syncTelegramBotSurface,
 } from './bot.js';
 import { loadPanelConfig, resolveSupergroupId, safeGetJSON, savePanelConfig } from './config.js';
 import { serveEmbeddedAsset } from './embedded-assets.js';
-import { escapeHtml, tgCall } from './telegram.js';
+import { WEBHOOK_ALLOWED_UPDATES, escapeHtml, tgCall } from './telegram.js';
 import { renderTurnstileVerifyPage, verifyTurnstileToken } from './turnstile.js';
+
+export { WEBHOOK_ALLOWED_UPDATES };
 
 function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -52,15 +56,18 @@ async function handleSetup(request, env, url) {
 
   const results = {};
 
-  // 1. Register Webhook (with optional secret_token header validation & edited_message guard)
+  // 1. Register Webhook (with secret_token header validation, edited_message guard & message_reaction sync)
   const webhookPayload = {
     url: webhookUrl,
-    allowed_updates: ['message', 'edited_message', 'callback_query'],
+    allowed_updates: WEBHOOK_ALLOWED_UPDATES,
   };
   if (env.WEBHOOK_SECRET) {
     webhookPayload.secret_token = env.WEBHOOK_SECRET;
   }
   results.setWebhook = await tgCall(env, 'setWebhook', webhookPayload);
+  if (env.TOPIC_MAP) {
+    await env.TOPIC_MAP.put(WEBHOOK_UPDATES_REV_KEY, WEBHOOK_UPDATES_REV).catch(() => {});
+  }
 
   // 2. Sync commands, pre-Start description, cached @username & bottom-left menu button
   if (/^https:\/\//i.test(origin) && config.siteOrigin !== origin && env.TOPIC_MAP) {

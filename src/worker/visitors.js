@@ -274,6 +274,7 @@ export async function recordVisitorExchange(env, userId, msg, options = {}) {
     pmMessageId = null,
     topicMsgId = undefined,
     dmMsgId = null,
+    dmCopyId = null,
     // Real message ID of the visitor's copied message inside its forum topic (+ that topic's ID),
     // used to quote the visitor when mirroring panel replies. Kept separate from `topicMsgId`,
     // which older visitor entries filled with the visitor's private-chat message ID.
@@ -342,6 +343,10 @@ export async function recordVisitorExchange(env, userId, msg, options = {}) {
     };
     if (numericDmId) {
       entry.dmMsgId = numericDmId;
+    }
+    const numericDmCopyId = Number(dmCopyId);
+    if (Number.isInteger(numericDmCopyId) && numericDmCopyId > 0) {
+      entry.dmCopyId = numericDmCopyId;
     }
     const numericCopyId = Number(topicCopyId);
     const numericThreadId = Number(topicThreadId);
@@ -446,6 +451,43 @@ export async function findLatestVisitorTopicMessage(env, userId, threadId) {
     (m) => m?.sender === 'visitor' && Number(m.topicThreadId) === tid && Number(m.topicCopyId) > 0
   );
   return hit ? { topicMsgId: Number(hit.topicCopyId) } : null;
+}
+
+/**
+ * Persists or clears a message reaction (`visitorReaction` or `ownerReaction`) on the matching
+ * `history:{uid}.messages` entry. Re-reads `history:{uid}` fresh before writing to avoid
+ * clobbering concurrent message archives. 1 read + at most 1 write.
+ */
+export async function updateVisitorMessageReaction(env, userId, pmMessageId, role, reactionText = '') {
+  const uid = String(userId || '').trim();
+  const pmId = Number(pmMessageId);
+  if (!env?.TOPIC_MAP || !/^\d+$/.test(uid) || !Number.isInteger(pmId) || pmId <= 0) return false;
+
+  const field = role === 'owner' ? 'ownerReaction' : 'visitorReaction';
+  const historyKey = `history:${uid}`;
+  const fresh = await safeGetJSON(env.TOPIC_MAP, historyKey, null);
+  if (!fresh || !Array.isArray(fresh.messages)) return false;
+
+  let target = null;
+  for (let i = fresh.messages.length - 1; i >= 0; i -= 1) {
+    if (Number(fresh.messages[i]?.pmMessageId) === pmId) {
+      target = fresh.messages[i];
+      break;
+    }
+  }
+  if (!target) return false;
+
+  const cleanVal = String(reactionText || '').trim().slice(0, 16);
+  const prevVal = String(target[field] || '');
+  if (prevVal === cleanVal) return false;
+
+  if (cleanVal) {
+    target[field] = cleanVal;
+  } else {
+    delete target[field];
+  }
+  await safePutJSON(env.TOPIC_MAP, historyKey, fresh);
+  return true;
 }
 
 export async function getVisitorHistory(env, userId) {
