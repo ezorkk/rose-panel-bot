@@ -7,16 +7,15 @@
 //   history:<uid>  -> JSON { photos: [], links: [], pmMessageIds: [] }
 
 import { resolveSupergroupId, safeGetJSON, safePutJSON } from './config.js';
+import { HISTORY_CACHE_TTL_SECONDS, getStore } from './store/index.js';
+
+export { HISTORY_CACHE_TTL_SECONDS };
 
 const VISITOR_INDEX_KEY = 'visitors:index';
 const VISITOR_MIGRATED_KEY = 'visitors:migrated';
 const VISITOR_BANNED_MIGRATED_KEY = 'visitors:banned_migrated';
 const VISITOR_SUMMARY_CACHE_KEY = 'cache:visitor_summary';
 const VISITOR_SUMMARY_TTL_MS = 10 * 60 * 1000;
-const MAX_PHOTOS = 150;
-const MAX_LINKS = 200;
-const MAX_PM_IDS = 200;
-const MAX_MESSAGES = 60;
 export const PENDING_REVIEW_MAX = 10;
 export const PENDING_REVIEW_TTL_MS = 7 * 86400 * 1000;
 
@@ -386,83 +385,26 @@ export async function recordVisitorExchange(env, userId, msg, options = {}) {
     preview = '',
   } = options;
 
-  const nowIso = new Date().toISOString();
   const nowMs = Date.now();
-  const historyKey = `history:${uid}`;
+  const nowIso = new Date(nowMs).toISOString();
   const userKey = `user:${uid}`;
-  // Both records are read up front in one round trip (they were read one after another).
-  const [storedHistory, storedRec] = await Promise.all([
-    safeGetJSON(env.TOPIC_MAP, historyKey, null),
-    safeGetJSON(env.TOPIC_MAP, userKey, { userId: uid }),
-  ]);
-  const history = storedHistory || {
-    photos: [],
-    links: [],
-    pmMessageIds: [],
-    messages: [],
-  };
-  if (!Array.isArray(history.messages)) history.messages = [];
 
   const photo = extractPhotoFromMessage(msg);
-  if (photo) {
-    history.photos.unshift({
-      id: `p_${nowMs}_${Math.floor(Math.random() * 10000)}`,
-      fileId: photo.fileId,
-      thumbFileId: photo.thumbFileId,
-      caption: photo.caption,
-      sender,
-      at: nowIso,
-    });
-    history.photos = history.photos.slice(0, MAX_PHOTOS);
-  }
-
   const urls = extractLinksFromMessage(msg);
-  const snippet = String(msg.text || msg.caption || '').trim().slice(0, 90);
-  if (urls.length > 0) {
-    for (const url of urls) {
-      history.links.unshift({
-        id: `l_${nowMs}_${Math.floor(Math.random() * 10000)}`,
-        url,
-        snippet,
-        sender,
-        at: nowIso,
-      });
-    }
-    history.links = history.links.slice(0, MAX_LINKS);
-  }
+  const snippet = String(msg?.text || msg?.caption || '').trim().slice(0, 90);
 
   const numericPmId = pmMessageId && Number.isFinite(Number(pmMessageId)) ? Number(pmMessageId) : null;
   const rawTopicId = topicMsgId !== undefined ? topicMsgId : msg?.message_id;
   const numericTopicId = rawTopicId && Number.isFinite(Number(rawTopicId)) ? Number(rawTopicId) : null;
   const numericDmId = dmMsgId && Number.isFinite(Number(dmMsgId)) ? Number(dmMsgId) : null;
-
-  if (numericPmId) {
-    const entry = {
-      id: numericPmId,
-      topicMsgId: numericTopicId,
-      sender,
-      at: nowMs,
-    };
-    if (numericDmId) {
-      entry.dmMsgId = numericDmId;
-    }
-    const cleanTopicChatId = String(topicChatId ?? '').trim();
-    if (/^-?\d+$/.test(cleanTopicChatId)) {
-      entry.topicChatId = cleanTopicChatId;
-    }
-    const numericDmCopyId = Number(dmCopyId);
-    if (Number.isInteger(numericDmCopyId) && numericDmCopyId > 0) {
-      entry.dmCopyId = numericDmCopyId;
-    }
-    const numericCopyId = Number(topicCopyId);
-    const numericThreadId = Number(topicThreadId);
-    if (Number.isInteger(numericCopyId) && numericCopyId > 0 && Number.isInteger(numericThreadId) && numericThreadId > 0) {
-      entry.topicCopyId = numericCopyId;
-      entry.topicThreadId = numericThreadId;
-    }
-    history.pmMessageIds.unshift(entry);
-    history.pmMessageIds = history.pmMessageIds.slice(0, MAX_PM_IDS);
-  }
+  const cleanTopicChatId = String(topicChatId ?? '').trim();
+  const validTopicChatId = /^-?\d+$/.test(cleanTopicChatId) ? cleanTopicChatId : null;
+  const numericDmCopyId = Number(dmCopyId);
+  const validDmCopyId = Number.isInteger(numericDmCopyId) && numericDmCopyId > 0 ? numericDmCopyId : null;
+  const numericCopyId = Number(topicCopyId);
+  const numericThreadId = Number(topicThreadId);
+  const hasTopicCopy =
+    Number.isInteger(numericCopyId) && numericCopyId > 0 && Number.isInteger(numericThreadId) && numericThreadId > 0;
 
   const rawMsgText = String(msg?.text || msg?.caption || '').trim();
   const stickerInfo = msg?.sticker?.file_id
@@ -483,27 +425,30 @@ export async function recordVisitorExchange(env, userId, msg, options = {}) {
             : ''
     : '';
 
-  let addedMessage = null;
-  if (rawMsgText || photo || mediaTag || stickerInfo) {
-    addedMessage = {
-      id: `m_${nowMs}_${Math.floor(Math.random() * 10000)}`,
+  const store = getStore(env);
+  const [storedExchange, storedRec] = await Promise.all([
+    store.appendExchange(uid, {
       sender,
+      nowMs,
+      nowIso,
       text: rawMsgText.slice(0, 1500),
+      snippet,
       mediaTag,
-      photoFileId: photo?.fileId || '',
-      thumbFileId: photo?.thumbFileId || '',
-      ...(stickerInfo ? { stickerFileId: stickerInfo.fileId, stickerFormat: stickerInfo.format } : {}),
+      photo,
+      urls,
+      stickerInfo,
       pmMessageId: numericPmId,
       topicMsgId: numericTopicId,
-      at: nowIso,
-    };
-    history.messages.push(addedMessage);
-    if (history.messages.length > MAX_MESSAGES) {
-      history.messages = history.messages.slice(-MAX_MESSAGES);
-    }
-  }
+      dmMsgId: numericDmId,
+      dmCopyId: validDmCopyId,
+      topicCopyId: hasTopicCopy ? numericCopyId : null,
+      topicThreadId: hasTopicCopy ? numericThreadId : null,
+      topicChatId: validTopicChatId,
+    }),
+    safeGetJSON(env.TOPIC_MAP, userKey, { userId: uid }),
+  ]);
 
-  // Sync summary counters onto user:<uid>
+  // Sync summary counters onto user:<uid> (remains in KV during Stage 1)
   const rec = storedRec || { userId: uid };
   const prevTotal = Number(rec.msg_count) || 0;
   const prevVisitor = rec.visitor_msg_count !== undefined ? Number(rec.visitor_msg_count) || 0 : prevTotal;
@@ -524,16 +469,14 @@ export async function recordVisitorExchange(env, userId, msg, options = {}) {
     rec.msg_count = Math.max(prevTotal, prevVisitor + prevAdmin);
   }
 
-  rec.photo_count = history.photos.length;
-  rec.link_count = history.links.length;
+  rec.photo_count = storedExchange.photoCount;
+  rec.link_count = storedExchange.linkCount;
   rec.last_seen_at = nowIso;
   if (preview) {
     rec.last_preview = sender === 'admin' ? `我：${preview}`.slice(0, 120) : preview.slice(0, 120);
   }
 
-  // Independent writes go out together instead of one after another.
   await Promise.all([
-    safePutJSON(env.TOPIC_MAP, historyKey, history),
     safePutJSON(env.TOPIC_MAP, userKey, rec),
     addToVisitorIndex(env, uid),
     invalidateVisitorSummaryCache(env),
@@ -542,115 +485,55 @@ export async function recordVisitorExchange(env, userId, msg, options = {}) {
   return {
     photoAdded: Boolean(photo),
     linksAdded: urls.length,
-    photoCount: history.photos.length,
-    linkCount: history.links.length,
+    photoCount: storedExchange.photoCount,
+    linkCount: storedExchange.linkCount,
     totalCount: rec.msg_count,
-    message: addedMessage,
+    message: storedExchange.message,
   };
 }
 
 /**
  * Returns the newest visitor message copied into forum topic `threadId` as
  * `{ topicMsgId }`, or null. Only entries recorded with `topicCopyId` qualify, so older entries
- * whose `topicMsgId` holds a private-chat ID are never used to quote. 1 KV read, 0 writes.
+ * whose `topicMsgId` holds a private-chat ID are never used to quote.
  */
 export async function findLatestVisitorTopicMessage(env, userId, threadId) {
   const uid = String(userId || '');
   const tid = Number(threadId);
-  if (!env?.TOPIC_MAP || !/^\d+$/.test(uid) || !Number.isInteger(tid) || tid <= 0) return null;
-  const history = await safeGetJSON(env.TOPIC_MAP, `history:${uid}`, null);
-  const list = Array.isArray(history?.pmMessageIds) ? history.pmMessageIds : [];
-  const hit = list.find(
-    (m) => m?.sender === 'visitor' && Number(m.topicThreadId) === tid && Number(m.topicCopyId) > 0
-  );
-  return hit ? { topicMsgId: Number(hit.topicCopyId) } : null;
+  if ((!env?.TOPIC_MAP && !env?.DB) || !/^\d+$/.test(uid) || !Number.isInteger(tid) || tid <= 0) return null;
+  return getStore(env).findLatestVisitorTopicCopy(uid, tid);
 }
 
 /**
  * Persists or clears a message reaction (`visitorReaction` or `ownerReaction`) on the matching
- * `history:{uid}.messages` entry. Re-reads `history:{uid}` fresh before writing to avoid
- * clobbering concurrent message archives. 1 read + at most 1 write.
+ * visitor chat history message entry.
  */
 export async function updateVisitorMessageReaction(env, userId, pmMessageId, role, reactionText = '') {
   const uid = String(userId || '').trim();
   const pmId = Number(pmMessageId);
-  if (!env?.TOPIC_MAP || !/^\d+$/.test(uid) || !Number.isInteger(pmId) || pmId <= 0) return false;
-
-  const field = role === 'owner' ? 'ownerReaction' : 'visitorReaction';
-  const historyKey = `history:${uid}`;
-  const fresh = await safeGetJSON(env.TOPIC_MAP, historyKey, null);
-  if (!fresh || !Array.isArray(fresh.messages)) return false;
-
-  let target = null;
-  for (let i = fresh.messages.length - 1; i >= 0; i -= 1) {
-    if (Number(fresh.messages[i]?.pmMessageId) === pmId) {
-      target = fresh.messages[i];
-      break;
-    }
-  }
-  if (!target) return false;
-
-  const cleanVal = String(reactionText || '').trim().slice(0, 16);
-  const prevVal = String(target[field] || '');
-  if (prevVal === cleanVal) return false;
-
-  if (cleanVal) {
-    target[field] = cleanVal;
-  } else {
-    delete target[field];
-  }
-  await safePutJSON(env.TOPIC_MAP, historyKey, fresh);
-  return true;
+  if ((!env?.TOPIC_MAP && !env?.DB) || !/^\d+$/.test(uid) || !Number.isInteger(pmId) || pmId <= 0) return false;
+  return getStore(env).setReaction(uid, pmId, role, reactionText);
 }
 
 /**
  * Attaches the topic mirror's message ID (and its group) to an already-archived panel reply, so
- * recall can delete the topic copy and reactions can sync to it. Re-reads history before writing.
+ * recall can delete the topic copy and reactions can sync to it.
  * Returns false when the entry no longer exists (it was recalled before the mirror landed).
  */
 export async function attachTopicMirror(env, userId, pmMessageId, topicMsgId, topicChatId) {
   const uid = String(userId || '');
   const pmId = Number(pmMessageId);
   const topicId = Number(topicMsgId);
-  if (!env?.TOPIC_MAP || !/^\d+$/.test(uid) || !(pmId > 0) || !(topicId > 0)) return true;
-  const historyKey = `history:${uid}`;
-  const fresh = await safeGetJSON(env.TOPIC_MAP, historyKey, null);
-  const list = Array.isArray(fresh?.pmMessageIds) ? fresh.pmMessageIds : [];
-  const entry = list.find((m) => Number(m?.id) === pmId && m?.sender === 'admin');
-  if (!entry) return false;
-  entry.topicMsgId = topicId;
-  if (topicChatId) entry.topicChatId = String(topicChatId);
-  const msgEntry = (Array.isArray(fresh.messages) ? fresh.messages : []).find(
-    (m) => Number(m?.pmMessageId) === pmId && m?.sender === 'admin'
-  );
-  if (msgEntry) msgEntry.topicMsgId = topicId;
-  await safePutJSON(env.TOPIC_MAP, historyKey, fresh);
-  return true;
+  if ((!env?.TOPIC_MAP && !env?.DB) || !/^\d+$/.test(uid) || !(pmId > 0) || !(topicId > 0)) return true;
+  return getStore(env).attachTopicMirror(uid, pmId, topicId, topicChatId);
 }
 
-// Workers KV minimum cacheTtl (docs: must be >= 30 seconds).
-export const HISTORY_CACHE_TTL_SECONDS = 30;
-
-export async function getVisitorHistory(env, userId) {
+export async function getVisitorHistory(env, userId, options = {}) {
   const uid = String(userId || '');
-  if (!env.TOPIC_MAP || !/^\d+$/.test(uid)) {
+  if ((!env?.TOPIC_MAP && !env?.DB) || !/^\d+$/.test(uid)) {
     return { photos: [], links: [], pmMessageIds: [], messages: [] };
   }
-  // The panel polls this while a chat is open; the visitor's messages are written by the webhook in
-  // another Cloudflare location, so use KV's shortest edge cache (30s minimum, 60s default) to see
-  // them sooner.
-  const history = (await safeGetJSON(env.TOPIC_MAP, `history:${uid}`, null, { cacheTtl: HISTORY_CACHE_TTL_SECONDS })) || {
-    photos: [],
-    links: [],
-    pmMessageIds: [],
-    messages: [],
-  };
-  return {
-    photos: Array.isArray(history.photos) ? history.photos : [],
-    links: Array.isArray(history.links) ? history.links : [],
-    pmMessageIds: Array.isArray(history.pmMessageIds) ? history.pmMessageIds : [],
-    messages: Array.isArray(history.messages) ? history.messages : [],
-  };
+  return getStore(env).getHistory(uid, options);
 }
 
 /**
@@ -665,7 +548,8 @@ export async function clearVisitorHistory(env, userId, mode = 'archive', tgCallF
     throw new Error('Invalid userId');
   }
 
-  const history = await getVisitorHistory(env, uid);
+  const store = getStore(env);
+  const history = await store.getHistory(uid);
   const userKey = `user:${uid}`;
   const rec = (await safeGetJSON(env.TOPIC_MAP, userKey, { userId: uid })) || { userId: uid };
 
@@ -719,8 +603,8 @@ export async function clearVisitorHistory(env, userId, mode = 'archive', tgCallF
     }
   }
 
-  // Always clear KV history index & counters
-  await env.TOPIC_MAP.delete(`history:${uid}`);
+  // Clear message store (KV or D1) & reset KV profile counters
+  await store.clearHistory(uid, mode);
   rec.msg_count = 0;
   rec.visitor_msg_count = 0;
   rec.admin_msg_count = 0;
@@ -1059,36 +943,19 @@ export async function recallAdminVisitorMessage(
   options = {}
 ) {
   const uid = String(userId || '');
-  if (!env.TOPIC_MAP || !/^\d+$/.test(uid) || typeof tgCallFn !== 'function') {
+  if ((!env?.TOPIC_MAP && !env?.DB) || !/^\d+$/.test(uid) || typeof tgCallFn !== 'function') {
     return { ok: false, error: '参数无效' };
   }
-  const historyKey = `history:${uid}`;
-  const history = (await safeGetJSON(env.TOPIC_MAP, historyKey, null)) || {
-    photos: [],
-    links: [],
-    pmMessageIds: [],
-    messages: [],
-  };
-  const list = Array.isArray(history.pmMessageIds) ? history.pmMessageIds : [];
+  const store = getStore(env);
   const hasDmTarget = Boolean(options && Object.prototype.hasOwnProperty.call(options, 'replyToDmMsgId'));
-  const dmTargetId = hasDmTarget ? Number(options.replyToDmMsgId) : null;
+  const target = await store.findAdminMessageForRecall(uid, {
+    explicitPmMessageId,
+    hasDmTarget,
+    replyToDmMsgId: hasDmTarget ? options.replyToDmMsgId : null,
+    replyToTopicMsgId,
+  });
 
-  let idx = -1;
-  if (explicitPmMessageId) {
-    idx = list.findIndex((m) => Number(m?.id) === Number(explicitPmMessageId) && m?.sender !== 'visitor');
-  } else if (hasDmTarget) {
-    // DM inbox mode: strictly match the replied-to owner DM message; NEVER fall back to "most recent".
-    idx =
-      Number.isFinite(dmTargetId) && dmTargetId > 0
-        ? list.findIndex((m) => Number(m?.dmMsgId) === dmTargetId && m?.sender !== 'visitor')
-        : -1;
-  } else if (replyToTopicMsgId) {
-    idx = list.findIndex((m) => Number(m?.topicMsgId) === Number(replyToTopicMsgId) && m?.sender !== 'visitor');
-  } else {
-    idx = list.findIndex((m) => m?.sender === 'admin');
-  }
-
-  if (idx === -1) {
+  if (!target) {
     return {
       ok: false,
       error:
@@ -1098,7 +965,6 @@ export async function recallAdminVisitorMessage(
     };
   }
 
-  const target = list[idx];
   // Telegram only lets bots delete their private-chat messages for 48h; fail fast instead of
   // spending a round trip on a call that cannot succeed.
   if (Number(target.at) > 0 && Date.now() - Number(target.at) > RECALL_WINDOW_MS) {
@@ -1128,43 +994,19 @@ export async function recallAdminVisitorMessage(
         }).catch(() => {})
       : Promise.resolve();
 
-  // Re-read after the (slow) Telegram round-trips so messages archived concurrently by the webhook
-  // are not overwritten by the stale snapshot taken above. The topic delete runs meanwhile.
+  // Remove the recalled message (and its photo/link archive entries) from the active store,
+  // while reading `user:<uid>` in parallel to update KV summary counts.
   const userKey = `user:${uid}`;
-  const [freshStored, storedRec] = await Promise.all([
-    safeGetJSON(env.TOPIC_MAP, historyKey, null),
-    safeGetJSON(env.TOPIC_MAP, userKey, null),
+  const [removeRes, storedRec] = await Promise.all([
+    store.removeAdminMessage(uid, Number(target.id)),
+    env.TOPIC_MAP ? safeGetJSON(env.TOPIC_MAP, userKey, null) : Promise.resolve(null),
+    topicDelete,
   ]);
-  const fresh = freshStored || history;
-  const targetId = Number(target.id);
-  const freshMessages = Array.isArray(fresh.messages) ? fresh.messages : [];
-  const recalledEntry = freshMessages.find(
-    (m) => Number(m?.pmMessageId) === targetId && m?.sender !== 'visitor'
-  );
 
-  fresh.pmMessageIds = (Array.isArray(fresh.pmMessageIds) ? fresh.pmMessageIds : []).filter(
-    (m) => !(Number(m?.id) === targetId && m?.sender !== 'visitor')
-  );
-  fresh.messages = freshMessages.filter((m) => !(Number(m?.pmMessageId) === targetId && m?.sender !== 'visitor'));
-
-  // Drop the recalled photo / links from the archive too, so the gallery doesn't keep serving
-  // signed URLs for content the visitor can no longer see.
-  if (recalledEntry) {
-    if (Array.isArray(fresh.photos) && recalledEntry.photoFileId) {
-      fresh.photos = fresh.photos.filter(
-        (p) => !(p?.sender === 'admin' && p?.fileId === recalledEntry.photoFileId && p?.at === recalledEntry.at)
-      );
-    }
-    if (Array.isArray(fresh.links)) {
-      fresh.links = fresh.links.filter((l) => !(l?.sender === 'admin' && l?.at === recalledEntry.at));
-    }
+  if (removeRes.removed && storedRec && env.TOPIC_MAP) {
+    storedRec.photo_count = removeRes.photoCount;
+    storedRec.link_count = removeRes.linkCount;
+    await Promise.all([safePutJSON(env.TOPIC_MAP, userKey, storedRec), invalidateVisitorSummaryCache(env)]);
   }
-  const writes = [safePutJSON(env.TOPIC_MAP, historyKey, fresh), topicDelete];
-  if (recalledEntry && storedRec) {
-    storedRec.photo_count = Array.isArray(fresh.photos) ? fresh.photos.length : 0;
-    storedRec.link_count = Array.isArray(fresh.links) ? fresh.links.length : 0;
-    writes.push(safePutJSON(env.TOPIC_MAP, userKey, storedRec), invalidateVisitorSummaryCache(env));
-  }
-  await Promise.all(writes);
   return { ok: true, deletedPmMessageId: target.id };
 }

@@ -59,11 +59,11 @@ import {
   updateVisitorMessageReaction,
   upsertVisitorProfile,
 } from './visitors.js';
+import { TOPIC_MSG_MAP_PREFIX, TOPIC_MSG_MAP_TTL_SECONDS, getStore } from './store/index.js';
 
+export { TOPIC_MSG_MAP_PREFIX, TOPIC_MSG_MAP_TTL_SECONDS };
 export const WEBHOOK_UPDATES_REV_KEY = 'webhook:updates_rev';
 export const WEBHOOK_UPDATES_REV = '1';
-export const TOPIC_MSG_MAP_PREFIX = 'tmsg:';
-export const TOPIC_MSG_MAP_TTL_SECONDS = 30 * 86400;
 export const VISITOR_REACTION_LIMIT_PER_MIN = 10;
 export const PROBATION_NOTIFY_COOLDOWN_SECONDS = 600;
 
@@ -632,14 +632,10 @@ async function forwardMessageToTopic(env, requestOrigin, msg, knownPreview = und
 
   const topicMsgId = copied?.result?.message_id || null;
   const visitorPmId = Number(msg?.message_id);
-  if (topicMsgId && env.TOPIC_MAP && Number.isInteger(visitorPmId) && visitorPmId > 0) {
+  if (topicMsgId && (env.TOPIC_MAP || env.DB) && Number.isInteger(visitorPmId) && visitorPmId > 0) {
     // Reverse lookup for topic reactions (`message_reaction` does not carry `message_thread_id`).
     // Only visitor copies are written here; admin replies & panel mirrors are intentionally excluded.
-    await env.TOPIC_MAP.put(
-      `${TOPIC_MSG_MAP_PREFIX}${topicMsgId}`,
-      JSON.stringify({ g: String(supergroupId), u: uid, p: visitorPmId }),
-      { expirationTtl: TOPIC_MSG_MAP_TTL_SECONDS }
-    ).catch(() => {});
+    await getStore(env).putTopicMap(supergroupId, topicMsgId, uid, visitorPmId).catch(() => {});
   }
 
   return { supergroupId, threadId, topicMsgId };
@@ -2254,7 +2250,7 @@ function extractReactionChoice(newReaction = []) {
  */
 export async function handleMessageReaction(env, reaction) {
   try {
-    if (!env?.TOPIC_MAP || !env?.BOT_TOKEN || !reaction?.chat?.id) return;
+    if ((!env?.TOPIC_MAP && !env?.DB) || !env?.BOT_TOKEN || !reaction?.chat?.id) return;
     if (reaction.user?.is_bot) return;
 
     const messageId = Number(reaction.message_id);
@@ -2293,14 +2289,12 @@ export async function handleMessageReaction(env, reaction) {
       if (inboxMode === 'off') return;
       const actorUid = reaction.user?.id ? String(reaction.user.id) : chatIdStr;
       if (await isUserAdmin(env, actorUid, tgCall)) return;
-      if ((await env.TOPIC_MAP.get(`banned:${chatIdStr}`)) === '1') return;
+      if (env.TOPIC_MAP && (await env.TOPIC_MAP.get(`banned:${chatIdStr}`)) === '1') return;
       // Each synced reaction costs a Telegram call and a history write; cap toggling so a visitor
       // can't burn the KV free-tier write quota by flipping reactions on and off.
       if (!(await checkRateLimit(env, `rl:react:${chatIdStr}`, VISITOR_REACTION_LIMIT_PER_MIN, 60))) return;
 
-      const history = await safeGetJSON(env.TOPIC_MAP, `history:${chatIdStr}`, null);
-      const pmList = Array.isArray(history?.pmMessageIds) ? history.pmMessageIds : [];
-      const matched = pmList.find((m) => Number(m?.id) === messageId);
+      const matched = await getStore(env).findPmEntry(chatIdStr, messageId);
       if (!matched) return; // Never guess message mapping
 
       let targetChatId = '';
@@ -2348,13 +2342,12 @@ export async function handleMessageReaction(env, reaction) {
       if (!reaction.user?.id) return;
       if (!(await isUserAdmin(env, reaction.user.id, tgCall))) return;
 
-      const mapping = await safeGetJSON(env.TOPIC_MAP, `${TOPIC_MSG_MAP_PREFIX}${messageId}`, null);
+      const mapping = await getStore(env).getTopicMap(supergroupId, messageId);
       // Message IDs are per chat: a mapping written for a previously bound group must never be
       // applied to the same ID in the current group (it would react on an unrelated visitor's message).
-      if (String(mapping?.g || '') !== String(supergroupId)) return;
-      const targetUid = String(mapping?.u || '').trim();
-      const targetPmId = Number(mapping?.p);
-      if (!/^\d+$/.test(targetUid) || !Number.isInteger(targetPmId) || targetPmId <= 0) return;
+      if (!mapping?.uid || !mapping.pmMessageId) return;
+      const targetUid = mapping.uid;
+      const targetPmId = mapping.pmMessageId;
 
       await tgCall(env, 'setMessageReaction', {
         chat_id: Number(targetUid),

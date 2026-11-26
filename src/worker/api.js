@@ -267,7 +267,7 @@ export async function handleApiRequest(request, env, url, ctx = null) {
       const uid = historyMatch[1];
       const [detail, history] = await Promise.all([
         getVisitorDetail(env, uid),
-        getVisitorHistory(env, uid),
+        getVisitorHistory(env, uid, { limit: 60 }),
       ]);
       if (!detail) return json({ ok: false, error: '未找到该访客记录' }, 404);
 
