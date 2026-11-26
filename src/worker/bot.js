@@ -2612,6 +2612,23 @@ export async function sendAdminDirectVisitorReply(env, requestOrigin, targetUid,
     }
   }
 
+  // The lookups the topic mirror needs (visitor record, bound group, the visitor message to quote)
+  // don't depend on delivering to the visitor, so they run while that Telegram call is in flight.
+  const prefetch = (async () => {
+    const [storedRec, groupId] = await Promise.all([
+      safeGetJSON(env.TOPIC_MAP, `user:${uid}`, { userId: uid }),
+      resolveSupergroupId(env),
+    ]);
+    const visitorRec = storedRec || { userId: uid };
+    const quoted =
+      groupId && visitorRec.thread_id
+        ? await findLatestVisitorTopicMessage(env, uid, visitorRec.thread_id).catch(() => null)
+        : null;
+    return { rec: visitorRec, supergroupId: groupId, quoted };
+  })();
+  // If delivery fails we never await the prefetch; don't let its rejection go unhandled.
+  prefetch.catch(() => {});
+
   let sentPm = null;
   try {
     if (photoFile) {
@@ -2634,7 +2651,7 @@ export async function sendAdminDirectVisitorReply(env, requestOrigin, targetUid,
     throw new Error(`发送失败（对方可能已停用或拉黑机器人）：${err.message}`);
   }
 
-  const rec = (await safeGetJSON(env.TOPIC_MAP, `user:${uid}`, { userId: uid })) || { userId: uid };
+  const { rec, supergroupId, quoted } = await prefetch;
   if (rec.closed) {
     rec.closed = false;
     await safePutJSON(env.TOPIC_MAP, `user:${uid}`, rec);
@@ -2642,29 +2659,27 @@ export async function sendAdminDirectVisitorReply(env, requestOrigin, targetUid,
 
   // Silently mirror into the Admin Forum Supergroup Topic if bound
   let topicMsgId = null;
-  const supergroupId = await resolveSupergroupId(env);
   if (supergroupId) {
     try {
       const preview = photoFile ? rawText.slice(0, 80) || '[图片]' : rawText.slice(0, 80);
-      let { threadId } = await ensureVisitorTopic(
-        env,
-        requestOrigin,
-        {
-          id: Number(uid),
-          first_name: rec.first_name || rec.title || '',
-          last_name: rec.last_name || '',
-          username: rec.username || '',
-        },
-        preview
-      );
+      const topicUser = {
+        id: Number(uid),
+        first_name: rec.first_name || rec.title || '',
+        last_name: rec.last_name || '',
+        username: rec.username || '',
+      };
+      // Known topic: use it directly (skips ensureVisitorTopic's re-reads and its thread-map rewrite)
+      let threadId = rec.thread_id;
+      if (!threadId) {
+        ({ threadId } = await ensureVisitorTopic(env, requestOrigin, topicUser, preview));
+      }
 
       // The mirror is posted by the bot, like the visitor's own copied messages, so Telegram groups
       // them under the same sender. A bold label + blockquote, and a quote of the visitor message
       // being answered, keep the owner's panel replies visually distinct from what the visitor said.
-      const mirrorOnce = async (tid) => {
-        const quoted = await findLatestVisitorTopicMessage(env, uid, tid).catch(() => null);
-        const replyPart = quoted?.topicMsgId
-          ? { reply_parameters: { message_id: quoted.topicMsgId, allow_sending_without_reply: true } }
+      const mirrorOnce = async (tid, quoteMsgId = null) => {
+        const replyPart = quoteMsgId
+          ? { reply_parameters: { message_id: quoteMsgId, allow_sending_without_reply: true } }
           : {};
         if (photoFile && Array.isArray(sentPm?.photo) && sentPm.photo.length > 0) {
           const largestId = sentPm.photo[sentPm.photo.length - 1].file_id;
@@ -2691,7 +2706,9 @@ export async function sendAdminDirectVisitorReply(env, requestOrigin, targetUid,
       };
 
       try {
-        const mirrored = await mirrorOnce(threadId);
+        // The prefetched quote belongs to the record's topic; never quote into a different topic.
+        const quoteId = threadId === rec.thread_id ? quoted?.topicMsgId || null : null;
+        const mirrored = await mirrorOnce(threadId, quoteId);
         topicMsgId = mirrored?.result?.message_id || null;
       } catch (topicErr) {
         if (/thread not found|topic_deleted|message thread not found/i.test(String(topicErr.message))) {
@@ -2699,17 +2716,7 @@ export async function sendAdminDirectVisitorReply(env, requestOrigin, targetUid,
           delete latestRec.thread_id;
           await safePutJSON(env.TOPIC_MAP, `user:${uid}`, latestRec);
           await env.TOPIC_MAP.delete(`thread:${threadId}`);
-          ({ threadId } = await ensureVisitorTopic(
-            env,
-            requestOrigin,
-            {
-              id: Number(uid),
-              first_name: rec.first_name || rec.title || '',
-              last_name: rec.last_name || '',
-              username: rec.username || '',
-            },
-            preview
-          ));
+          ({ threadId } = await ensureVisitorTopic(env, requestOrigin, topicUser, preview));
           const mirroredRetry = await mirrorOnce(threadId);
           topicMsgId = mirroredRetry?.result?.message_id || null;
         }

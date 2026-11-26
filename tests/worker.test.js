@@ -63,6 +63,7 @@ import {
   getVisitorOverview,
   listVisitors,
   normalizeSourceParam,
+  recallAdminVisitorMessage,
   recordVisitorExchange,
   rememberPendingSource,
   upsertVisitorProfile,
@@ -2894,6 +2895,120 @@ describe('Mini App in-panel visitor chat log, direct text/photo reply & recall',
     } finally {
       globalThis.fetch = origFetch;
     }
+  });
+
+  it('reply fast path: reuses the known topic without rewriting the thread map, and a failed delivery writes nothing', async () => {
+    const kv = createMemoryKV();
+    const botToken = '999333:FAST_REPLY';
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777' };
+    await upsertVisitorProfile(env, { id: 92929, first_name: 'Kiki' }, { threadId: 66, incrementMsg: false });
+    await kv.put('thread:66', '92929');
+
+    let failVisitorSend = false;
+    const tgCalls = [];
+    let nextId = 900;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url, init) => {
+      const method = String(url).split('/').pop();
+      const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
+      tgCalls.push({ method, body });
+      if (failVisitorSend && method === 'sendMessage' && Number(body.chat_id) === 92929) {
+        return new Response(JSON.stringify({ ok: false, error_code: 403, description: 'Forbidden: bot was blocked by the user' }), { status: 403 });
+      }
+      nextId += 1;
+      return new Response(JSON.stringify({ ok: true, result: { message_id: nextId } }), { status: 200 });
+    });
+    const adminInit = await signInitData(
+      { auth_date: String(Math.floor(Date.now() / 1000)), user: JSON.stringify({ id: 10001, first_name: 'Owner' }) },
+      botToken
+    );
+    const reply = (text) =>
+      worker.fetch(
+        new Request('https://panel.example.com/api/admin/visitors/92929/reply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': adminInit },
+          body: JSON.stringify({ text }),
+        }),
+        env
+      );
+
+    try {
+      const putSpy = vi.spyOn(kv, 'put');
+      const res = await reply('hi');
+      expect(res.status).toBe(200);
+      expect(tgCalls.some((c) => c.method === 'createForumTopic')).toBe(false);
+      expect(tgCalls.find((c) => c.body.chat_id === '-100777').body.message_thread_id).toBe(66);
+      expect(putSpy.mock.calls.some((c) => String(c[0]).startsWith('thread:'))).toBe(false);
+      const hist = await getVisitorHistory(env, '92929');
+      expect(hist.messages.at(-1).text).toBe('hi');
+      expect((await getVisitorDetail(env, '92929')).admin_msg_count).toBe(1);
+
+      // Delivery fails -> error returned, nothing mirrored or archived
+      putSpy.mockClear();
+      tgCalls.length = 0;
+      failVisitorSend = true;
+      const failed = await reply('second');
+      expect(failed.status).toBe(400);
+      expect(tgCalls.filter((c) => c.body.chat_id === '-100777')).toHaveLength(0);
+      expect(putSpy.mock.calls.filter((c) => String(c[0]).startsWith('history:'))).toHaveLength(0);
+      putSpy.mockRestore();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('recall fails fast past 48 hours and only deletes the topic copy after the visitor-side delete succeeds', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, SUPERGROUP_ID: '-100777' };
+    const now = Date.now();
+    await kv.put(
+      'history:93939',
+      JSON.stringify({
+        photos: [],
+        links: [],
+        messages: [
+          { id: 'm1', sender: 'admin', text: 'old', pmMessageId: 11, topicMsgId: 21 },
+          { id: 'm2', sender: 'admin', text: 'new', pmMessageId: 12, topicMsgId: 22 },
+        ],
+        pmMessageIds: [
+          { id: 12, topicMsgId: 22, sender: 'admin', at: now - 60 * 1000 },
+          { id: 11, topicMsgId: 21, sender: 'admin', at: now - 49 * 60 * 60 * 1000 },
+        ],
+      })
+    );
+
+    const calls = [];
+    let failVisitorDelete = false;
+    const tg = async (_env, method, body) => {
+      calls.push({ method, body });
+      if (failVisitorDelete && Number(body.chat_id) === 93939) throw new Error('message to delete not found');
+      return { ok: true, result: true };
+    };
+
+    // Older than 48h -> no Telegram call at all
+    const old = await recallAdminVisitorMessage(env, '93939', null, tg, 11);
+    expect(old.ok).toBe(false);
+    expect(old.error).toContain('48');
+    expect(calls).toHaveLength(0);
+
+    // Visitor-side delete fails -> topic copy is left alone, history untouched
+    failVisitorDelete = true;
+    const failed = await recallAdminVisitorMessage(env, '93939', null, tg, 12);
+    expect(failed.ok).toBe(false);
+    expect(calls.map((c) => c.body.chat_id)).toEqual([93939]);
+    expect((await getVisitorHistory(env, '93939')).messages).toHaveLength(2);
+
+    // Success -> both copies deleted, entry removed from history
+    calls.length = 0;
+    failVisitorDelete = false;
+    const done = await recallAdminVisitorMessage(env, '93939', null, tg, 12);
+    expect(done.ok).toBe(true);
+    expect(calls.map((c) => [c.body.chat_id, c.body.message_id])).toEqual([
+      [93939, 12],
+      ['-100777', 22],
+    ]);
+    const hist = await getVisitorHistory(env, '93939');
+    expect(hist.messages.map((m) => m.id)).toEqual(['m1']);
   });
 });
 

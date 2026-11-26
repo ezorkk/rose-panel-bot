@@ -286,7 +286,13 @@ export async function recordVisitorExchange(env, userId, msg, options = {}) {
   const nowIso = new Date().toISOString();
   const nowMs = Date.now();
   const historyKey = `history:${uid}`;
-  const history = (await safeGetJSON(env.TOPIC_MAP, historyKey, null)) || {
+  const userKey = `user:${uid}`;
+  // Both records are read up front in one round trip (they were read one after another).
+  const [storedHistory, storedRec] = await Promise.all([
+    safeGetJSON(env.TOPIC_MAP, historyKey, null),
+    safeGetJSON(env.TOPIC_MAP, userKey, { userId: uid }),
+  ]);
+  const history = storedHistory || {
     photos: [],
     links: [],
     pmMessageIds: [],
@@ -379,11 +385,8 @@ export async function recordVisitorExchange(env, userId, msg, options = {}) {
     }
   }
 
-  await safePutJSON(env.TOPIC_MAP, historyKey, history);
-
   // Sync summary counters onto user:<uid>
-  const userKey = `user:${uid}`;
-  const rec = (await safeGetJSON(env.TOPIC_MAP, userKey, { userId: uid })) || { userId: uid };
+  const rec = storedRec || { userId: uid };
   const prevTotal = Number(rec.msg_count) || 0;
   const prevVisitor = rec.visitor_msg_count !== undefined ? Number(rec.visitor_msg_count) || 0 : prevTotal;
   const prevAdmin = Number(rec.admin_msg_count) || 0;
@@ -410,9 +413,13 @@ export async function recordVisitorExchange(env, userId, msg, options = {}) {
     rec.last_preview = sender === 'admin' ? `我：${preview}`.slice(0, 120) : preview.slice(0, 120);
   }
 
-  await safePutJSON(env.TOPIC_MAP, userKey, rec);
-  await addToVisitorIndex(env, uid);
-  await invalidateVisitorSummaryCache(env);
+  // Independent writes go out together instead of one after another.
+  await Promise.all([
+    safePutJSON(env.TOPIC_MAP, historyKey, history),
+    safePutJSON(env.TOPIC_MAP, userKey, rec),
+    addToVisitorIndex(env, uid),
+    invalidateVisitorSummaryCache(env),
+  ]);
 
   return {
     photoAdded: Boolean(photo),
@@ -820,6 +827,9 @@ export async function applyVisitorAction(env, userId, action, payload = {}) {
  * Recalls an admin reply sent to a visitor in private chat (either matching a replied-to topic message
  * or falling back to the most recent admin reply within 48 hours).
  */
+// Bots can delete their own private-chat messages for 48 hours.
+const RECALL_WINDOW_MS = 48 * 60 * 60 * 1000;
+
 export async function recallAdminVisitorMessage(
   env,
   userId,
@@ -869,6 +879,17 @@ export async function recallAdminVisitorMessage(
   }
 
   const target = list[idx];
+  // Telegram only lets bots delete their private-chat messages for 48h; fail fast instead of
+  // spending a round trip on a call that cannot succeed.
+  if (Number(target.at) > 0 && Date.now() - Number(target.at) > RECALL_WINDOW_MS) {
+    return { ok: false, error: '撤回失败：已超过 Telegram 48 小时撤回时限' };
+  }
+
+  // If recalled from Mini App (`explicitPmMessageId`) and a mirrored topic message exists, clean it up too.
+  // The group lookup runs alongside the visitor-side delete; the topic copy is only deleted once the
+  // visitor-side delete succeeded, so a failed recall never leaves the topic and the chat out of sync.
+  const mirrorInTopic = Boolean(explicitPmMessageId && target.topicMsgId);
+  const groupLookup = mirrorInTopic ? resolveSupergroupId(env).catch(() => '') : Promise.resolve('');
   try {
     await tgCallFn(env, 'deleteMessage', {
       chat_id: Number(uid),
@@ -878,20 +899,23 @@ export async function recallAdminVisitorMessage(
     return { ok: false, error: `撤回失败（可能已超过 Telegram 48 小时撤回时限）：${err.message}` };
   }
 
-  // If recalled from Mini App (`explicitPmMessageId`) and a mirrored topic message exists, clean it up too
-  if (explicitPmMessageId && target.topicMsgId) {
-    const supergroupId = await resolveSupergroupId(env);
-    if (supergroupId) {
-      await tgCallFn(env, 'deleteMessage', {
-        chat_id: supergroupId,
-        message_id: Number(target.topicMsgId),
-      }).catch(() => {});
-    }
-  }
+  const supergroupId = await groupLookup;
+  const topicDelete =
+    mirrorInTopic && supergroupId
+      ? tgCallFn(env, 'deleteMessage', {
+          chat_id: supergroupId,
+          message_id: Number(target.topicMsgId),
+        }).catch(() => {})
+      : Promise.resolve();
 
   // Re-read after the (slow) Telegram round-trips so messages archived concurrently by the webhook
-  // are not overwritten by the stale snapshot taken above.
-  const fresh = (await safeGetJSON(env.TOPIC_MAP, historyKey, null)) || history;
+  // are not overwritten by the stale snapshot taken above. The topic delete runs meanwhile.
+  const userKey = `user:${uid}`;
+  const [freshStored, storedRec] = await Promise.all([
+    safeGetJSON(env.TOPIC_MAP, historyKey, null),
+    safeGetJSON(env.TOPIC_MAP, userKey, null),
+  ]);
+  const fresh = freshStored || history;
   const targetId = Number(target.id);
   const freshMessages = Array.isArray(fresh.messages) ? fresh.messages : [];
   const recalledEntry = freshMessages.find(
@@ -915,17 +939,12 @@ export async function recallAdminVisitorMessage(
       fresh.links = fresh.links.filter((l) => !(l?.sender === 'admin' && l?.at === recalledEntry.at));
     }
   }
-  await safePutJSON(env.TOPIC_MAP, historyKey, fresh);
-
-  if (recalledEntry) {
-    const userKey = `user:${uid}`;
-    const rec = await safeGetJSON(env.TOPIC_MAP, userKey, null);
-    if (rec) {
-      rec.photo_count = Array.isArray(fresh.photos) ? fresh.photos.length : 0;
-      rec.link_count = Array.isArray(fresh.links) ? fresh.links.length : 0;
-      await safePutJSON(env.TOPIC_MAP, userKey, rec);
-      await invalidateVisitorSummaryCache(env);
-    }
+  const writes = [safePutJSON(env.TOPIC_MAP, historyKey, fresh), topicDelete];
+  if (recalledEntry && storedRec) {
+    storedRec.photo_count = Array.isArray(fresh.photos) ? fresh.photos.length : 0;
+    storedRec.link_count = Array.isArray(fresh.links) ? fresh.links.length : 0;
+    writes.push(safePutJSON(env.TOPIC_MAP, userKey, storedRec), invalidateVisitorSummaryCache(env));
   }
+  await Promise.all(writes);
   return { ok: true, deletedPmMessageId: target.id };
 }
