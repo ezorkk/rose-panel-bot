@@ -57,7 +57,7 @@
   <img src="docs/assets/demo-panel.webp" alt="Photo archive, live multi-protocol probe refresh, private sites, and 224x84 pixel Day/Night slider" width="94%" />
 </div>
 
-- **Original 224×84 Pixel Day/Night Bubble Slider**: scrub the crystal magnifier to toggle **Dark / Follow Telegram / Light** with a full-screen circular View Transition ripple synced to Telegram chrome; edge-injected splash + local SWR cache open in 0.2s, with an automatic **What's New** modal after upgrades;
+- **224×84 Pixel Day/Night Bubble Slider**: scrub the crystal magnifier to toggle **Dark / Follow Telegram / Light** with a full-screen circular View Transition ripple synced to Telegram chrome; edge-injected splash + local SWR cache open in 0.2s, with an automatic **What's New** modal after upgrades;
 - Filter exchanged photos by sender; inspect live **Komari / Nezha (v1·v0) / NodeGet / Generic JSON** server metrics and **Public / 🔒 Private** site bookmarks; swap animated `.webp` / `.webm` / `.tgs` emblems via `/set` with 3-way private avatar options.
 
 ---
@@ -128,7 +128,7 @@ Unused modules stay completely hidden and add zero overhead:
 | Module | Default | Activation | Notes |
 | :--- | :---: | :--- | :--- |
 | **🪪 Personal Card + 🌐 Public/Private Sites** | Core | `BOT_TOKEN` + `TOPIC_MAP` KV | 0.2s panel with pixel Day/Night slider, animated emblems & dual-layer sites |
-| **👤 Bidirectional PM Bot + 4-Layer Shield** | Optional | Send `/bind` in Topics group (or `SUPERGROUP_ID`) | Direct in-panel chat/photos, Forum Topics inbox, archive, CAS & sticker quizzes |
+| **👤 Bidirectional PM Bot + 4-Layer Shield** | Optional | Works with `ADMIN_IDS` (Bot DM push), or `/bind` in a Topics group (optional, recommended for high volume) | Ready out-of-the-box via Bot DM push (quote-reply to respond), direct in-panel chat/photos, archive, CAS & sticker quizzes; `/bind` switches automatically to per-visitor Forum Topics |
 | **📡 Pluggable Server Probe** | Optional | Pick provider & URL in Mini App | **Komari / Nezha (v1·v0) / NodeGet / Generic JSON**; Admin-Only toggle supported |
 | **🛡️ CF Turnstile Strict Mode** | Optional | `TURNSTILE_SITE_KEY` & `SECRET` | Auto-escalates high-risk ads or toggle manually in Settings |
 | **🌸 Group Check-in, Points & Badges** | Optional | `ENABLE_CHECKIN="true"` or in-app switch | Off by default for personal cards; 1-click on for group communities |
@@ -148,7 +148,7 @@ Unused modules stay completely hidden and add zero overhead:
 3. In **Settings → Variables & Bindings**, confirm `TOPIC_MAP` KV is bound and add 4 core variables:
    - `BOT_TOKEN` (**Secret**) · `WEBHOOK_SECRET` (**Secret**, any random string)
    - `ADMIN_IDS` (**must be a Text variable, not Secret** — your numeric UID) · `BOT_USERNAME` (**Text**, without `@`)
-4. Visit `https://<your-worker-domain>/setup?secret=<WEBHOOK_SECRET>` once until you see `"ok": true`. *(For bidirectional PM)* Create a private group with **Topics** enabled, add the bot as Administrator, and send **`/bind`** inside the group!
+4. Visit `https://<your-worker-domain>/setup?secret=<WEBHOOK_SECRET>` once until you see `"ok": true`, then send `/start` to your bot in PM — **Bot DM push + 4-layer anti-spam work immediately** with `ADMIN_IDS` (no group required!). *(Optional, recommended for high-volume inboxes)* Create a private group with **Topics** enabled, add the bot as Administrator, and send **`/bind`** to auto-switch into per-visitor Forum Topics!
 5. *(Recommended)* In `@BotFather`, send `/newapp` with URL `https://<your-worker-domain>/` and a short name matching `APP_SHORT_NAME` (e.g. `panel`) so the panel opens cleanly from groups and topic buttons.
 
 > 💡 **Why Fork instead of a 1-click template button?** Standalone template copies aren't GitHub Forks, so GitHub `Sync fork` and in-panel 1-click Fork sync won't work on them. Forking first takes 1 click and unlocks effortless future upgrades.
@@ -246,7 +246,7 @@ Then reverse-proxy `127.0.0.1:8787` with Caddy for automatic HTTPS.
 | `WEBHOOK_SECRET` | Secret | ✅ | Random secret protecting `/`, `/webhook`, and `/setup` |
 | `BOT_USERNAME` | Text | Recommended | Bot username without `@` |
 | `APP_SHORT_NAME` | Text | Recommended | Mini App short name from BotFather `/newapp` (e.g. `panel`) |
-| `SUPERGROUP_ID` | Text | Optional | Forum Topics group ID (**tip: just send `/bind` inside the group instead**) |
+| `SUPERGROUP_ID` | Text | Optional | Forum Topics group ID (**optional**: without a bound group, `ADMIN_IDS` automatically enables Bot DM push; send `/bind` inside a Topics group anytime to switch. Note: DM push uses 1–3 extra KV writes per visitor message, well within Cloudflare's 1,000/day free tier for personal use) |
 | `TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET` | Text / Secret | Optional | Required only for Cloudflare Turnstile strict verification |
 | `PROBE_PROVIDER` | Text | Optional | `komari` (default) / `nezha` / `nodeget` / `json` |
 | `PROBE_URL` / `PROBE_API_KEY` | Text / Secret | Optional | Probe URL & credential (`KOMARI_URL` / `KOMARI_API_KEY` still supported; also configurable in Mini App) |
@@ -256,8 +256,8 @@ Then reverse-proxy `127.0.0.1:8787` with Caddy for automatic HTTPS.
 ## 🤖 Commands
 
 - **General**: `/start` · `/panel` · `/me` · `/checkin` (group mode) · `/rank` (group mode)
-- **Admin PM**: `/set` (animated sticker emblem) · `/add` (add sticker quiz) · `/resetbadge` · `/cancel`
-- **Inside Forum Topics**: `/bind` · `/unbind` · `/del` (reply to recall) · `/info` · `/ban` · `/unban` · `/trust` · `/reset` · `/close` · `/open`
+- **Admin PM**: `/set` (animated sticker emblem) · `/add` (add sticker quiz) · `/resetbadge` · `/cancel`; in DM push mode, quote-replying a pushed message also supports `/del` `/info` `/ban` `/unban` `/trust` `/reset` `/close` `/open`
+- **Inside Forum Topics (Optional)**: `/bind` (auto-switch to Topics) · `/unbind` (fall back to DM push) · `/del` (reply to recall) · `/info` · `/ban` · `/unban` · `/trust` · `/reset` · `/close` · `/open`
 
 ---
 

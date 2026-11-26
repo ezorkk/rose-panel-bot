@@ -51,13 +51,13 @@
 - 保存欢迎语自动同步至 Telegram 顶部介绍框；陌生人点「开始」发 `/start` 立即出题：私聊发 `/add` 三秒（或在面板点 **「面板添加」** 拉贴纸包）即可用**静态 / 动态贴纸**出专属看图题；
 - **答错就洗牌**：多题立刻换新贴纸、单题则位置重新随机，题底带防脚本蜜罐陷阱（默认冷却防误触，切拉黑亦可在访客列表一键解封）；通过后 1–3650 天免验证直通私聊，并触发**免会员自动回复与最多 50 条关键词秒回**。
 
-### 3 · 0.2 秒启动个人面板 & 原创 224×84 像素昼夜气泡滑块
+### 3 · 0.2 秒启动个人面板 & 224×84 像素昼夜气泡滑块
 
 <div align="center">
   <img src="docs/assets/demo-panel.webp" alt="往来图片相册、多协议探针实时刷新、私密小站与 224×84 像素昼夜滑块" width="94%" />
 </div>
 
-- **原创 224×84 像素昼夜气泡滑块**：顶栏水晶放大镜可拖动切换 **夜晚深色 / 黄昏跟随 Telegram / 白天浅色**，松手以圆形波纹切换全屏主题并同步 TG 原生顶栏；边缘开屏注入 + 本地缓存实现 0.2 秒秒开，升级新版自动弹出 **「✨ 近期更新」** 摘要；
+- **224×84 像素昼夜气泡滑块**：顶栏水晶放大镜可拖动切换 **夜晚深色 / 黄昏跟随 Telegram / 白天浅色**，松手以圆形波纹切换全屏主题并同步 TG 原生顶栏；边缘开屏注入 + 本地缓存实现 0.2 秒秒开，升级新版自动弹出 **「✨ 近期更新」** 摘要；
 - 往来图片相册按发送方一键筛选；内置 **Komari / 哪吒（v1·v0）/ NodeGet / 通用 JSON** 可插拔探针与 **公开 / 🔒 仅我可见** 双层书签；支持 `/set` 秒换动态贴纸主徽章与 3 选 1 隐私头像代理。
 
 ---
@@ -128,7 +128,7 @@ flowchart LR
 | 模块 | 默认状态 | 开启条件 | 说明 |
 | :--- | :---: | :--- | :--- |
 | **🪪 个人名片 + 🌐 公开/私密小站** | 核心必选 | `BOT_TOKEN` + `TOPIC_MAP` KV | 0.2 秒玫瑰瓷个人面板、像素昼夜滑块、动态贴纸徽章与双层小站 |
-| **👤 双向私聊 + 四层反广告护盾** | 按需选配 | 话题群内发 `/bind`（或填 `SUPERGROUP_ID`） | 面板内直接聊天发图、话题收件箱、往来图片/链接归档、CAS 与表情包验证 |
+| **👤 双向私聊 + 四层反广告护盾** | 按需选配 | 配好 `ADMIN_IDS` 即开（Bot 私聊直推），或话题群发 `/bind`（可选，推荐高频用户） | 免建群即可收发私信（引用推送回复）、面板内直接聊天发图、往来图片/链接归档、CAS 与表情包验证；话题群 `/bind` 后自动切换为独立话题收件箱 |
 | **📡 多协议节点探针** | 按需选配 | 小程序内选类型并填地址 | 支持 **Komari / 哪吒 (v1·v0) / NodeGet / 通用 JSON**，支持「仅自己可见」 |
 | **🛡️ CF Turnstile 严格验证** | 按需选配 | 填入 `TURNSTILE_SITE_KEY` & `SECRET` | 高危广告自动升级核验，或在设置里手动切换 |
 | **🌸 群签到积分与徽章系统** | 按需选配 | `ENABLE_CHECKIN="true"` 或设置内一键开 | 个人名片模式默认关闭，群社区部署时一键开启 |
@@ -148,7 +148,7 @@ flowchart LR
 3. 部署后进入 Worker 的 **Settings → Variables & Bindings**，确认绑定了 `TOPIC_MAP` KV，并填入 4 个核心变量：
    - `BOT_TOKEN`（**Secret**）· `WEBHOOK_SECRET`（**Secret**，随机填一串英文数字）
    - `ADMIN_IDS`（**务必选 Text 文本变量**，填你的纯数字 UID）· `BOT_USERNAME`（**Text**，不含 `@`）
-4. 浏览器访问一次 `https://<你的Worker域名>/setup?secret=<WEBHOOK_SECRET>` 看到 `"ok": true` 即上线；如需双向私聊，在开启「话题 (Topics)」的私密群把机器人设为管理员后发一句 **`/bind`** 即可！
+4. 浏览器访问一次 `https://<你的Worker域名>/setup?secret=<WEBHOOK_SECRET>` 看到 `"ok": true` 即上线！此时给你的 Bot 发一次 `/start` 即可直接启用 **Bot 私聊直推**（配好 `ADMIN_IDS` 就能收发私信与开启人机验证，无需建群）；*(可选 · 推荐高频用户)* 如需为每位访客分独立话题，再建开启「话题 (Topics)」的私密群、把机器人设为管理员后发一句 **`/bind`** 即可自动切换！
 5. *(推荐)* 在 `@BotFather` 发 `/newapp`，URL 填 `https://<你的Worker域名>/`，短名与 `APP_SHORT_NAME` 一致（如 `panel`），群内与话题按钮才能直接打开面板。
 
 > 💡 **为什么不直接用一键部署按钮？** Cloudflare 一键按钮会建一个**独立副本（非 Fork）**，后续既没有 GitHub `Sync fork` 按钮，也无法在 TG 面板里一键同步更新；先点右上角 Fork 再导入只需多点一下，以后永久省心。
@@ -246,7 +246,7 @@ npx wrangler dev --ip 127.0.0.1 --port 8787 --persist-to ./.wrangler/state --sho
 | `WEBHOOK_SECRET` | Secret | ✅ | 随机密钥，保护 Webhook（含 `/` 与 `/webhook`）与 `/setup` |
 | `BOT_USERNAME` | Text | 推荐 | 机器人用户名（不含 `@`） |
 | `APP_SHORT_NAME` | Text | 推荐 | BotFather `/newapp` 设置的小程序短名（如 `panel`） |
-| `SUPERGROUP_ID` | Text | 可选 | 话题通知群 ID（**推荐部署后直接在群内发 `/bind` 一键绑定，免手填**） |
+| `SUPERGROUP_ID` | Text | 可选 | 话题通知群 ID（不绑群时只要配了 `ADMIN_IDS` 即自动走 Bot 私聊直推；高频用户推荐在话题群发 `/bind` 绑定，免手填。注：私聊直推模式每条访客消息会多 1～3 次 KV 写入，Cloudflare 免费额度 1000 次/天，个人日常使用充足） |
 | `TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET` | Text / Secret | 可选 | 开启 CF Turnstile 严格验证模式时填写 |
 | `PROBE_PROVIDER` | Text | 可选 | 探针类型：`komari`（默认）/ `nezha` / `nodeget` / `json` |
 | `PROBE_URL` / `PROBE_API_KEY` | Text / Secret | 可选 | 探针地址与私有凭证（兼容旧名 `KOMARI_URL` / `KOMARI_API_KEY`，也可在小程序内填写） |
@@ -256,8 +256,8 @@ npx wrangler dev --ip 127.0.0.1 --port 8787 --persist-to ./.wrangler/state --sho
 ## 🤖 常用指令
 
 - **通用**：`/start` · `/panel` · `/me` · `/checkin`（群社区模式）· `/rank`（群社区模式）
-- **站长私聊**：`/set`（秒设动态贴纸主徽章）· `/add`（录入收藏表情包看图验证题）· `/resetbadge` · `/cancel`
-- **通知群话题内**：`/bind`（一键绑定通知群）· `/unbind`（解绑）· `/del`（回复消息撤回私聊）· `/info` · `/ban` · `/unban` · `/trust` · `/reset` · `/close` · `/open`
+- **站长私聊**：`/set`（秒设动态贴纸主徽章）· `/add`（录入收藏表情包看图验证题）· `/resetbadge` · `/cancel`；未绑群走私聊直推时，引用推送消息也可直接发 `/del` `/info` `/ban` `/unban` `/trust` `/reset` `/close` `/open`
+- **通知群话题内（可选）**：`/bind`（一键绑定通知群，自动切话题模式）· `/unbind`（解绑回退私聊直推）· `/del`（回复消息撤回私聊）· `/info` · `/ban` · `/unban` · `/trust` · `/reset` · `/close` · `/open`
 
 ---
 

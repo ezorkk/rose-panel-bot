@@ -3,7 +3,10 @@ import {
   ArrowDown,
   ArrowUp,
   Check,
+  ChevronDown,
+  ChevronRight,
   ExternalLink,
+  GitFork,
   Globe,
   Lock,
   Plus,
@@ -85,6 +88,12 @@ export default function SettingsDrawer({
   const [updateInfo, setUpdateInfo] = useState(null);
   const [syncingFork, setSyncingFork] = useState(false);
   const [syncResult, setSyncResult] = useState(null);
+  const [forkCardOpen, setForkCardOpen] = useState(() => Boolean(adminConfig?.updater?.forkRepo?.trim()));
+  const [forkAdvancedOpen, setForkAdvancedOpen] = useState(false);
+
+  useEffect(() => {
+    if (updateInfo?.hasUpdate) setForkCardOpen(true);
+  }, [updateInfo?.hasUpdate]);
 
   const handleCheckUpdate = async (force = false) => {
     try {
@@ -1101,6 +1110,41 @@ export default function SettingsDrawer({
         {/* Section 4: PM Anti-Spam & Verification */}
         {section === 'modes' && (
           <div className="card">
+            {adminConfig?.inboxMode && (
+              <div style={{ marginBottom: 12 }}>
+                <div
+                  style={{
+                    fontSize: 12,
+                    padding: '8px 11px',
+                    borderRadius: 12,
+                    background: 'var(--bg-subtle)',
+                    color: 'var(--text-secondary)',
+                    lineHeight: 1.5,
+                  }}
+                >
+                  {adminConfig.inboxMode === 'topic'
+                    ? '当前通知方式：话题群'
+                    : adminConfig.inboxMode === 'dm'
+                      ? '当前通知方式：Bot 私聊推送（绑定话题群后自动切换）'
+                      : '当前通知方式：未配置（配置 ADMIN_IDS 或在话题群发送 /bind 开启）'}
+                </div>
+                {adminConfig.ownerUnreachable && (
+                  <div
+                    style={{
+                      marginTop: 6,
+                      fontSize: 12,
+                      padding: '8px 11px',
+                      borderRadius: 12,
+                      background: 'var(--amber-soft)',
+                      color: 'var(--amber)',
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    ⚠️ 请先私聊 Bot 发送 /start，否则收不到推送（消息仍可在面板查看）
+                  </div>
+                )}
+              </div>
+            )}
             <div>
               <label className="field-label">私聊防骚扰人机验证模式（陌生人点 /start 或发消息立即触发）</label>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 10 }}>
@@ -1987,36 +2031,48 @@ export default function SettingsDrawer({
           const manualSyncUrl = cleanedFork
             ? `https://github.com/${cleanedFork}`
             : updateInfo?.releaseUrl || 'https://github.com/mango0114/rose-panel-bot/releases';
+          const hasToken = Boolean(updater.githubToken?.trim() || updater.tokenFromEnv);
+          const currentVerLabel = updateInfo?.currentVersion || appVersion ? `v${updateInfo?.currentVersion || appVersion}` : '—';
 
           return (
             <>
-              <div className="card">
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-                  <div>
-                    <div className="row-title" style={{ fontSize: 15 }}>
-                      版本检查与更新
+              <div className="card update-hero-card">
+                <div className="update-hero-head">
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
+                      <span className="row-title" style={{ fontSize: 15 }}>
+                        RosePanel {currentVerLabel}
+                      </span>
+                      <span
+                        className={`pill ${updateInfo?.hasUpdate ? 'rose' : ''}`}
+                        style={{ fontSize: 11, padding: '2px 8px' }}
+                      >
+                        {checkingUpdate
+                          ? '检查中…'
+                          : updateInfo?.hasUpdate
+                            ? `🎉 有新版 v${updateInfo.latestVersion}`
+                            : updateInfo?.ok
+                              ? '✅ 已是最新'
+                              : '未检查'}
+                      </span>
                     </div>
-                    <div className="row-desc" style={{ marginTop: 2 }}>
-                      当前版本：<b>{updateInfo?.currentVersion || appVersion ? `v${updateInfo?.currentVersion || appVersion}` : '—'}</b>
-                      {updateInfo?.latestVersion && (
-                        <>
-                          {' '}· 最新版本：<b>v{updateInfo.latestVersion}</b>
-                        </>
-                      )}
+                    <div className="row-desc wrap" style={{ marginTop: 4 }}>
+                      {updateInfo?.hasUpdate
+                        ? `新版 v${updateInfo.latestVersion} 已发布，升级保留全部数据`
+                        : updateInfo?.ok
+                          ? '当前已是 GitHub 官方最新版'
+                          : '点击检查 GitHub 官方最新版'}
                     </div>
                   </div>
-                  <span
-                    className={`pill ${updateInfo?.hasUpdate ? 'rose' : ''}`}
-                    style={{ flexShrink: 0, fontSize: 11.5 }}
+                  <button
+                    type="button"
+                    className={`btn btn-sm ${updateInfo?.hasUpdate ? 'btn-soft' : 'btn-primary'}`}
+                    style={{ flexShrink: 0 }}
+                    disabled={checkingUpdate}
+                    onClick={() => handleCheckUpdate(true)}
                   >
-                    {checkingUpdate
-                      ? '检查中…'
-                      : updateInfo?.hasUpdate
-                        ? `🎉 有新版 v${updateInfo.latestVersion}`
-                        : updateInfo?.ok
-                          ? '✅ 已是最新'
-                          : '点击检查'}
-                  </span>
+                    <RefreshCw size={13} className={checkingUpdate ? 'spin' : ''} /> 检查新版本
+                  </button>
                 </div>
 
                 {updateInfo?.error && (
@@ -2034,140 +2090,158 @@ export default function SettingsDrawer({
                   </div>
                 )}
 
-                {updateInfo?.notes && (
-                  <div
-                    style={{
-                      marginTop: 10,
-                      padding: '10px 12px',
-                      borderRadius: 12,
-                      fontSize: 12,
-                      lineHeight: 1.55,
-                      color: 'var(--text-secondary)',
-                      background: 'var(--surface-soft)',
-                      whiteSpace: 'pre-wrap',
-                      maxHeight: 150,
-                      overflowY: 'auto',
-                    }}
-                  >
-                    {updateInfo.notes}
-                  </div>
+                {updateInfo?.hasUpdate && updateInfo?.notes && (
+                  <div className="update-notes-box">{updateInfo.notes}</div>
                 )}
 
-                <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+                <div className="update-link-bar">
                   <button
                     type="button"
-                    className="btn btn-soft btn-sm"
-                    disabled={checkingUpdate}
-                    onClick={() => handleCheckUpdate(true)}
-                  >
-                    <RefreshCw size={14} className={checkingUpdate ? 'spin' : ''} /> 检查新版本
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-primary btn-sm"
-                    onClick={() => openExternalUrl(manualSyncUrl)}
-                  >
-                    <ExternalLink size={14} /> {cleanedFork ? '前往我的 Fork 点 Sync fork' : '查看官方更新日志'}
-                  </button>
-                </div>
-
-                <div style={{ display: 'flex', gap: 7, marginTop: 8, flexWrap: 'wrap' }}>
-                  <button
-                    type="button"
-                    className="btn btn-subtle btn-sm"
+                    className="update-link-item"
                     onClick={() => openExternalUrl(REPO_URL)}
                   >
                     <Globe size={13} /> 项目主页
                   </button>
+                  <span className="update-link-sep" aria-hidden="true" />
                   <button
                     type="button"
-                    className="btn btn-subtle btn-sm"
-                    onClick={() => openExternalUrl(CHANGELOG_URL)}
+                    className="update-link-item"
+                    onClick={() => (onOpenWhatsNew ? onOpenWhatsNew() : openExternalUrl(CHANGELOG_URL))}
                   >
-                    <ExternalLink size={13} /> 更新日志
+                    <Sparkles size={13} /> 更新日志
                   </button>
-                  {onOpenWhatsNew && (
-                    <button
-                      type="button"
-                      className="btn btn-subtle btn-sm"
-                      onClick={onOpenWhatsNew}
-                    >
-                      <Sparkles size={13} /> 近期更新
-                    </button>
-                  )}
-                </div>
-
-                <div className="row-desc wrap" style={{ marginTop: 10, lineHeight: 1.5 }}>
-                  💡 <b>零密钥安全更新（推荐）</b>：打开你 <b>Fork</b> 的 GitHub 仓库 → 点击 <b>Sync fork → Update branch</b>，Cloudflare 约 30 秒自动完成构建，全部配置与访客数据 100% 保留。<br />
-                  ⚠️ 仅通过 GitHub <b>Fork</b> 得到的仓库才有 Sync fork 按钮；若通过 Deploy to Cloudflare 一键按钮创建的是独立副本，请参考仓库教程 FAQ Q3 手动同步或改绑 Fork 仓库。
                 </div>
               </div>
 
-              <div className="card">
-                <div className="row-title" style={{ fontSize: 14, marginBottom: 4 }}>
-                  🚀 站内一键同步上游（进阶可选 · 仅限 Fork 仓库）
-                </div>
-                <div className="row-desc wrap" style={{ marginBottom: 12, lineHeight: 1.5 }}>
-                  若希望直接在面板内点一下按钮就自动同步 Fork 并触发 Cloudflare 重建，可在此选填仅限单仓库权限的 GitHub Fine-grained Token（需开通 <code>Contents: Read and write</code>；若仓库包含 <code>.github/workflows</code> 自动化文件还需勾选 <code>Workflows: Read and write</code>）；不填则完全走上方手动跳转。
-                </div>
-
-                <div className="field">
-                  <label className="field-label">我 Fork 的 GitHub 仓库（owner/repo）</label>
-                  <input
-                    className="input"
-                    value={updater.forkRepo || ''}
-                    onChange={(e) => updateField('updater', 'forkRepo', e.target.value)}
-                    placeholder="例如：yourname/rose-panel-bot"
-                  />
-                </div>
-                <div className="field">
-                  <label className="field-label">同步分支名（默认 main）</label>
-                  <input
-                    className="input"
-                    value={updater.branch || 'main'}
-                    onChange={(e) => updateField('updater', 'branch', e.target.value)}
-                    placeholder="main"
-                  />
-                </div>
-                <div className="field">
-                  <label className="field-label">GitHub Fine-grained Token（选填，只保存在你自己的 Cloudflare KV，界面不回显）</label>
-                  <input
-                    className="input"
-                    type="password"
-                    value={updater.githubToken || ''}
-                    onChange={(e) => updateField('updater', 'githubToken', e.target.value)}
-                    placeholder={
-                      updater.tokenFromEnv
-                        ? '已通过环境变量 GITHUB_UPDATE_TOKEN 配置（不写入 KV）'
-                        : 'github_pat_...（不填则使用上方手动跳转更新）'
-                    }
-                  />
-                </div>
-
+              <div className="card update-fork-card">
                 <button
                   type="button"
-                  className="btn btn-soft btn-block"
-                  style={{ marginTop: 8 }}
-                  disabled={syncingFork || !updater.forkRepo?.trim()}
-                  onClick={handleSyncFork}
+                  className="update-collapse-head"
+                  aria-expanded={forkCardOpen}
+                  onClick={() => setForkCardOpen((prev) => !prev)}
                 >
-                  <Rocket size={15} /> {syncingFork ? '正在同步上游代码…' : '一键同步 Fork 并触发云端更新'}
+                  <span className="update-collapse-title">
+                    <GitFork size={14} />
+                    <span>Fork 同步更新</span>
+                    <span className="update-collapse-badge">
+                      {cleanedFork ? cleanedFork : '仅 Fork 部署'}
+                    </span>
+                  </span>
+                  {forkCardOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
                 </button>
 
-                {syncResult && (
-                  <div
-                    style={{
-                      marginTop: 10,
-                      padding: '9px 12px',
-                      borderRadius: 12,
-                      fontSize: 12,
-                      lineHeight: 1.5,
-                      background: syncResult.ok ? 'var(--green-soft)' : 'var(--red-soft)',
-                      color: syncResult.ok ? 'var(--green)' : 'var(--red)',
-                    }}
-                  >
-                    {syncResult.ok ? '' : '❌ '}
-                    {syncResult.text}
+                {forkCardOpen && (
+                  <div className="update-fork-body">
+                    <div className="row-desc wrap" style={{ marginBottom: 10, lineHeight: 1.5 }}>
+                      升级仅同步代码，名片、小站、探针与访客 KV 数据 <b>100% 原样保留</b>。
+                    </div>
+
+                    <div className="field">
+                      <label className="field-label">我 Fork 的 GitHub 仓库（owner/repo）</label>
+                      <input
+                        className="input"
+                        value={updater.forkRepo || ''}
+                        onChange={(e) => updateField('updater', 'forkRepo', e.target.value)}
+                        placeholder="例如：yourname/rose-panel-bot"
+                      />
+                    </div>
+
+                    <div className="field">
+                      <label className="field-label">GitHub Token（选填 · 仅存自己 KV，留空则手动跳转同步）</label>
+                      <input
+                        className="input"
+                        type="password"
+                        value={updater.githubToken || ''}
+                        onChange={(e) => updateField('updater', 'githubToken', e.target.value)}
+                        placeholder={
+                          updater.tokenFromEnv
+                            ? '已通过环境变量 GITHUB_UPDATE_TOKEN 配置'
+                            : 'github_pat_...（不填即可零密钥更新）'
+                        }
+                      />
+                    </div>
+
+                    <div className="update-fork-actions">
+                      {hasToken ? (
+                        <>
+                          <button
+                            type="button"
+                            className="btn btn-primary btn-sm"
+                            style={{ flex: 1 }}
+                            disabled={syncingFork || !cleanedFork}
+                            onClick={handleSyncFork}
+                          >
+                            <Rocket size={14} /> {syncingFork ? '正在同步…' : '一键同步 Fork 并触发云端更新'}
+                          </button>
+                          {cleanedFork && (
+                            <button
+                              type="button"
+                              className="btn btn-subtle btn-sm"
+                              title="前往我的 Fork 点 Sync fork"
+                              onClick={() => openExternalUrl(manualSyncUrl)}
+                            >
+                              <ExternalLink size={13} /> Fork
+                            </button>
+                          )}
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn btn-primary btn-block btn-sm"
+                          disabled={!cleanedFork}
+                          onClick={() => openExternalUrl(manualSyncUrl)}
+                        >
+                          <ExternalLink size={14} />{' '}
+                          {cleanedFork ? '前往我的 Fork 点 Sync fork' : '请先填写上方的 Fork 仓库名'}
+                        </button>
+                      )}
+                    </div>
+
+                    {syncResult && (
+                      <div
+                        style={{
+                          marginTop: 10,
+                          padding: '9px 12px',
+                          borderRadius: 12,
+                          fontSize: 12,
+                          lineHeight: 1.5,
+                          background: syncResult.ok ? 'var(--green-soft)' : 'var(--red-soft)',
+                          color: syncResult.ok ? 'var(--green)' : 'var(--red)',
+                        }}
+                      >
+                        {syncResult.ok ? '' : '❌ '}
+                        {syncResult.text}
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      className="update-adv-toggle"
+                      aria-expanded={forkAdvancedOpen}
+                      onClick={() => setForkAdvancedOpen((prev) => !prev)}
+                    >
+                      {forkAdvancedOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                      <span>高级选项与权限说明</span>
+                    </button>
+
+                    {forkAdvancedOpen && (
+                      <div className="update-adv-panel">
+                        <div className="field" style={{ marginBottom: 8 }}>
+                          <label className="field-label">同步分支名（默认 main）</label>
+                          <input
+                            className="input"
+                            value={updater.branch || 'main'}
+                            onChange={(e) => updateField('updater', 'branch', e.target.value)}
+                            placeholder="main"
+                          />
+                        </div>
+                        <div className="row-desc wrap" style={{ lineHeight: 1.5 }}>
+                          • <b>零密钥手动更新</b>：打开 Fork 仓库 → 点 <b>Sync fork → Update branch</b>，Cloudflare 约 30 秒重建。<br />
+                          • <b>站内一键同步权限</b>：Fine-grained Token 仅授权当前 Fork 仓库，开启 <code>Contents: Read and write</code>（含 workflow 时再开 <code>Workflows: Read and write</code>）。<br />
+                          • <b>非 Fork 独立副本</b>：无 Sync fork 按钮，请按教程 FAQ Q3 合并上游或重新 Fork。
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

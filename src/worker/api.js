@@ -18,6 +18,7 @@ import {
   savePanelConfig,
 } from './config.js';
 import { fetchProbeStatus } from './komari.js';
+import { isOwnerUnreachable, resolveInboxMode } from './inbox.js';
 import { checkLatestRelease, syncForkWithUpstream } from './updater.js';
 import { APP_VERSION } from './version.js';
 import {
@@ -54,6 +55,12 @@ async function readJsonBody(request) {
   } catch {
     return null;
   }
+}
+
+async function loadAdminInboxStatus(env) {
+  const inboxMode = await resolveInboxMode(env);
+  const ownerUnreachable = inboxMode === 'dm' ? await isOwnerUnreachable(env) : false;
+  return { inboxMode, ownerUnreachable };
 }
 
 export async function handleApiRequest(request, env, url, ctx = null) {
@@ -118,14 +125,17 @@ export async function handleApiRequest(request, env, url, ctx = null) {
     let visitorSummary = null;
     let recentVisitors = [];
     let blockedSpamCount = 0;
+    let inboxStatus = null;
     if (auth.isAdmin) {
-      const [overview, spamCount] = await Promise.all([
+      const [overview, spamCount, status] = await Promise.all([
         getVisitorOverview(env),
         getBlockedSpamCount(env),
+        loadAdminInboxStatus(env),
       ]);
       visitorSummary = overview.stats;
       recentVisitors = overview.recent;
       blockedSpamCount = spamCount;
+      inboxStatus = status;
     }
 
     return json({
@@ -135,7 +145,7 @@ export async function handleApiRequest(request, env, url, ctx = null) {
       isPreview: auth.isPreview,
       startParam: auth.startParam,
       config: sanitizePublicConfig(config, env, auth.isAdmin),
-      adminConfig: auth.isAdmin ? sanitizeAdminConfig(config, env) : null,
+      adminConfig: auth.isAdmin ? sanitizeAdminConfig(config, env, inboxStatus) : null,
       checkin,
       levels: LEVELS,
       badges: BADGE_CATALOG,
@@ -400,11 +410,14 @@ export async function handleApiRequest(request, env, url, ctx = null) {
       });
       if (!found) return json({ ok: false, error: '未找到该站点' }, 404);
 
-      const saved = await savePanelConfig(env, { sites: nextSites });
+      const [saved, inboxStatus] = await Promise.all([
+        savePanelConfig(env, { sites: nextSites }),
+        loadAdminInboxStatus(env),
+      ]);
       return json({
         ok: true,
         config: sanitizePublicConfig(saved, env, true),
-        adminConfig: sanitizeAdminConfig(saved, env),
+        adminConfig: sanitizeAdminConfig(saved, env, inboxStatus),
       });
     }
 
@@ -440,7 +453,8 @@ export async function handleApiRequest(request, env, url, ctx = null) {
 
     // GET /api/admin/config
     if (path === '/api/admin/config' && method === 'GET') {
-      return json({ ok: true, config: sanitizeAdminConfig(config, env) });
+      const inboxStatus = await loadAdminInboxStatus(env);
+      return json({ ok: true, config: sanitizeAdminConfig(config, env, inboxStatus) });
     }
 
     // PUT /api/admin/config
@@ -481,11 +495,14 @@ export async function handleApiRequest(request, env, url, ctx = null) {
           await syncPromise;
         }
       }
-      const latestCfg = await loadPanelConfig(env);
+      const [latestCfg, inboxStatus] = await Promise.all([
+        loadPanelConfig(env),
+        loadAdminInboxStatus(env),
+      ]);
       return json({
         ok: true,
         config: sanitizePublicConfig(latestCfg, env, true),
-        adminConfig: sanitizeAdminConfig(latestCfg, env),
+        adminConfig: sanitizeAdminConfig(latestCfg, env, inboxStatus),
       });
     }
 

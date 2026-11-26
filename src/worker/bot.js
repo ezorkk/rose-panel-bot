@@ -22,6 +22,15 @@ import {
   savePanelConfig,
 } from './config.js';
 import {
+  clearOwnerUnreachable,
+  deliverVisitorMessage,
+  getOwnerChatId,
+  lookupDmMessageMap,
+  previewTextOfMessage,
+  resolveInboxMode,
+  saveDmMessageMap,
+} from './inbox.js';
+import {
   buildPanelButton,
   escapeHtml,
   normalizeStickerObject,
@@ -257,17 +266,6 @@ function extractCommand(text = '') {
   return { cmd: cmdPart.toLowerCase(), mention: (mention || '').toLowerCase(), args };
 }
 
-function previewTextOfMessage(msg) {
-  if (msg.text) return msg.text.slice(0, 100);
-  if (msg.caption) return msg.caption.slice(0, 100);
-  if (msg.photo) return '[图片]';
-  if (msg.video) return '[视频]';
-  if (msg.voice) return '[语音]';
-  if (msg.sticker) return `[贴纸 ${msg.sticker.emoji || ''}]`.trim();
-  if (msg.document) return `[文件 ${msg.document.file_name || ''}]`.trim();
-  return '[消息]';
-}
-
 function serializePendingMessage(msg) {
   return {
     chatId: msg.chat.id,
@@ -354,7 +352,9 @@ async function fetchVisitorAvatarFileId(env, userId) {
 
 async function sendVisitorCardMessage(env, chatId, threadId, requestOrigin, detail, config = null) {
   const text = buildVisitorCardText(detail);
-  const replyMarkup = buildVisitorModerationKeyboard(env, requestOrigin, detail);
+  const isGroup = threadId !== null && threadId !== undefined;
+  const threadPart = isGroup ? { message_thread_id: threadId } : {};
+  const replyMarkup = buildVisitorModerationKeyboard(env, requestOrigin, detail, { isGroup });
   const cfg = config || (await loadPanelConfig(env));
   const wantPhoto = Boolean(cfg?.pmBot?.showVisitorAvatarInCard);
 
@@ -365,7 +365,7 @@ async function sendVisitorCardMessage(env, chatId, threadId, requestOrigin, deta
       try {
         return await tgCall(env, 'sendPhoto', {
           chat_id: chatId,
-          message_thread_id: threadId,
+          ...threadPart,
           photo: fileId,
           caption,
           parse_mode: 'HTML',
@@ -379,19 +379,23 @@ async function sendVisitorCardMessage(env, chatId, threadId, requestOrigin, deta
 
   return tgCall(env, 'sendMessage', {
     chat_id: chatId,
-    message_thread_id: threadId,
+    ...threadPart,
     text,
     parse_mode: 'HTML',
     reply_markup: replyMarkup,
   });
 }
 
-function buildVisitorModerationKeyboard(env, requestOrigin, detail) {
+function buildVisitorModerationKeyboard(env, requestOrigin, detail, { isGroup = true } = {}) {
   const uid = detail.userId;
-  const profileBtn = buildPanelButton(env, requestOrigin, '🎫 查看完整资料卡 / 管理面板', {
-    isGroup: true,
-    startParam: `visitor_${uid}`,
-  });
+  const profileBtn = buildPanelButton(
+    env,
+    requestOrigin,
+    '🎫 查看完整资料卡 / 管理面板',
+    isGroup
+      ? { isGroup: true, startParam: `visitor_${uid}` }
+      : { isGroup: false, query: `tab=visitors&uid=${encodeURIComponent(uid)}` }
+  );
 
   const row2 = [
     detail.isBanned
@@ -568,14 +572,13 @@ export function matchKeywordReply(text, rules = []) {
   return null;
 }
 
-async function forwardMessageToTopic(env, requestOrigin, msg) {
+async function forwardMessageToTopic(env, requestOrigin, msg, knownPreview = undefined) {
   const supergroupId = await resolveSupergroupId(env);
   if (!supergroupId) return null;
 
   const user = msg.from;
   const uid = String(user.id);
-  const preview = previewTextOfMessage(msg);
-  await upsertVisitorProfile(env, user, { incrementMsg: false, lastPreview: preview });
+  const preview = knownPreview !== undefined ? knownPreview : previewTextOfMessage(msg);
 
   let { threadId } = await ensureVisitorTopic(env, requestOrigin, user, preview);
   try {
@@ -603,13 +606,6 @@ async function forwardMessageToTopic(env, requestOrigin, msg) {
     }
   }
 
-  await recordVisitorExchange(env, uid, msg, {
-    sender: 'visitor',
-    pmMessageId: msg.message_id,
-    incrementCount: true,
-    preview,
-  }).catch(() => {});
-
   return { supergroupId, threadId };
 }
 
@@ -622,11 +618,13 @@ async function processVisitorMessage(env, requestOrigin, msg, config = null) {
   const msgText = String(msg.keywordText ?? (msg.text || msg.caption || '')).trim();
   const matched = msgText ? matchKeywordReply(msgText, pmBot.keywordReplies) : null;
 
-  // 1. Keyword rule matched -> send tailored reply (and optionally forward to admin topic)
+  // 1. Keyword rule matched -> send tailored reply (and optionally deliver to admin inbox)
   if (matched) {
-    let forwarded = null;
+    let delivered = null;
     if (matched.rule.forwardToAdmin !== false) {
-      forwarded = await forwardMessageToTopic(env, requestOrigin, msg);
+      delivered = await deliverVisitorMessage(env, requestOrigin, msg, {
+        forwardToTopic: forwardMessageToTopic,
+      });
     }
     await tgCall(env, 'sendMessage', {
       chat_id: msg.chat.id,
@@ -635,20 +633,32 @@ async function processVisitorMessage(env, requestOrigin, msg, config = null) {
       text: matched.rule.reply,
     }).catch(() => {});
 
-    if (forwarded?.supergroupId && forwarded?.threadId) {
+    if (delivered?.mode === 'topic' && delivered.supergroupId && delivered.threadId) {
       await tgCall(env, 'sendMessage', {
-        chat_id: forwarded.supergroupId,
-        message_thread_id: forwarded.threadId,
+        chat_id: delivered.supergroupId,
+        message_thread_id: delivered.threadId,
         text: `🤖 <i>已触发关键词自动回复（${escapeHtml(matched.matchedKeyword)}）</i>`,
         parse_mode: 'HTML',
         disable_notification: true,
       }).catch(() => {});
+    } else if (delivered?.mode === 'dm' && delivered.delivered && delivered.ownerChatId) {
+      const sentNote = await tgCall(env, 'sendMessage', {
+        chat_id: delivered.ownerChatId,
+        text: `🤖 <i>已触发关键词自动回复（${escapeHtml(matched.matchedKeyword)}）</i>`,
+        parse_mode: 'HTML',
+        disable_notification: true,
+      }).catch(() => null);
+      if (sentNote?.result?.message_id && msg.from?.id) {
+        await saveDmMessageMap(env, sentNote.result.message_id, String(msg.from.id)).catch(() => {});
+      }
     }
     return;
   }
 
-  // 2. Normal visitor message -> forward to admin topic
-  await forwardMessageToTopic(env, requestOrigin, msg);
+  // 2. Normal visitor message -> deliver to active inbox (topic or owner DM)
+  await deliverVisitorMessage(env, requestOrigin, msg, {
+    forwardToTopic: forwardMessageToTopic,
+  });
 
   // 3. Optional general auto-reply with per-visitor KV cooldown (prevents spamming repeated receipts)
   const autoText = String(pmBot.autoReplyText || '').trim();
@@ -1118,6 +1128,182 @@ async function handleRankCommand(env, requestOrigin, msg, config) {
   });
 }
 
+const VISITOR_ACTION_MAP = {
+  ban: { action: 'ban', reply: '🚫 已拉黑该用户，其后续消息将被静默忽略。' },
+  unban: { action: 'unban', reply: '✅ 已解除拉黑，恢复消息接收。' },
+  trust: { action: 'trust', reply: '⭐ 已设为永久信任，免除人机验证。' },
+  reset: { action: 'reset', reply: '🔄 已重置验证状态，用户下次发消息需重新验证。' },
+  close: {
+    action: 'close',
+    reply: '🔒 已关闭本次对话。',
+    notifyUser: '🔒 当前对话已由站长关闭，感谢您的联系。',
+  },
+  open: {
+    action: 'open',
+    reply: '🔓 已重新开启对话。',
+    notifyUser: '🔓 站长已重新开启对话，您可以继续发送消息。',
+  },
+};
+
+/**
+ * Shared visitor moderation / recall / info command handler used by both
+ * Forum Topic mode (`ctx.mode === 'topic'`) and Bot DM push mode (`ctx.mode === 'dm'`).
+ * Returns `true` if `cmd` was handled, `false` otherwise.
+ */
+async function runVisitorCommand(env, origin, targetUid, cmd, ctx) {
+  const isTopic = ctx.mode === 'topic';
+  const threadPart = isTopic && ctx.threadId ? { message_thread_id: ctx.threadId } : {};
+
+  if (cmd === 'del' || cmd === 'recall') {
+    const recallRes = isTopic
+      ? await recallAdminVisitorMessage(env, targetUid, ctx.replyToMessageId || null, tgCall)
+      : await recallAdminVisitorMessage(env, targetUid, null, tgCall, null, {
+          replyToDmMsgId: ctx.replyToMessageId || null,
+        });
+    await tgCall(env, 'sendMessage', {
+      chat_id: ctx.chatId,
+      ...threadPart,
+      reply_to_message_id: ctx.messageId,
+      text: recallRes.ok ? '🗑️ 已撤回发给访客的该条私聊消息。' : `⚠️ ${recallRes.error}`,
+    }).catch(() => {});
+    return true;
+  }
+
+  if (cmd === 'info') {
+    const detail = await getVisitorDetail(env, targetUid);
+    if (detail) {
+      const sent = await sendVisitorCardMessage(
+        env,
+        ctx.chatId,
+        isTopic ? ctx.threadId : null,
+        origin,
+        detail,
+        ctx.config
+      );
+      if (!isTopic && sent?.result?.message_id) {
+        await saveDmMessageMap(env, sent.result.message_id, targetUid).catch(() => {});
+      }
+    }
+    return true;
+  }
+
+  const actionCfg = VISITOR_ACTION_MAP[cmd];
+  if (!actionCfg) return false;
+
+  const detail = await applyVisitorAction(env, targetUid, actionCfg.action);
+  const sent = await tgCall(env, 'sendMessage', {
+    chat_id: ctx.chatId,
+    ...threadPart,
+    text: actionCfg.reply,
+    reply_markup: buildVisitorModerationKeyboard(env, origin, detail, { isGroup: isTopic }),
+  });
+  if (!isTopic && sent?.result?.message_id) {
+    await saveDmMessageMap(env, sent.result.message_id, targetUid).catch(() => {});
+  }
+  if (actionCfg.notifyUser) {
+    await tgCall(env, 'sendMessage', { chat_id: Number(targetUid), text: actionCfg.notifyUser }).catch(() => {});
+  }
+  return true;
+}
+
+const DM_VISITOR_COMMANDS_HINT = '/del /ban /unban /trust /reset /close /open /info';
+
+/**
+ * In DM push mode only the owner (first ADMIN_IDS UID) receives pushes and can reply.
+ * Other admins get a one-time (24h) notice instead of having their messages routed anywhere.
+ */
+async function notifyCoAdminInDmMode(env, msg) {
+  const uid = String(msg.from.id);
+  if (env.TOPIC_MAP) {
+    const hintKey = `hint:dm_coadmin:${uid}`;
+    if (await env.TOPIC_MAP.get(hintKey)) return;
+    await env.TOPIC_MAP.put(hintKey, '1', { expirationTtl: 86400 });
+  }
+  await tgCall(env, 'sendMessage', {
+    chat_id: msg.chat.id,
+    reply_to_message_id: msg.message_id,
+    text: '💡 当前为 Bot 私聊推送模式，只有主人（ADMIN_IDS 中的第一个 UID）能在这里收到推送并回复访客。多人协作请绑定话题群（/bind），或在面板「访客」里回复。',
+  }).catch(() => {});
+}
+
+/**
+ * Handles owner replies and moderation commands in private chat when running in DM push mode.
+ * Never guesses a recipient when the owner did not quote a mapped push message.
+ */
+async function handleOwnerDmReply(env, requestOrigin, msg, config, parsed) {
+  const uid = String(msg.from.id);
+  const replyToId = msg.reply_to_message?.message_id || null;
+  const targetUid = replyToId ? await lookupDmMessageMap(env, replyToId) : '';
+
+  if (!targetUid) {
+    if (parsed && (parsed.cmd === 'del' || parsed.cmd === 'recall')) {
+      await tgCall(env, 'sendMessage', {
+        chat_id: msg.chat.id,
+        reply_to_message_id: msg.message_id,
+        text: '⚠️ 未找到该条消息对应的私聊记录（仅支持撤回站长发出的近期消息）',
+      }).catch(() => {});
+      return;
+    }
+
+    if (env.TOPIC_MAP) {
+      const hintKey = `hint:dm_reply:${uid}`;
+      const hinted = await env.TOPIC_MAP.get(hintKey);
+      if (!hinted) {
+        await env.TOPIC_MAP.put(hintKey, '1', { expirationTtl: 86400 });
+        await tgCall(env, 'sendMessage', {
+          chat_id: msg.chat.id,
+          reply_to_message_id: msg.message_id,
+          text: '💡 请引用回复某条推送，消息才会发给访客。',
+        }).catch(() => {});
+      }
+    }
+    return;
+  }
+
+  if (parsed) {
+    const handled = await runVisitorCommand(env, requestOrigin, targetUid, parsed.cmd, {
+      mode: 'dm',
+      chatId: msg.chat.id,
+      threadId: null,
+      messageId: msg.message_id,
+      replyToMessageId: replyToId,
+      config,
+    });
+    if (handled) return;
+
+    // Unknown or mistyped command: never send the raw command text to the visitor
+    await tgCall(env, 'sendMessage', {
+      chat_id: msg.chat.id,
+      reply_to_message_id: msg.message_id,
+      text: `⚠️ 未识别的命令 /${parsed.cmd}，消息没有发给访客。\n引用推送时可用：${DM_VISITOR_COMMANDS_HINT}`,
+    }).catch(() => {});
+    return;
+  }
+
+  try {
+    const copied = await tgCall(env, 'copyMessage', {
+      chat_id: Number(targetUid),
+      from_chat_id: msg.chat.id,
+      message_id: msg.message_id,
+    });
+    await saveDmMessageMap(env, msg.message_id, targetUid).catch(() => {});
+    await recordVisitorExchange(env, targetUid, msg, {
+      sender: 'admin',
+      pmMessageId: copied?.result?.message_id || null,
+      topicMsgId: null,
+      dmMsgId: msg.message_id,
+      incrementCount: true,
+      preview: previewTextOfMessage(msg),
+    }).catch(() => {});
+  } catch (err) {
+    await tgCall(env, 'sendMessage', {
+      chat_id: msg.chat.id,
+      reply_to_message_id: msg.message_id,
+      text: `⚠️ 回复发送失败（对方可能已停用机器人）：${err.message}`,
+    }).catch(() => {});
+  }
+}
+
 async function handleAdminSupergroupMessage(env, requestOrigin, msg, config) {
   const isAdmin = await isUserAdmin(env, msg.from.id, tgCall);
   if (!isAdmin) return;
@@ -1200,59 +1386,15 @@ async function handleAdminSupergroupMessage(env, requestOrigin, msg, config) {
   }
 
   if (parsed) {
-    const cmd = parsed.cmd;
-    if (cmd === 'del' || cmd === 'recall') {
-      const replyTopicMsgId = msg.reply_to_message?.message_id || null;
-      const recallRes = await recallAdminVisitorMessage(env, targetUid, replyTopicMsgId, tgCall);
-      await tgCall(env, 'sendMessage', {
-        chat_id: msg.chat.id,
-        message_thread_id: threadId,
-        reply_to_message_id: msg.message_id,
-        text: recallRes.ok
-          ? '🗑️ 已撤回发给访客的该条私聊消息。'
-          : `⚠️ ${recallRes.error}`,
-      }).catch(() => {});
-      return;
-    }
-    if (cmd === 'info') {
-      const detail = await getVisitorDetail(env, targetUid);
-      if (detail) {
-        await sendVisitorCardMessage(env, msg.chat.id, threadId, requestOrigin, detail, config);
-      }
-      return;
-    }
-
-    const actionMap = {
-      ban: { action: 'ban', reply: '🚫 已拉黑该用户，其后续消息将被静默忽略。' },
-      unban: { action: 'unban', reply: '✅ 已解除拉黑，恢复消息接收。' },
-      trust: { action: 'trust', reply: '⭐ 已设为永久信任，免除人机验证。' },
-      reset: { action: 'reset', reply: '🔄 已重置验证状态，用户下次发消息需重新验证。' },
-      close: {
-        action: 'close',
-        reply: '🔒 已关闭本次对话。',
-        notifyUser: '🔒 当前对话已由站长关闭，感谢您的联系。',
-      },
-      open: {
-        action: 'open',
-        reply: '🔓 已重新开启对话。',
-        notifyUser: '🔓 站长已重新开启对话，您可以继续发送消息。',
-      },
-    };
-
-    if (actionMap[cmd]) {
-      const cfg = actionMap[cmd];
-      const detail = await applyVisitorAction(env, targetUid, cfg.action);
-      await tgCall(env, 'sendMessage', {
-        chat_id: msg.chat.id,
-        message_thread_id: threadId,
-        text: cfg.reply,
-        reply_markup: buildVisitorModerationKeyboard(env, requestOrigin, detail),
-      });
-      if (cfg.notifyUser) {
-        await tgCall(env, 'sendMessage', { chat_id: Number(targetUid), text: cfg.notifyUser }).catch(() => {});
-      }
-      return;
-    }
+    const handled = await runVisitorCommand(env, requestOrigin, targetUid, parsed.cmd, {
+      mode: 'topic',
+      chatId: msg.chat.id,
+      threadId,
+      messageId: msg.message_id,
+      replyToMessageId: msg.reply_to_message?.message_id || null,
+      config,
+    });
+    if (handled) return;
   }
 
   // Forward admin reply back to the visitor
@@ -1534,7 +1676,8 @@ async function handleCallbackQuery(env, requestOrigin, cq, config) {
       text: toastLabels[action] || '操作成功',
     });
     if (cq.message) {
-      const replyMarkup = buildVisitorModerationKeyboard(env, requestOrigin, detail);
+      const isGroupChat = cq.message.chat?.type !== 'private';
+      const replyMarkup = buildVisitorModerationKeyboard(env, requestOrigin, detail, { isGroup: isGroupChat });
       const isMediaCard = Array.isArray(cq.message.photo) && cq.message.photo.length > 0;
       if (isMediaCard) {
         const caption = buildVisitorCardCaption(detail);
@@ -1765,6 +1908,19 @@ export async function handleTelegramUpdate(update, env, requestOrigin) {
             parse_mode: 'HTML',
             reply_markup: buildVisitorModerationKeyboard(env, requestOrigin, detail),
           }).catch(() => {});
+        } else if (detail && (await resolveInboxMode(env, activeGroupId)) === 'dm') {
+          const ownerId = getOwnerChatId(env);
+          if (ownerId) {
+            const sentAlert = await tgCall(env, 'sendMessage', {
+              chat_id: Number(ownerId),
+              text: `⚠️ <b>拦截到编辑偷改广告行为</b>\n访客 ${escapeHtml(detail.displayName)} (<code>${escapeHtml(uid)}</code>) 编辑了历史消息并插入可疑内容（<code>${escapeHtml(risk.reasons.join(', '))}</code>），已自动拦截。`,
+              parse_mode: 'HTML',
+              reply_markup: buildVisitorModerationKeyboard(env, requestOrigin, detail, { isGroup: false }),
+            }).catch(() => null);
+            if (sentAlert?.result?.message_id) {
+              await saveDmMessageMap(env, sentAlert.result.message_id, uid).catch(() => {});
+            }
+          }
         }
       }
     }
@@ -1808,6 +1964,7 @@ export async function handleTelegramUpdate(update, env, requestOrigin) {
     const uid = String(msg.from.id);
     const parsed = extractCommand(msg.text || '');
     const isAdmin = await isUserAdmin(env, msg.from.id, tgCall);
+    const inboxMode = await resolveInboxMode(env, supergroupId);
 
     // Admin badge capture commands (/set or /setbadge, /resetbadge)
     if (isAdmin && (parsed?.cmd === 'set' || parsed?.cmd === 'setbadge')) {
@@ -2034,11 +2191,14 @@ export async function handleTelegramUpdate(update, env, requestOrigin) {
 
     if (parsed) {
       if (parsed.cmd === 'start') {
+        if (inboxMode === 'dm' && uid === getOwnerChatId(env)) {
+          await clearOwnerUnreachable(env);
+        }
         const verified = await env.TOPIC_MAP.get(`verified:${uid}`);
         const needsVerify = await env.TOPIC_MAP.get(`needs_verify:${uid}`);
         const verifyMode =
           config.pmBot.verificationMode || (config.pmBot.enableVerification ? 'emoji' : 'off');
-        const mustVerifyNow = Boolean(supergroupId) && !isAdmin && verifyMode !== 'off' && (!verified || needsVerify);
+        const mustVerifyNow = inboxMode !== 'off' && !isAdmin && verifyMode !== 'off' && (!verified || needsVerify);
 
         if (mustVerifyNow) {
           // Every /start re-issues a challenge message; cap repeats so it cannot be used to spam the chat
@@ -2078,7 +2238,7 @@ export async function handleTelegramUpdate(update, env, requestOrigin) {
         if (config.pmBot.enableStartWelcome !== false) {
           await handlePrivatePanelCommand(env, requestOrigin, msg, config, {
             isStart: true,
-            canChatNow: Boolean(supergroupId) && !isAdmin,
+            canChatNow: inboxMode !== 'off' && !isAdmin,
           });
         }
         return;
@@ -2098,8 +2258,21 @@ export async function handleTelegramUpdate(update, env, requestOrigin) {
       if (!isAdmin) return;
     }
 
-    if (!supergroupId) {
-      // No notification group bound yet: reply with the welcome card, honoring the /start toggles
+    // Owner reply / moderation handling in DM push mode (never forwards owner messages as visitor PMs).
+    // `dmmap:*` keys are the owner's private-chat message IDs, and Telegram numbers private-chat
+    // messages per conversation, so only the owner may resolve them; other admins would hit
+    // unrelated visitors' mappings.
+    if (isAdmin && inboxMode === 'dm') {
+      if (uid === getOwnerChatId(env)) {
+        await handleOwnerDmReply(env, requestOrigin, msg, config, parsed);
+      } else {
+        await notifyCoAdminInDmMode(env, msg);
+      }
+      return;
+    }
+
+    if (inboxMode === 'off') {
+      // No notification group or ADMIN_IDS configured yet: reply with the welcome card, honoring the /start toggles
       if (config.pmBot.enableStartWelcome !== false) {
         await handlePrivatePanelCommand(env, requestOrigin, msg, config, { isStart: true });
       }
@@ -2186,13 +2359,29 @@ export async function initiateChatFromMiniApp(env, requestOrigin, tgUser, config
     return { ok: true, needsDeepLink: false };
   }
 
-  const supergroupId = await resolveSupergroupId(env);
+  const inboxMode = await resolveInboxMode(env);
   const verified = env.TOPIC_MAP ? await env.TOPIC_MAP.get(`verified:${uid}`) : null;
   const needsVerify = env.TOPIC_MAP ? await env.TOPIC_MAP.get(`needs_verify:${uid}`) : null;
   const verifyMode = cfg.pmBot.verificationMode || (cfg.pmBot.enableVerification ? 'emoji' : 'off');
-  const mustVerify = Boolean(supergroupId) && !isAdmin && verifyMode !== 'off' && (!verified || needsVerify);
+  const mustVerify = inboxMode !== 'off' && !isAdmin && verifyMode !== 'off' && (!verified || needsVerify);
 
   try {
+    // Inbox off (no group bound, no ADMIN_IDS): messages would not reach anyone, so don't invite them
+    if (inboxMode === 'off' && !isAdmin) {
+      const offCdKey = `pm_prompt_cd:${uid}`;
+      const alreadyNotified = env.TOPIC_MAP ? await env.TOPIC_MAP.get(offCdKey) : null;
+      if (!alreadyNotified) {
+        await tgCall(env, 'sendMessage', {
+          chat_id: Number(tgUser.id),
+          text: '🌸 站长暂未开启私信功能，暂时无法通过这里留言，可以先通过名片上的其他方式联系哦。',
+        });
+        if (env.TOPIC_MAP) {
+          await env.TOPIC_MAP.put(offCdKey, '1', { expirationTtl: 300 });
+        }
+      }
+      return { ok: true, needsDeepLink: false, triggeredVerification: false, inboxOff: true };
+    }
+
     if (mustVerify) {
       await startVerificationChallenge(
         env,
