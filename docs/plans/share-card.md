@@ -57,7 +57,7 @@
 用浏览器 Canvas 2D 直接绘制，新建 `web/src/lib/sharePoster.js`：
 
 - **不引入 html2canvas 这类截图库**：体积大，在 Telegram 内置浏览器里也不稳定。
-- 画布尺寸 1080 × 1350（4:5，适合手机相册和社交平台）。
+- 画布宽 1080px，高度随内容自适应（资料少时约 1120px，最多约 1370px），避免名片资料少时中间出现大块空白。
 - 画之前先 `await document.fonts.ready`，避免字体还没加载就画出来。
 - 颜色从现有主题变量（`web/src/styles/theme.css`）读取，保证和名片风格一致，浅色、深色都要好看。
 

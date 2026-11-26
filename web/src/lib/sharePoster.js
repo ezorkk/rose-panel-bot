@@ -1,10 +1,12 @@
-// Client-side Canvas 2D share poster generator (1080 x 1350, 4:5).
+// Client-side Canvas 2D share poster generator (1080px wide; height follows the card content,
+// about 1120px for a sparse card up to about 1370px with handle, 3-line tagline and 2 tag rows).
 // Uses dynamic import('qrcode-generator') so QR code generation never bloats the initial bundle.
 
 import { BRAND_NAME, BRAND_SIGNATURE } from './brand.js';
 
 export const POSTER_WIDTH = 1080;
-export const POSTER_HEIGHT = 1350;
+// Canvas height used only while measuring; the final height is computed from the content.
+const MEASURE_HEIGHT = 1350;
 const SIGNATURE_FONT_PX = 22;
 const SIGNATURE_ALPHA = 0.55;
 const SIGNATURE_BOTTOM_OFFSET = 40;
@@ -229,15 +231,19 @@ function drawAvatar(ctx, img, cx, cy, radius, initialChar, palette) {
   ctx.restore();
 }
 
-function drawTagPills(ctx, tags, centerX, startY, maxWidth, palette) {
-  if (!tags.length) return startY;
+const TAG_PILL_H = 46;
+const TAG_GAP_Y = 14;
 
+/**
+ * Packs tag pills into centered rows (up to 2). Used both to measure the tag block height before
+ * the canvas is sized and to draw it.
+ */
+function layoutTagRows(ctx, tags, maxWidth) {
+  if (!tags.length) return [];
   ctx.save();
   ctx.font = `600 24px ${FONT_STACK}`;
   const padX = 22;
-  const pillH = 46;
   const gapX = 14;
-  const gapY = 14;
 
   const items = tags.slice(0, 6).map((raw) => {
     const label = `# ${truncateLine(ctx, String(raw).trim(), 240)}`;
@@ -267,6 +273,22 @@ function drawTagPills(ctx, tags, centerX, startY, maxWidth, palette) {
   if (row.length > 0 && rows.length < 2) {
     rows.push({ items: row, width: rowW });
   }
+  ctx.restore();
+  return rows;
+}
+
+function tagBlockHeight(rows) {
+  return rows.length ? rows.length * TAG_PILL_H + (rows.length - 1) * TAG_GAP_Y : 0;
+}
+
+function drawTagPills(ctx, rows, centerX, startY, palette) {
+  if (!rows.length) return startY;
+
+  ctx.save();
+  ctx.font = `600 24px ${FONT_STACK}`;
+  const pillH = TAG_PILL_H;
+  const gapX = 14;
+  const gapY = TAG_GAP_Y;
 
   let y = startY;
   for (const r of rows) {
@@ -352,7 +374,7 @@ export function canSharePosterFile(blob) {
 }
 
 /**
- * Generates a 1080x1350 PNG share poster using only public card information.
+ * Generates a 1080px-wide PNG share poster (content-fitted height) using only public card information.
  * Never draws private bookmarks, visitor statistics, or transient online status.
  */
 export async function generateSharePoster({
@@ -385,31 +407,70 @@ export async function generateSharePoster({
   const palette = readThemePalette();
   const canvas = document.createElement('canvas');
   canvas.width = POSTER_WIDTH;
-  canvas.height = POSTER_HEIGHT;
+  canvas.height = MEASURE_HEIGHT;
   const ctx = canvas.getContext('2d');
+
+  // 0. Measure the upper (profile) section first so the ticket divider sits right under the
+  //    content. A card with no handle / short tagline / no tags would otherwise leave a large
+  //    empty gap above a fixed divider. The poster height then follows the content.
+  const cx = POSTER_WIDTH / 2;
+  const cardX = 72;
+  const cardW = POSTER_WIDTH - cardX * 2;
+  const textMaxW = cardW - 120;
+  const cleanName = String(displayName || '').trim() || BRAND_NAME;
+  const rawHandle = String(handle || '').trim();
+  const cleanHandle = rawHandle && rawHandle !== '@your_bot' ? rawHandle : '';
+  const showHandle = Boolean(cleanHandle) && cleanHandle.toLowerCase() !== cleanName.toLowerCase();
+
+  ctx.font = `400 31px ${FONT_STACK}`;
+  const bioLines = wrapTextLines(ctx, tagline, textMaxW, 3);
+  const validTags = (Array.isArray(tags) ? tags : [])
+    .map((t) => String(t || '').trim())
+    .filter(Boolean)
+    .slice(0, 6);
+  const tagRows = layoutTagRows(ctx, validTags, textMaxW);
+
+  const NAME_BASELINE = 382;
+  const BIO_LINE_H = 48;
+  let contentBottom = NAME_BASELINE + 14;
+  const handleBaseline = 434;
+  if (showHandle) contentBottom = handleBaseline + 12;
+  const bioStartBaseline = showHandle ? handleBaseline + 56 : 446;
+  if (bioLines.length > 0) {
+    contentBottom = bioStartBaseline + (bioLines.length - 1) * BIO_LINE_H + 12;
+  }
+  const tagStartY = contentBottom + 30;
+  if (tagRows.length > 0) {
+    contentBottom = tagStartY + tagBlockHeight(tagRows);
+  }
+
+  // Divider sits a fixed gap under the content, never higher than MIN_DIVIDER_Y so very sparse
+  // cards still look like a ticket. Everything below the divider keeps its original spacing.
+  const MIN_DIVIDER_Y = 540;
+  const dividerY = Math.max(MIN_DIVIDER_Y, Math.round(contentBottom + 64));
+  const cardY = 68;
+  const cardH = dividerY + 474 - cardY;
+  const posterHeight = cardY + cardH + 104;
+  canvas.height = posterHeight; // resizing resets context state; everything below sets its own styles
 
   // 1. Background canvas + subtle rose ambient glows
   ctx.fillStyle = palette.bg;
-  ctx.fillRect(0, 0, POSTER_WIDTH, POSTER_HEIGHT);
+  ctx.fillRect(0, 0, POSTER_WIDTH, posterHeight);
 
   const glowTop = ctx.createRadialGradient(890, 140, 20, 890, 140, 520);
   glowTop.addColorStop(0, palette.isDark ? 'rgba(229, 107, 146, 0.16)' : 'rgba(163, 41, 82, 0.10)');
   glowTop.addColorStop(1, 'rgba(0, 0, 0, 0)');
   ctx.fillStyle = glowTop;
-  ctx.fillRect(0, 0, POSTER_WIDTH, POSTER_HEIGHT);
+  ctx.fillRect(0, 0, POSTER_WIDTH, posterHeight);
 
-  const glowBottom = ctx.createRadialGradient(180, 1180, 20, 180, 1180, 480);
+  const glowBottomY = posterHeight - 170;
+  const glowBottom = ctx.createRadialGradient(180, glowBottomY, 20, 180, glowBottomY, 480);
   glowBottom.addColorStop(0, palette.isDark ? 'rgba(229, 107, 146, 0.12)' : 'rgba(217, 107, 144, 0.09)');
   glowBottom.addColorStop(1, 'rgba(0, 0, 0, 0)');
   ctx.fillStyle = glowBottom;
-  ctx.fillRect(0, 0, POSTER_WIDTH, POSTER_HEIGHT);
+  ctx.fillRect(0, 0, POSTER_WIDTH, posterHeight);
 
   // 2. Elevated main rose-porcelain ticket card
-  const cardX = 72;
-  const cardY = 68;
-  const cardW = POSTER_WIDTH - cardX * 2;
-  const cardH = 1178;
-  const dividerY = 770;
   const notchR = 22;
 
   ctx.save();
@@ -437,16 +498,11 @@ export async function generateSharePoster({
   ctx.restore();
 
   // 3. Circular avatar
-  const cx = POSTER_WIDTH / 2;
-  const cleanName = String(displayName || '').trim() || BRAND_NAME;
-  const rawHandle = String(handle || '').trim();
-  const cleanHandle = rawHandle && rawHandle !== '@your_bot' ? rawHandle : '';
   const initialSource = cleanName.replace(/^@+/, '') || cleanHandle.replace(/^@+/, '') || 'R';
   const initialChar = Array.from(initialSource)[0]?.toUpperCase() || 'R';
   drawAvatar(ctx, avatarImg, cx, 224, 86, initialChar, palette);
 
   // 4. Display name
-  const textMaxW = cardW - 120;
   ctx.save();
   ctx.textAlign = 'center';
   ctx.textBaseline = 'alphabetic';
@@ -457,38 +513,26 @@ export async function generateSharePoster({
     ctx.font = `700 ${nameFontSize}px ${FONT_STACK}`;
   }
   ctx.fillStyle = palette.text;
-  ctx.fillText(truncateLine(ctx, cleanName, textMaxW), cx, 382);
+  ctx.fillText(truncateLine(ctx, cleanName, textMaxW), cx, NAME_BASELINE);
 
   // 5. Handle (below displayName when distinct)
-  let nextY = 434;
-  if (cleanHandle && cleanHandle.toLowerCase() !== cleanName.toLowerCase()) {
+  if (showHandle) {
     ctx.font = `500 28px ${FONT_STACK}`;
     ctx.fillStyle = palette.accent;
-    ctx.fillText(truncateLine(ctx, cleanHandle, textMaxW), cx, nextY);
-    nextY += 56;
-  } else {
-    nextY = 446;
+    ctx.fillText(truncateLine(ctx, cleanHandle, textMaxW), cx, handleBaseline);
   }
 
-  // 6. Tagline (max 3 lines with ellipsis)
+  // 6. Tagline (max 3 lines with ellipsis; wrapped during measurement above)
   ctx.font = `400 31px ${FONT_STACK}`;
   ctx.fillStyle = palette.textSecondary;
-  const bioLines = wrapTextLines(ctx, tagline, textMaxW, 3);
-  const lineH = 48;
-  for (const line of bioLines) {
-    ctx.fillText(line, cx, nextY);
-    nextY += lineH;
-  }
+  bioLines.forEach((line, i) => {
+    ctx.fillText(line, cx, bioStartBaseline + i * BIO_LINE_H);
+  });
   ctx.restore();
 
   // 7. Personal tags (max 6 capsules)
-  const validTags = (Array.isArray(tags) ? tags : [])
-    .map((t) => String(t || '').trim())
-    .filter(Boolean)
-    .slice(0, 6);
-  if (validTags.length > 0) {
-    const tagStartY = Math.min(nextY + 14, dividerY - 122);
-    drawTagPills(ctx, validTags, cx, tagStartY, textMaxW, palette);
+  if (tagRows.length > 0) {
+    drawTagPills(ctx, tagRows, cx, tagStartY, palette);
   }
 
   // 8. Dashed ticket perforation divider + side cutouts
@@ -538,7 +582,7 @@ export async function generateSharePoster({
   ctx.font = `500 ${SIGNATURE_FONT_PX}px ${FONT_STACK}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'bottom';
-  ctx.fillText(BRAND_SIGNATURE, cx, POSTER_HEIGHT - SIGNATURE_BOTTOM_OFFSET);
+  ctx.fillText(BRAND_SIGNATURE, cx, posterHeight - SIGNATURE_BOTTOM_OFFSET);
   ctx.restore();
 
   const dataUrl = canvas.toDataURL('image/png');
@@ -554,6 +598,6 @@ export async function generateSharePoster({
     blob,
     dataUrl,
     width: POSTER_WIDTH,
-    height: POSTER_HEIGHT,
+    height: posterHeight,
   };
 }
