@@ -81,6 +81,14 @@ import {
   recordMonthlyVisit,
 } from '../src/worker/visitStats.js';
 import { BRAND_NAME, BRAND_SIGNATURE } from '../web/src/lib/brand.js';
+import {
+  ALL_KEYWORD_PRESETS,
+  BLOCKED_KEYWORD_MAX_LENGTH,
+  KEYWORD_PRESET_GROUPS,
+  addBlockedKeywordGroup,
+  hasBlockedKeyword,
+  toggleBlockedKeyword,
+} from '../web/src/lib/keywordPresets.js';
 import pkg from '../package.json' with { type: 'json' };
 import {
   applyVisitorAction,
@@ -6918,5 +6926,64 @@ describe('Customizable navigation order (v1.10)', () => {
     const adminPublic = sanitizePublicConfig(saved, env, true);
     expect(guestPublic.ui.navOrder).toEqual(['visitors', 'sites', 'profile', 'probe', 'leaderboard']);
     expect(adminPublic.ui.navOrder).toEqual(['visitors', 'sites', 'profile', 'probe', 'leaderboard']);
+  });
+});
+
+describe('Blocked keyword presets & normalization matching (v1.10)', () => {
+  it('defaults blockedKeywords to empty and contains only ad-specific phrases without generic single words', () => {
+    expect(DEFAULT_CONFIG.pmBot.blockedKeywords).toBe('');
+    expect(KEYWORD_PRESET_GROUPS).toHaveLength(6);
+    expect(ALL_KEYWORD_PRESETS.length).toBe(27);
+    for (const riskySingleWord of ['代理', '推广', '投资', '兼职']) {
+      expect(ALL_KEYWORD_PRESETS).not.toContain(riskySingleWord);
+    }
+  });
+
+  it.each(ALL_KEYWORD_PRESETS)(
+    'matches preset phrase %j accurately after normalizeAntiSpamText (case-insensitive & de-obfuscated)',
+    (preset) => {
+      const norm = normalizeAntiSpamText(preset);
+      expect(norm.normalized.trim().length).toBeGreaterThan(0);
+
+      // Direct hit (including uppercase variant for ASCII phrases)
+      const directMsg = { text: `限时优惠 ${preset.toUpperCase()} 立即参与`, from: { first_name: 'Ad' } };
+      const resDirect = assessIncomingRisk(directMsg, { blockedKeywords: preset });
+      expect(resDirect.isBlockedKeyword).toBe(true);
+      expect(resDirect.matchedKeyword).toBe(norm.normalized.trim());
+
+      // Zero-width obfuscated variant also hits
+      const obfuscated = Array.from(preset).join('\u200b');
+      const resObf = assessIncomingRisk({ text: `点击 ${obfuscated}`, from: { first_name: 'Ad' } }, { blockedKeywords: preset });
+      expect(resObf.isBlockedKeyword).toBe(true);
+    }
+  );
+
+  it('toggles single presets and adds whole groups while preserving custom keywords and 2000-char cap', () => {
+    const start = '自定义词A, 自定义词B';
+    const added = toggleBlockedKeyword(start, '刷单');
+    expect(added.added).toBe(true);
+    expect(added.value).toBe('自定义词A, 自定义词B, 刷单');
+    expect(hasBlockedKeyword(added.value, '刷单')).toBe(true);
+
+    const removed = toggleBlockedKeyword(added.value, '刷单');
+    expect(removed.added).toBe(false);
+    expect(removed.value).toBe('自定义词A, 自定义词B');
+    expect(hasBlockedKeyword(removed.value, '刷单')).toBe(false);
+
+    // Whole group add avoids duplicates & preserves custom entries
+    const cryptoGroup = KEYWORD_PRESET_GROUPS[0].keywords;
+    const partial = '自定义词A, 带单';
+    const grouped = addBlockedKeywordGroup(partial, cryptoGroup);
+    expect(grouped.addedCount).toBe(cryptoGroup.length - 1);
+    expect(grouped.value.startsWith('自定义词A, 带单, ')).toBe(true);
+    for (const kw of cryptoGroup) {
+      expect(hasBlockedKeyword(grouped.value, kw)).toBe(true);
+    }
+
+    // Respects 2000-char limit
+    const nearCap = 'a'.repeat(BLOCKED_KEYWORD_MAX_LENGTH - 2);
+    const blockedAdd = toggleBlockedKeyword(nearCap, '稳赚不赔');
+    expect(blockedAdd.truncated).toBe(true);
+    expect(blockedAdd.value).toBe(nearCap);
   });
 });

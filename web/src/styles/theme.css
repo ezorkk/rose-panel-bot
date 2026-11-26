@@ -2509,3 +2509,71 @@ select {
   font-weight: 700;
   color: var(--text);
 }
+
+/* Grouped anti-spam blocked keyword presets */
+.kw-preset-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.kw-preset-group {
+  background: var(--bg-subtle);
+  border-radius: 14px;
+  padding: 9px 10px;
+}
+
+.kw-preset-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+
+.kw-preset-group-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.kw-preset-group-add {
+  border: none;
+  background: transparent;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.kw-preset-group-add:disabled {
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.kw-preset-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.kw-preset-pill {
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease;
+}
+
+.kw-preset-pill.active {
+  background: var(--accent);
+  border-color: transparent;
+  color: #ffffff;
+}

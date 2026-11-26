@@ -20,6 +20,13 @@ import {
 } from 'lucide-react';
 import { apiRequest } from '../lib/api.js';
 import { BRAND_SIGNATURE } from '../lib/brand.js';
+import {
+  BLOCKED_KEYWORD_MAX_LENGTH,
+  KEYWORD_PRESET_GROUPS,
+  addBlockedKeywordGroup,
+  hasBlockedKeyword,
+  toggleBlockedKeyword,
+} from '../lib/keywordPresets.js';
 import { buildSourceLink, confirmDialog, copyText, haptic, openExternalUrl } from '../lib/telegram.js';
 import { TgStickerMedia, TicketEmblem } from './Emblems.jsx';
 import {
@@ -2275,31 +2282,77 @@ export default function SettingsDrawer({
                   );
                 })()}
 
-                <div className="field" style={{ marginTop: 10 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
-                    <label className="field-label" style={{ margin: 0 }}>
-                      广告屏蔽关键词（自动去零宽/全角/同形字混淆）
-                    </label>
-                    <button
-                      type="button"
-                      className="pill rose"
-                      style={{ cursor: 'pointer', fontSize: 11, padding: '3px 8px' }}
-                      onClick={() => {
-                        const preset = 'USDT, 跑分, 博彩, 赌场, 棋牌, 机场, 翻墙节点, 承兑, 兼职日结, 代收代付, 私聊领福利';
-                        const cur = (draft.pmBot.blockedKeywords || '').trim();
-                        updateField('pmBot', 'blockedKeywords', cur ? `${cur}, ${preset}` : preset);
-                        onToast('已填入常见广告屏蔽词');
-                      }}
-                    >
-                      + 填入常见词
-                    </button>
+                <div className="field" style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+                  <label className="field-label" style={{ marginBottom: 8 }}>
+                    广告屏蔽关键词（自动去零宽/全角/同形字混淆）
+                  </label>
+
+                  <div className="kw-preset-box">
+                    {KEYWORD_PRESET_GROUPS.map((group) => {
+                      const rawKw = draft.pmBot.blockedKeywords || '';
+                      const allAdded = group.keywords.every((kw) => hasBlockedKeyword(rawKw, kw));
+                      return (
+                        <div className="kw-preset-group" key={group.id}>
+                          <div className="kw-preset-group-head">
+                            <span className="kw-preset-group-label">{group.label}</span>
+                            <button
+                              type="button"
+                              className="kw-preset-group-add"
+                              disabled={allAdded}
+                              onClick={() => {
+                                const res = addBlockedKeywordGroup(rawKw, group.keywords, BLOCKED_KEYWORD_MAX_LENGTH);
+                                updateField('pmBot', 'blockedKeywords', res.value);
+                                haptic('light');
+                                if (res.truncated) {
+                                  onToast(`已达 ${BLOCKED_KEYWORD_MAX_LENGTH} 字符上限，仅添加部分预设词`);
+                                } else if (res.addedCount > 0) {
+                                  onToast(`已添加「${group.label}」${res.addedCount} 个词`);
+                                }
+                              }}
+                            >
+                              {allAdded ? '已全添加' : '+ 整组添加'}
+                            </button>
+                          </div>
+                          <div className="kw-preset-pills">
+                            {group.keywords.map((kw) => {
+                              const active = hasBlockedKeyword(rawKw, kw);
+                              return (
+                                <button
+                                  key={kw}
+                                  type="button"
+                                  className={`kw-preset-pill ${active ? 'active' : ''}`}
+                                  aria-pressed={active}
+                                  onClick={() => {
+                                    const res = toggleBlockedKeyword(rawKw, kw, BLOCKED_KEYWORD_MAX_LENGTH);
+                                    if (res.truncated) {
+                                      onToast(`已达 ${BLOCKED_KEYWORD_MAX_LENGTH} 字符上限，无法继续添加`);
+                                      return;
+                                    }
+                                    updateField('pmBot', 'blockedKeywords', res.value);
+                                    haptic('light');
+                                  }}
+                                >
+                                  {active ? '✓ ' : '+ '}
+                                  {kw}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
+
                   <textarea
                     className="textarea"
+                    maxLength={BLOCKED_KEYWORD_MAX_LENGTH}
                     value={draft.pmBot.blockedKeywords || ''}
                     onChange={(e) => updateField('pmBot', 'blockedKeywords', e.target.value)}
-                    placeholder="逗号或换行分隔，例如：USDT, 赌场, 机场, 跑分"
+                    placeholder="逗号或换行分隔，可点上方预设快速加入，或手动填写广告特有短语"
                   />
+                  <div className="row-desc wrap" style={{ marginTop: 6 }}>
+                    命中的消息会被直接丢弃，你和对方都不会收到提示。建议只添加广告特有的短语；熟人可设为永久信任，不受关键词限制。
+                  </div>
                 </div>
               </div>
             </div>
