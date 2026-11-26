@@ -21,10 +21,19 @@ import {
   X,
 } from 'lucide-react';
 import { apiRequest, formatTimeAgo } from '../lib/api.js';
-import { confirmDialog, copyText, formatSourceLabel, haptic, openExternalUrl } from '../lib/telegram.js';
+import {
+  confirmDialog,
+  copyText,
+  formatSourceLabel,
+  getTelegramWebApp,
+  haptic,
+  openExternalUrl,
+} from '../lib/telegram.js';
 import { Avatar, TgStickerMedia } from './Emblems.jsx';
 
 const MAX_REPLY_PHOTO_BYTES = 10 * 1024 * 1024;
+// A history request that takes longer than this is abandoned so later polls aren't blocked
+const HISTORY_TIMEOUT_MS = 10000;
 const REPLY_PHOTO_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 
 const STATUS_META = {
@@ -112,14 +121,18 @@ export default function VisitorsTab({
     return () => clearTimeout(timer);
   }, [search, filter]);
 
-  const loadVisitorHistory = async (uid, { silent = false } = {}) => {
+  const loadVisitorHistory = async (uid, { silent = false, force = false } = {}) => {
     const targetUid = String(uid);
-    if (silent && historyInFlightRef.current > 0) return;
+    // Background polls never stack; `force` (returning to the app) may overlap an older poll —
+    // the sequence check below drops whichever response is stale.
+    if (silent && !force && historyInFlightRef.current > 0) return;
     const seq = ++historySeqRef.current;
     historyInFlightRef.current += 1;
     try {
       if (!silent) setHistoryLoading(true);
-      const res = await apiRequest(`/api/admin/visitors/${encodeURIComponent(targetUid)}/history`);
+      const res = await apiRequest(`/api/admin/visitors/${encodeURIComponent(targetUid)}/history`, {
+        timeoutMs: HISTORY_TIMEOUT_MS,
+      });
       // Drop responses for a visitor the admin already switched away from, or superseded by a newer load/mutation
       if (seq !== historySeqRef.current || activeUidRef.current !== targetUid) return;
       setHistoryData({
@@ -177,12 +190,27 @@ export default function VisitorsTab({
 
   useEffect(() => {
     if (drawerView !== 'chat' || !activeVisitor?.userId) return undefined;
+    const uid = activeVisitor.userId;
     const iv = setInterval(() => {
       if (typeof document === 'undefined' || document.visibilityState === 'visible') {
-        loadVisitorHistory(activeVisitor.userId, { silent: true });
+        loadVisitorHistory(uid, { silent: true });
       }
     }, 6000);
-    return () => clearInterval(iv);
+    // Coming back from Telegram (e.g. after reading the visitor's reply in a notification):
+    // refresh right away instead of waiting for the next poll tick.
+    const refreshOnResume = () => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        loadVisitorHistory(uid, { silent: true, force: true });
+      }
+    };
+    const tg = getTelegramWebApp();
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', refreshOnResume);
+    tg?.onEvent?.('activated', refreshOnResume);
+    return () => {
+      clearInterval(iv);
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', refreshOnResume);
+      tg?.offEvent?.('activated', refreshOnResume);
+    };
   }, [drawerView, activeVisitor?.userId]);
 
   const sendReplyRequest = async (pending) => {

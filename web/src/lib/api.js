@@ -10,7 +10,10 @@ export function getDevRole() {
   return devRole;
 }
 
-export async function apiRequest(path, options = {}) {
+export async function apiRequest(path, requestOptions = {}) {
+  // `timeoutMs` (optional) aborts a request that hangs, e.g. while the Mini App sits in the
+  // background, so callers that guard against overlapping requests don't stay blocked forever.
+  const { timeoutMs = 0, ...options } = requestOptions;
   const headers = {
     ...(options.headers || {}),
   };
@@ -25,13 +28,25 @@ export async function apiRequest(path, options = {}) {
     headers['Content-Type'] = 'application/json';
   }
 
+  const controller = timeoutMs > 0 && typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+
   // FormData must be passed through untouched so the browser sets the multipart boundary itself
-  const res = await fetch(path, {
-    ...options,
-    headers,
-    body:
-      options.body && !isForm && typeof options.body !== 'string' ? JSON.stringify(options.body) : options.body,
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      ...options,
+      headers,
+      ...(controller ? { signal: controller.signal } : {}),
+      body:
+        options.body && !isForm && typeof options.body !== 'string' ? JSON.stringify(options.body) : options.body,
+    });
+  } catch (err) {
+    if (controller?.signal.aborted) throw new Error('请求超时，请稍后重试');
+    throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 
   const data = await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }));
   if (!res.ok || data.ok === false) {

@@ -45,6 +45,7 @@ import {
   resolveInboxMode,
 } from '../src/worker/inbox.js';
 import worker, { WEBHOOK_ALLOWED_UPDATES } from '../src/worker/index.js';
+import { apiRequest } from '../web/src/lib/api.js';
 import { fetchKomariStatus, normalizeNodeMetrics } from '../src/worker/komari.js';
 import { normalizeStickerObject, parseStickerPackName } from '../src/worker/telegram.js';
 import { renderTurnstileVerifyPage } from '../src/worker/turnstile.js';
@@ -67,6 +68,7 @@ import {
   extractLinksFromMessage,
   extractPhotoFromMessage,
   getVisitorDetail,
+  HISTORY_CACHE_TTL_SECONDS,
   getVisitorHistory,
   getVisitorOverview,
   listVisitors,
@@ -3017,6 +3019,118 @@ describe('Mini App in-panel visitor chat log, direct text/photo reply & recall',
     ]);
     const hist = await getVisitorHistory(env, '93939');
     expect(hist.messages.map((m) => m.id)).toEqual(['m1']);
+  });
+
+  it('confirms a panel reply before the topic mirror, attaches the mirror later, and cleans it up if recalled first', async () => {
+    const kv = createMemoryKV();
+    const botToken = '999444:BG_MIRROR';
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777' };
+    await upsertVisitorProfile(env, { id: 94949, first_name: 'Bea' }, { threadId: 77, incrementMsg: false });
+    await kv.put('thread:77', '94949');
+
+    const tgCalls = [];
+    let nextId = 1000;
+    // The topic mirror is held until the test opens the gate, to prove the response doesn't wait for it
+    let openGate;
+    let gate = new Promise((r) => (openGate = r));
+    let lastMirrorId = null;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url, init) => {
+      const method = String(url).split('/').pop();
+      const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
+      tgCalls.push({ method, body });
+      if (method === 'sendMessage' && body.chat_id === '-100777') await gate;
+      nextId += 1;
+      if (method === 'sendMessage' && body.chat_id === '-100777') lastMirrorId = nextId;
+      return new Response(JSON.stringify({ ok: true, result: { message_id: nextId } }), { status: 200 });
+    });
+    const adminInit = await signInitData(
+      { auth_date: String(Math.floor(Date.now() / 1000)), user: JSON.stringify({ id: 10001, first_name: 'Owner' }) },
+      botToken
+    );
+    const replyWithCtx = async (text) => {
+      const pending = [];
+      const res = await worker.fetch(
+        new Request('https://panel.example.com/api/admin/visitors/94949/reply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': adminInit },
+          body: JSON.stringify({ text }),
+        }),
+        env,
+        { waitUntil: (p) => pending.push(p) }
+      );
+      return { json: await res.json(), pending };
+    };
+    const mirrorCalls = () => tgCalls.filter((c) => c.method === 'sendMessage' && c.body.chat_id === '-100777');
+
+    try {
+      // 1. Response comes back after delivery + archive; the mirror is deferred to waitUntil
+      const first = await replyWithCtx('先回复你');
+      expect(first.json.ok).toBe(true);
+      expect(first.json.message.pmMessageId).toBeGreaterThan(0);
+      expect(first.pending).toHaveLength(1);
+      // Mirror still in flight, so nothing is attached yet
+      const before = await getVisitorHistory(env, '94949');
+      expect(before.pmMessageIds.find((m) => m.id === first.json.message.pmMessageId).topicMsgId).toBeNull();
+      openGate();
+      await Promise.all(first.pending);
+      expect(mirrorCalls()).toHaveLength(1);
+      const mirrorId = lastMirrorId;
+      const hist = await getVisitorHistory(env, '94949');
+      const entry = hist.pmMessageIds.find((m) => m.id === first.json.message.pmMessageId);
+      expect(entry.topicMsgId).toBe(mirrorId);
+      expect(entry.topicChatId).toBe('-100777');
+
+      // 2. Recalled before the mirror lands -> the orphaned topic copy is deleted afterwards
+      tgCalls.length = 0;
+      gate = new Promise((r) => (openGate = r));
+      const second = await replyWithCtx('马上撤回');
+      const pmId = second.json.message.pmMessageId;
+      const recallRes = await worker.fetch(
+        new Request('https://panel.example.com/api/admin/visitors/94949/recall', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': adminInit },
+          body: JSON.stringify({ pmMessageId: pmId }),
+        }),
+        env
+      );
+      expect((await recallRes.json()).ok).toBe(true);
+      openGate();
+      await Promise.all(second.pending);
+      const lateMirrorId = lastMirrorId;
+      expect(lateMirrorId).not.toBe(mirrorId);
+      expect(lateMirrorId).toBeTruthy();
+      expect(
+        tgCalls.some((c) => c.method === 'deleteMessage' && c.body.chat_id === '-100777' && c.body.message_id === lateMirrorId)
+      ).toBe(true);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('reads chat history with the shortest KV edge cache so new visitor messages show up sooner', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv };
+    const getSpy = vi.spyOn(kv, 'get');
+    await getVisitorHistory(env, '95959');
+    expect(getSpy).toHaveBeenCalledWith('history:95959', expect.objectContaining({ cacheTtl: HISTORY_CACHE_TTL_SECONDS, type: 'json' }));
+    expect(HISTORY_CACHE_TTL_SECONDS).toBe(30);
+  });
+
+  it('apiRequest aborts a hanging request after timeoutMs so polling guards can recover', async () => {
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(
+      (url, init) =>
+        new Promise((resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+        })
+    );
+    try {
+      await expect(apiRequest('/api/admin/visitors/1/history', { timeoutMs: 20 })).rejects.toThrow('请求超时');
+      expect(globalThis.fetch.mock.calls[0][1].timeoutMs).toBeUndefined();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
   });
 });
 

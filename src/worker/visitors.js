@@ -504,12 +504,43 @@ export async function updateVisitorMessageReaction(env, userId, pmMessageId, rol
   return true;
 }
 
+/**
+ * Attaches the topic mirror's message ID (and its group) to an already-archived panel reply, so
+ * recall can delete the topic copy and reactions can sync to it. Re-reads history before writing.
+ * Returns false when the entry no longer exists (it was recalled before the mirror landed).
+ */
+export async function attachTopicMirror(env, userId, pmMessageId, topicMsgId, topicChatId) {
+  const uid = String(userId || '');
+  const pmId = Number(pmMessageId);
+  const topicId = Number(topicMsgId);
+  if (!env?.TOPIC_MAP || !/^\d+$/.test(uid) || !(pmId > 0) || !(topicId > 0)) return true;
+  const historyKey = `history:${uid}`;
+  const fresh = await safeGetJSON(env.TOPIC_MAP, historyKey, null);
+  const list = Array.isArray(fresh?.pmMessageIds) ? fresh.pmMessageIds : [];
+  const entry = list.find((m) => Number(m?.id) === pmId && m?.sender === 'admin');
+  if (!entry) return false;
+  entry.topicMsgId = topicId;
+  if (topicChatId) entry.topicChatId = String(topicChatId);
+  const msgEntry = (Array.isArray(fresh.messages) ? fresh.messages : []).find(
+    (m) => Number(m?.pmMessageId) === pmId && m?.sender === 'admin'
+  );
+  if (msgEntry) msgEntry.topicMsgId = topicId;
+  await safePutJSON(env.TOPIC_MAP, historyKey, fresh);
+  return true;
+}
+
+// Workers KV minimum cacheTtl (docs: must be >= 30 seconds).
+export const HISTORY_CACHE_TTL_SECONDS = 30;
+
 export async function getVisitorHistory(env, userId) {
   const uid = String(userId || '');
   if (!env.TOPIC_MAP || !/^\d+$/.test(uid)) {
     return { photos: [], links: [], pmMessageIds: [], messages: [] };
   }
-  const history = (await safeGetJSON(env.TOPIC_MAP, `history:${uid}`, null)) || {
+  // The panel polls this while a chat is open; the visitor's messages are written by the webhook in
+  // another Cloudflare location, so use KV's shortest edge cache (30s minimum, 60s default) to see
+  // them sooner.
+  const history = (await safeGetJSON(env.TOPIC_MAP, `history:${uid}`, null, { cacheTtl: HISTORY_CACHE_TTL_SECONDS })) || {
     photos: [],
     links: [],
     pmMessageIds: [],
