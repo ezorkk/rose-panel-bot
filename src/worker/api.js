@@ -1,8 +1,10 @@
 // Mini App REST API router (/api/*)
 
+import { sendTestProbeAlert } from './alerts.js';
 import { getBlockedSpamCount } from './antispam.js';
 import { authenticateRequest, parseAdminIds, signMediaToken, verifyMediaToken } from './auth.js';
 import {
+  checkRateLimit,
   initiateChatFromMiniApp,
   resolveBotUsername,
   sendAdminDirectVisitorReply,
@@ -470,10 +472,13 @@ export async function handleApiRequest(request, env, url, ctx = null) {
         ck: config.community?.enableCheckin,
         bu: Boolean(env.BOT_USERNAME || config.botUsername),
       });
-      // Cache @username in the same write as the owner's settings (see syncTelegramBotSurface)
+      // Cache @username & HTTPS siteOrigin in the same write as the owner's settings
       if (env.BOT_TOKEN && !env.BOT_USERNAME && !config.botUsername) {
         const uname = await resolveBotUsername(env, config);
         if (uname) body.botUsername = uname;
+      }
+      if (/^https:\/\//i.test(url.origin) && config.siteOrigin !== url.origin) {
+        body.siteOrigin = url.origin;
       }
       const saved = await savePanelConfig(env, body);
       const nextSurfaceSig = JSON.stringify({
@@ -519,6 +524,16 @@ export async function handleApiRequest(request, env, url, ctx = null) {
       }
       const result = await fetchProbeStatus(env, testProbeConfig, { forceRefresh: true });
       return json({ ok: !result.error, ...result }, result.error ? 400 : 200);
+    }
+
+    // POST /api/admin/probe/alert-test — send a test probe alert via the active inbox mode (3/min)
+    if (path === '/api/admin/probe/alert-test' && method === 'POST') {
+      const uid = String(auth.user?.id || 'admin');
+      if (!(await checkRateLimit(env, `rl:alert_test:${uid}`, 3, 60))) {
+        return json({ ok: false, error: '发送过于频繁，每分钟最多测试 3 次' }, 429);
+      }
+      const result = await sendTestProbeAlert(env, url.origin, config);
+      return json(result, result.ok ? 200 : 400);
     }
 
     // GET /api/admin/update/check — Scheme A: check latest GitHub release (KV-cached 6h)

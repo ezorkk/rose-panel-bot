@@ -1,4 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
+import {
+  ALERT_STATE_KEY,
+  ALERT_TOPIC_ID_KEY,
+  evaluateProbeAlerts,
+  formatAlertMessage,
+  runProbeAlerts,
+} from '../src/worker/alerts.js';
 import { assessIncomingRisk, checkCasBlacklist, normalizeAntiSpamText } from '../src/worker/antispam.js';
 import { signMediaToken, verifyMediaToken, verifyTelegramInitData } from '../src/worker/auth.js';
 import {
@@ -16,6 +23,8 @@ import {
   DEFAULT_CONFIG,
   loadPanelConfig,
   resolveSupergroupId,
+  sanitizeAdminConfig,
+  sanitizePublicConfig,
   savePanelConfig,
 } from '../src/worker/config.js';
 import {
@@ -3617,5 +3626,501 @@ describe('Bot DM direct push inbox (dm-inbox)', () => {
       expect(sent[0].body.text).toContain('暂未开启私信功能');
       expect(sent[0].body.text).not.toContain('直接在下方输入框打字');
     });
+  });
+});
+
+describe('Probe offline & resource alerts (v1.8)', () => {
+  function setupMockNet({ probeResponder, tgOverrides = {} } = {}) {
+    const tgCalls = [];
+    const probeCalls = [];
+    let topicSeq = 900;
+    const fetchMock = vi.fn(async (url, init) => {
+      const u = String(url);
+      if (u.startsWith('https://api.telegram.org/')) {
+        const method = u.split('/').pop();
+        const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
+        tgCalls.push({ method, body });
+        if (tgOverrides[method]) return tgOverrides[method](body, tgCalls);
+        if (method === 'createForumTopic') {
+          topicSeq += 1;
+          return new Response(JSON.stringify({ ok: true, result: { message_thread_id: topicSeq } }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 100 } }), { status: 200 });
+      }
+      probeCalls.push({ url: u, init });
+      if (probeResponder) return probeResponder(u, init);
+      return new Response(JSON.stringify({ servers: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    return { tgCalls, probeCalls, fetchMock };
+  }
+
+  async function withFetch(fetchMock, fn) {
+    const orig = globalThis.fetch;
+    globalThis.fetch = fetchMock;
+    try {
+      await fn();
+    } finally {
+      globalThis.fetch = orig;
+    }
+  }
+
+  const jsonNodesRes = (nodes) =>
+    new Response(JSON.stringify({ servers: nodes }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+  it('skips probe fetch and performs zero KV writes when disabled, unconfigured, or in demoMode', async () => {
+    const kv = createMemoryKV();
+    const putSpy = vi.spyOn(kv, 'put');
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:ALERT', ADMIN_IDS: '10001' };
+    const { tgCalls, probeCalls, fetchMock } = setupMockNet();
+    const tick = Date.parse('2026-11-26T10:00:00Z');
+
+    await withFetch(fetchMock, async () => {
+      // 1. Default config (alerts.enabled === false) -> 0 probe fetches, 0 KV writes
+      const r1 = await runProbeAlerts(env, tick);
+      expect(r1.skipped).toBe(true);
+      expect(r1.reason).toBe('disabled');
+      expect(probeCalls).toHaveLength(0);
+      expect(putSpy).toHaveBeenCalledTimes(0);
+
+      // 2. Enabled but no probe URL -> 0 fetches, 0 KV writes
+      await savePanelConfig(env, { probe: { url: '', demoMode: false, alerts: { enabled: true } } });
+      putSpy.mockClear();
+      const r2 = await runProbeAlerts(env, tick);
+      expect(r2.skipped).toBe(true);
+      expect(r2.reason).toBe('unconfigured_or_demo');
+      expect(probeCalls).toHaveLength(0);
+      expect(putSpy).toHaveBeenCalledTimes(0);
+
+      // 3. Enabled with demoMode: true (even if URL is filled) -> 0 fetches, 0 KV writes
+      await savePanelConfig(env, {
+        probe: { provider: 'json', url: 'https://probe.test/stats.json', demoMode: true, alerts: { enabled: true } },
+      });
+      putSpy.mockClear();
+      const r3 = await runProbeAlerts(env, tick);
+      expect(r3.skipped).toBe(true);
+      expect(r3.reason).toBe('unconfigured_or_demo');
+      expect(probeCalls).toHaveLength(0);
+      expect(tgCalls).toHaveLength(0);
+      expect(putSpy).toHaveBeenCalledTimes(0);
+    });
+  });
+
+  it('requires confirmChecks consecutive misses before offline alert, avoids duplicates, and sends silent recovery with duration', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:ALERT_OFF', ADMIN_IDS: '10001' };
+    await savePanelConfig(env, {
+      siteOrigin: 'https://panel.test',
+      probe: {
+        provider: 'json',
+        url: 'https://probe.test/stats.json',
+        alerts: { enabled: true, intervalMinutes: 5, confirmChecks: 2, notifyRecovery: true },
+      },
+    });
+
+    let nodeOnline = true;
+    const { tgCalls, fetchMock } = setupMockNet({
+      probeResponder: () =>
+        jsonNodesRes([{ id: 'n1', name: '东京 01', online: nodeOnline, cpu: 12, memory: 30, disk: 40 }]),
+    });
+
+    const t0 = Date.parse('2026-11-26T10:00:00Z');
+
+    await withFetch(fetchMock, async () => {
+      // Baseline check (online) -> records node, no alert
+      await runProbeAlerts(env, t0);
+      expect(tgCalls).toHaveLength(0);
+
+      // Miss #1 -> not confirmed yet, no alert
+      nodeOnline = false;
+      await runProbeAlerts(env, t0 + 5 * 60000);
+      expect(tgCalls).toHaveLength(0);
+
+      // Miss #2 -> confirmed! Sends non-silent offline alert
+      await runProbeAlerts(env, t0 + 10 * 60000);
+      expect(tgCalls).toHaveLength(1);
+      expect(tgCalls[0].method).toBe('sendMessage');
+      expect(tgCalls[0].body.chat_id).toBe(10001);
+      expect(tgCalls[0].body.disable_notification).toBe(false);
+      expect(tgCalls[0].body.text).toContain('节点掉线：东京 01');
+      expect(tgCalls[0].body.text).toContain('分钟');
+
+      // Miss #3 -> still offline, NO duplicate alert and ZERO KV writes!
+      const putSpy = vi.spyOn(kv, 'put');
+      tgCalls.length = 0;
+      await runProbeAlerts(env, t0 + 15 * 60000);
+      expect(tgCalls).toHaveLength(0);
+      expect(putSpy).toHaveBeenCalledTimes(0);
+
+      // Recovery after 35 minutes offline -> sends silent recovery notice with duration
+      nodeOnline = true;
+      await runProbeAlerts(env, t0 + 40 * 60000);
+      expect(tgCalls).toHaveLength(1);
+      expect(tgCalls[0].body.disable_notification).toBe(true);
+      expect(tgCalls[0].body.text).toContain('节点恢复：东京 01');
+      expect(tgCalls[0].body.text).toContain('35 分钟');
+
+      // When notifyRecovery is disabled, recovery stays silent (0 messages)
+      await savePanelConfig(env, { probe: { alerts: { notifyRecovery: false } } });
+      nodeOnline = false;
+      await runProbeAlerts(env, t0 + 45 * 60000);
+      await runProbeAlerts(env, t0 + 50 * 60000);
+      tgCalls.length = 0;
+      nodeOnline = true;
+      await runProbeAlerts(env, t0 + 55 * 60000);
+      expect(tgCalls).toHaveLength(0);
+    });
+  });
+
+  it('sends only one probe-down alert when probe endpoint fails without flagging nodes offline, then sends recovery', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:PROBE_DOWN', ADMIN_IDS: '10001' };
+    await savePanelConfig(env, {
+      probe: {
+        provider: 'json',
+        url: 'https://probe.test/stats.json',
+        alerts: { enabled: true, intervalMinutes: 5, confirmChecks: 2 },
+      },
+    });
+
+    let probeUp = true;
+    const { tgCalls, fetchMock } = setupMockNet({
+      probeResponder: () => {
+        if (!probeUp) return new Response('Bad Gateway', { status: 502 });
+        return jsonNodesRes([
+          { id: 'n1', name: 'Tokyo', online: true, cpu: 10 },
+          { id: 'n2', name: 'HK', online: true, cpu: 15 },
+        ]);
+      },
+    });
+    const t0 = Date.parse('2026-11-26T10:00:00Z');
+
+    await withFetch(fetchMock, async () => {
+      await runProbeAlerts(env, t0);
+      expect(tgCalls).toHaveLength(0);
+
+      // Probe fails twice -> emits ONLY "探针连接失败", zero node offline alerts
+      probeUp = false;
+      await runProbeAlerts(env, t0 + 5 * 60000);
+      expect(tgCalls).toHaveLength(0);
+
+      await runProbeAlerts(env, t0 + 10 * 60000);
+      expect(tgCalls).toHaveLength(1);
+      expect(tgCalls[0].body.text).toContain('探针连接失败');
+      expect(tgCalls[0].body.text).not.toContain('节点掉线');
+      expect(tgCalls[0].body.disable_notification).toBe(false);
+
+      // Probe stays down on 3rd tick -> no duplicate alert
+      tgCalls.length = 0;
+      await runProbeAlerts(env, t0 + 15 * 60000);
+      expect(tgCalls).toHaveLength(0);
+
+      // Probe recovers -> sends silent "探针已恢复连接", nodes still online -> no spurious node recovery
+      probeUp = true;
+      await runProbeAlerts(env, t0 + 20 * 60000);
+      expect(tgCalls).toHaveLength(1);
+      expect(tgCalls[0].body.text).toContain('探针已恢复连接');
+      expect(tgCalls[0].body.disable_notification).toBe(true);
+    });
+  });
+
+  it('never alerts on first-seen offline nodes and completely skips muted nodes and prunes deleted nodes', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:FIRST_MUTE', ADMIN_IDS: '10001' };
+    await savePanelConfig(env, {
+      probe: {
+        provider: 'json',
+        url: 'https://probe.test/stats.json',
+        alerts: { enabled: true, intervalMinutes: 5, confirmChecks: 1, mutedNodes: ['n-muted'] },
+      },
+    });
+
+    let nodes = [
+      { id: 'n-already-off', name: 'OldDead', online: false },
+      { id: 'n-muted', name: 'MutedBox', online: true },
+      { id: 'n-temp', name: 'TempBox', online: true },
+    ];
+    const { tgCalls, fetchMock } = setupMockNet({ probeResponder: () => jsonNodesRes(nodes) });
+    const t0 = Date.parse('2026-11-26T10:00:00Z');
+
+    await withFetch(fetchMock, async () => {
+      // Round 1: already-offline node must NOT notify even with confirmChecks: 1
+      await runProbeAlerts(env, t0);
+      expect(tgCalls).toHaveLength(0);
+
+      // Round 2: already-offline stays offline (still no alert), muted node goes offline (skipped!), TempBox deleted
+      nodes = [
+        { id: 'n-already-off', name: 'OldDead', online: false },
+        { id: 'n-muted', name: 'MutedBox', online: false },
+      ];
+      await runProbeAlerts(env, t0 + 5 * 60000);
+      expect(tgCalls).toHaveLength(0);
+
+      const saved = await kv.get(ALERT_STATE_KEY, { type: 'json' });
+      expect(saved.nodes['n-muted']).toBeUndefined();
+      expect(saved.nodes['n-temp']).toBeUndefined();
+      expect(saved.nodes['n-already-off'].online).toBe(false);
+
+      // Round 3: OldDead comes online for the first time -> NO spurious recovery notice
+      nodes = [{ id: 'n-already-off', name: 'OldDead', online: true }];
+      await runProbeAlerts(env, t0 + 10 * 60000);
+      expect(tgCalls).toHaveLength(0);
+    });
+  });
+
+  it('triggers resource breach alert only after sustainChecks consecutive ticks, once per breach, and clears silently on drop', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:RES', ADMIN_IDS: '10001' };
+    await savePanelConfig(env, {
+      probe: {
+        provider: 'json',
+        url: 'https://probe.test/stats.json',
+        alerts: {
+          enabled: true,
+          intervalMinutes: 5,
+          resource: { enabled: true, cpu: 90, ram: 90, disk: 0, sustainChecks: 3 },
+        },
+      },
+    });
+
+    let cpu = 20;
+    let disk = 99; // disk threshold is 0 -> disabled!
+    const { tgCalls, fetchMock } = setupMockNet({
+      probeResponder: () =>
+        jsonNodesRes([{ id: 'n1', name: '东京 01', online: true, cpu, memory: 50, disk }]),
+    });
+    const t0 = Date.parse('2026-11-26T10:00:00Z');
+
+    await withFetch(fetchMock, async () => {
+      // Baseline
+      await runProbeAlerts(env, t0);
+      expect(tgCalls).toHaveLength(0);
+
+      // Breach tick 1 & 2 -> not sustained yet
+      cpu = 96;
+      await runProbeAlerts(env, t0 + 5 * 60000);
+      await runProbeAlerts(env, t0 + 10 * 60000);
+      expect(tgCalls).toHaveLength(0);
+
+      // Breach tick 3 -> triggers ONCE; disk=99% ignored because threshold=0
+      await runProbeAlerts(env, t0 + 15 * 60000);
+      expect(tgCalls).toHaveLength(1);
+      expect(tgCalls[0].body.text).toContain('东京 01 CPU 持续 ≥ 90%');
+      expect(tgCalls[0].body.text).toContain('96%');
+      expect(tgCalls[0].body.text).not.toContain('磁盘');
+
+      // Breach tick 4 -> already notified, no duplicate
+      tgCalls.length = 0;
+      await runProbeAlerts(env, t0 + 20 * 60000);
+      expect(tgCalls).toHaveLength(0);
+
+      // Drops below threshold -> clears state, NO recovery notification
+      cpu = 40;
+      await runProbeAlerts(env, t0 + 25 * 60000);
+      expect(tgCalls).toHaveLength(0);
+      const state = await kv.get(ALERT_STATE_KEY, { type: 'json' });
+      expect(state.nodes.n1.breach.cpu).toBe(0);
+      expect(state.nodes.n1.notifiedBreach.cpu).toBe(false);
+    });
+  });
+
+  it('respects intervalMinutes gating, performs zero KV writes when steady-state healthy, and honors skipCacheWrite', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:ZERO_WRITE', ADMIN_IDS: '10001' };
+    await savePanelConfig(env, {
+      probe: {
+        provider: 'json',
+        url: 'https://probe.test/stats.json',
+        alerts: { enabled: true, intervalMinutes: 10 },
+      },
+    });
+
+    const { probeCalls, fetchMock } = setupMockNet({
+      probeResponder: () => jsonNodesRes([{ id: 'n1', name: 'SG-01', online: true, cpu: 25, memory: 40, disk: 50 }]),
+    });
+
+    await withFetch(fetchMock, async () => {
+      // 10:05 is NOT divisible by 10 -> skipped!
+      const skipped = await runProbeAlerts(env, Date.parse('2026-11-26T10:05:00Z'));
+      expect(skipped.skipped).toBe(true);
+      expect(skipped.reason).toBe('interval');
+      expect(probeCalls).toHaveLength(0);
+
+      // 10:10 IS divisible by 10 -> runs baseline (writes alert:state once, does NOT write cache:komari_probe!)
+      const first = await runProbeAlerts(env, Date.parse('2026-11-26T10:10:00Z'));
+      expect(first.skipped).toBe(false);
+      expect(first.stateWritten).toBe(true);
+      expect(await kv.get('cache:komari_probe')).toBeNull();
+
+      // 10:20 steady-state healthy -> ZERO KV writes (neither alert:state nor cache:komari_probe)!
+      const putSpy = vi.spyOn(kv, 'put');
+      const steady = await runProbeAlerts(env, Date.parse('2026-11-26T10:20:00Z'));
+      expect(steady.skipped).toBe(false);
+      expect(steady.stateWritten).toBe(false);
+      expect(putSpy).toHaveBeenCalledTimes(0);
+      expect(await kv.get('cache:komari_probe')).toBeNull();
+    });
+  });
+
+  it('routes alerts to dedicated Forum Topic (reusing & recreating if deleted), merges >10 alerts, and supports alert-test API with rate limit', async () => {
+    const kv = createMemoryKV();
+    const botToken = '123:ALERT_ROUTE';
+    const env = {
+      TOPIC_MAP: kv,
+      BOT_TOKEN: botToken,
+      ADMIN_IDS: '10001',
+      SUPERGROUP_ID: '-100555999',
+      BOT_USERNAME: 'RoseTest_bot',
+      APP_SHORT_NAME: 'panel',
+    };
+    await savePanelConfig(env, {
+      probe: {
+        provider: 'json',
+        url: 'https://probe.test/stats.json',
+        alerts: { enabled: true, intervalMinutes: 5, confirmChecks: 1 },
+      },
+    });
+
+    // 12 nodes all online -> all 12 drop offline in same tick -> merged into ONE message listing 10 + "另有 2 个"
+    let allOnline = true;
+    const twelveNodes = () =>
+      Array.from({ length: 12 }, (_, i) => ({
+        id: `n-${i + 1}`,
+        name: `Node-${String(i + 1).padStart(2, '0')}`,
+        online: allOnline,
+      }));
+
+    let failFirstTopicSend = false;
+    const { tgCalls, fetchMock } = setupMockNet({
+      probeResponder: () => jsonNodesRes(twelveNodes()),
+      tgOverrides: {
+        sendMessage: (body) => {
+          if (failFirstTopicSend) {
+            failFirstTopicSend = false;
+            return new Response(
+              JSON.stringify({ ok: false, error_code: 400, description: 'Bad Request: message thread not found' }),
+              { status: 400 }
+            );
+          }
+          return new Response(JSON.stringify({ ok: true, result: { message_id: 200, chat: { id: body.chat_id } } }), {
+            status: 200,
+          });
+        },
+      },
+    });
+
+    const t0 = Date.parse('2026-11-26T10:00:00Z');
+    await withFetch(fetchMock, async () => {
+      // Via worker.scheduled entrypoint
+      const waitPromises = [];
+      await worker.scheduled({ scheduledTime: t0 }, env, { waitUntil: (p) => waitPromises.push(p) });
+      await Promise.all(waitPromises);
+      expect(tgCalls).toHaveLength(0);
+
+      // All 12 drop offline -> creates dedicated alert topic (901), sends ONE merged message with 10 items + overflow note
+      allOnline = false;
+      await runProbeAlerts(env, t0 + 5 * 60000);
+      expect(tgCalls.filter((c) => c.method === 'createForumTopic')).toHaveLength(1);
+      expect(await kv.get(ALERT_TOPIC_ID_KEY)).toBe('901');
+      const sentAlerts = tgCalls.filter((c) => c.method === 'sendMessage');
+      expect(sentAlerts).toHaveLength(1);
+      expect(sentAlerts[0].body.message_thread_id).toBe(901);
+      expect(sentAlerts[0].body.text).toContain('另有 2 个');
+      expect(sentAlerts[0].body.reply_markup.inline_keyboard[0][0].url).toBe(
+        'https://t.me/RoseTest_bot/panel?startapp=probe'
+      );
+
+      // All 12 recover, and simulate deleted alert topic -> recreates topic (902) and resends cleanly
+      tgCalls.length = 0;
+      failFirstTopicSend = true;
+      allOnline = true;
+      await runProbeAlerts(env, t0 + 10 * 60000);
+      expect(tgCalls.filter((c) => c.method === 'createForumTopic')).toHaveLength(1);
+      expect(await kv.get(ALERT_TOPIC_ID_KEY)).toBe('902');
+
+      // POST /api/admin/probe/alert-test: blocks guest (403), allows admin up to 3/min then 429
+      const now = Math.floor(Date.now() / 1000);
+      const guestInit = await signInitData(
+        { auth_date: String(now), user: JSON.stringify({ id: 20002, first_name: 'Guest' }) },
+        botToken
+      );
+      const adminInit = await signInitData(
+        { auth_date: String(now), user: JSON.stringify({ id: 10001, first_name: 'Owner' }) },
+        botToken
+      );
+      const guestRes = await worker.fetch(
+        new Request('https://panel.test/api/admin/probe/alert-test', {
+          method: 'POST',
+          headers: { 'X-Telegram-Init-Data': guestInit },
+        }),
+        env
+      );
+      expect(guestRes.status).toBe(403);
+
+      for (let i = 0; i < 3; i += 1) {
+        const okRes = await worker.fetch(
+          new Request('https://panel.test/api/admin/probe/alert-test', {
+            method: 'POST',
+            headers: { 'X-Telegram-Init-Data': adminInit },
+          }),
+          env
+        );
+        expect(okRes.status).toBe(200);
+        const body = await okRes.json();
+        expect(body.ok).toBe(true);
+        expect(body.mode).toBe('topic');
+      }
+      const limitedRes = await worker.fetch(
+        new Request('https://panel.test/api/admin/probe/alert-test', {
+          method: 'POST',
+          headers: { 'X-Telegram-Init-Data': adminInit },
+        }),
+        env
+      );
+      expect(limitedRes.status).toBe(429);
+    });
+  });
+
+  it('strips probe.alerts from sanitizePublicConfig while keeping it clamped in sanitizeAdminConfig', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, ADMIN_IDS: '10001' };
+    const saved = await savePanelConfig(env, {
+      probe: {
+        url: 'https://probe.test',
+        alerts: {
+          enabled: true,
+          intervalMinutes: 7, // invalid -> falls back to 5
+          confirmChecks: 99, // clamped to 5
+          mutedNodes: ['a', 'a', '  b  ', ''],
+          resource: { enabled: true, cpu: 20, ram: 120, disk: 0, sustainChecks: 0 },
+        },
+      },
+    });
+
+    expect(saved.probe.alerts.intervalMinutes).toBe(5);
+    expect(saved.probe.alerts.confirmChecks).toBe(5);
+    expect(saved.probe.alerts.mutedNodes).toEqual(['a', 'b']);
+    expect(saved.probe.alerts.resource).toEqual({
+      enabled: true,
+      cpu: 50,
+      ram: 100,
+      disk: 0,
+      sustainChecks: 1,
+    });
+
+    const pubGuest = sanitizePublicConfig(saved, env, false);
+    const pubAdmin = sanitizePublicConfig(saved, env, true);
+    expect('alerts' in pubGuest.probe).toBe(false);
+    expect('alerts' in pubAdmin.probe).toBe(false);
+
+    const adminCfg = sanitizeAdminConfig(saved, env, { inboxMode: 'dm', ownerUnreachable: false });
+    expect(adminCfg.probe.alerts.enabled).toBe(true);
+    expect(formatAlertMessage([]).text).toBe('');
+    expect(evaluateProbeAlerts(null, { protocol: 'json', nodes: [] }, saved.probe.alerts, 0).events).toEqual([]);
   });
 });

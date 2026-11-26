@@ -9,6 +9,17 @@ export const HIDE_STAR_STRIP_STORAGE_KEY = 'rose_hide_star_strip';
 
 export const RECENT_RELEASES = [
   {
+    version: '1.8.0',
+    url: 'https://github.com/mango0114/rose-panel-bot/releases/tag/v1.8.0',
+    items: [
+      {
+        tag: '新增',
+        tone: 'new',
+        text: '探针掉线 / 恢复与 CPU·内存·磁盘超限告警（默认关闭，在「设置 → 节点探针」一键开启，支持静音节点与测试告警）',
+      },
+    ],
+  },
+  {
     version: '1.7.0',
     url: 'https://github.com/mango0114/rose-panel-bot/releases/tag/v1.7.0',
     items: [

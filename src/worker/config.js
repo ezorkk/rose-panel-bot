@@ -56,6 +56,21 @@ function isLegacyDefaultTgSocial(item) {
   );
 }
 
+export const DEFAULT_PROBE_ALERTS = {
+  enabled: false, // 总开关，默认关闭
+  intervalMinutes: 5, // 5 | 10 | 15 | 30
+  confirmChecks: 2, // 1–5
+  notifyRecovery: true,
+  mutedNodes: [], // 节点 uuid 列表
+  resource: {
+    enabled: false, // 资源告警单独开关，默认关闭
+    cpu: 90, // 50–100，填 0 表示不检测这一项
+    ram: 90,
+    disk: 90,
+    sustainChecks: 3, // 1–10
+  },
+};
+
 export const DEFAULT_CONFIG = {
   profile: {
     displayName: 'RosePanel',
@@ -114,6 +129,7 @@ export const DEFAULT_CONFIG = {
     cacheTtlSeconds: 15,
     demoMode: false,
     visibility: 'public', // public | private
+    alerts: structuredClone(DEFAULT_PROBE_ALERTS),
   },
   community: {
     enableCheckin: false, // 个人名片模式默认关闭；群社区部署时可一键开启
@@ -263,7 +279,69 @@ export function normalizeSplash(baseSplash = DEFAULT_SPLASH, override = null) {
 }
 
 export const PROBE_PROVIDER_IDS = ['komari', 'nezha', 'nodeget', 'json'];
+export const ALERT_INTERVAL_OPTIONS = [5, 10, 15, 30];
 const AVATAR_MODES = ['bot', 'owner', 'custom'];
+
+function clampInt(val, min, max, fallback) {
+  if (val === '' || val === null || val === undefined) return fallback;
+  const n = Number(val);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(Math.round(n), min), max);
+}
+
+function clampAlertThreshold(val, fallback = 90) {
+  if (val === '' || val === null || val === undefined) return fallback;
+  const n = Number(val);
+  if (!Number.isFinite(n)) return fallback;
+  const rounded = Math.round(n);
+  if (rounded <= 0) return 0; // 0 disables monitoring for this metric
+  return Math.min(Math.max(rounded, 50), 100);
+}
+
+export function normalizeProbeAlerts(baseAlerts = DEFAULT_PROBE_ALERTS, override = null) {
+  const base = baseAlerts && typeof baseAlerts === 'object' ? baseAlerts : DEFAULT_PROBE_ALERTS;
+  const ov = override && typeof override === 'object' ? override : {};
+  const rawInterval = Number(ov.intervalMinutes ?? base.intervalMinutes ?? DEFAULT_PROBE_ALERTS.intervalMinutes);
+  const intervalMinutes = ALERT_INTERVAL_OPTIONS.includes(rawInterval)
+    ? rawInterval
+    : DEFAULT_PROBE_ALERTS.intervalMinutes;
+  const rawMuted = Array.isArray(ov.mutedNodes)
+    ? ov.mutedNodes
+    : Array.isArray(base.mutedNodes)
+      ? base.mutedNodes
+      : [];
+  const mutedNodes = Array.from(
+    new Set(
+      rawMuted
+        .map((id) => String(id ?? '').trim().slice(0, 128))
+        .filter(Boolean)
+    )
+  ).slice(0, 200);
+
+  const baseRes =
+    base.resource && typeof base.resource === 'object' ? base.resource : DEFAULT_PROBE_ALERTS.resource;
+  const ovRes = ov.resource && typeof ov.resource === 'object' ? ov.resource : {};
+
+  return {
+    enabled: Boolean(ov.enabled ?? base.enabled ?? false),
+    intervalMinutes,
+    confirmChecks: clampInt(ov.confirmChecks ?? base.confirmChecks, 1, 5, DEFAULT_PROBE_ALERTS.confirmChecks),
+    notifyRecovery: (ov.notifyRecovery ?? base.notifyRecovery) !== false,
+    mutedNodes,
+    resource: {
+      enabled: Boolean(ovRes.enabled ?? baseRes.enabled ?? false),
+      cpu: clampAlertThreshold(ovRes.cpu ?? baseRes.cpu, DEFAULT_PROBE_ALERTS.resource.cpu),
+      ram: clampAlertThreshold(ovRes.ram ?? baseRes.ram, DEFAULT_PROBE_ALERTS.resource.ram),
+      disk: clampAlertThreshold(ovRes.disk ?? baseRes.disk, DEFAULT_PROBE_ALERTS.resource.disk),
+      sustainChecks: clampInt(
+        ovRes.sustainChecks ?? baseRes.sustainChecks,
+        1,
+        10,
+        DEFAULT_PROBE_ALERTS.resource.sustainChecks
+      ),
+    },
+  };
+}
 
 function resolveAvatarMode(rawMode, avatarUrl) {
   if (AVATAR_MODES.includes(rawMode)) return rawMode;
@@ -279,12 +357,15 @@ export function mergeConfig(base, override) {
     cloned.profile.avatarMode = resolveAvatarMode(cloned.profile.avatarMode, cloned.profile.avatarUrl);
     cloned.probe.visibility = cloned.probe.visibility === 'private' ? 'private' : 'public';
     cloned.probe.provider = PROBE_PROVIDER_IDS.includes(cloned.probe.provider) ? cloned.probe.provider : 'komari';
+    cloned.probe.alerts = normalizeProbeAlerts(DEFAULT_PROBE_ALERTS, cloned.probe.alerts);
+    cloned.siteOrigin = String(cloned.siteOrigin || '').trim();
     return cloned;
   }
   const rawSites = Array.isArray(override.sites) ? override.sites : base.sites;
   const mergedProbe = {
     ...base.probe,
     ...(override.probe || {}),
+    alerts: normalizeProbeAlerts(base.probe?.alerts, override.probe?.alerts),
   };
   mergedProbe.visibility = mergedProbe.visibility === 'private' ? 'private' : 'public';
   mergedProbe.provider = PROBE_PROVIDER_IDS.includes(mergedProbe.provider) ? mergedProbe.provider : 'komari';
@@ -345,6 +426,9 @@ export function mergeConfig(base, override) {
     botUsername: String(override.botUsername ?? base.botUsername ?? '')
       .trim()
       .replace(/^@/, ''),
+    siteOrigin: String(override.siteOrigin ?? base.siteOrigin ?? '')
+      .trim()
+      .replace(/\/+$/, ''),
   };
 }
 
@@ -423,6 +507,9 @@ export async function savePanelConfig(env, nextConfig) {
 
   // Clamp numeric settings
   merged.probe.cacheTtlSeconds = Math.min(Math.max(Number(merged.probe.cacheTtlSeconds) || 15, 5), 300);
+  merged.probe.alerts = normalizeProbeAlerts(DEFAULT_PROBE_ALERTS, merged.probe.alerts);
+  const rawSiteOrigin = String(merged.siteOrigin || '').trim().replace(/\/+$/, '');
+  merged.siteOrigin = /^https:\/\/[^\s/]+$/i.test(rawSiteOrigin) ? rawSiteOrigin.slice(0, 200) : '';
   merged.community.dailyMinPoints = Math.min(Math.max(Number(merged.community.dailyMinPoints) || 10, 1), 1000);
   merged.community.dailyMaxPoints = Math.min(
     Math.max(Number(merged.community.dailyMaxPoints) || 25, merged.community.dailyMinPoints),

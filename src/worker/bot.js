@@ -412,7 +412,7 @@ function buildVisitorModerationKeyboard(env, requestOrigin, detail, { isGroup = 
   return { inline_keyboard: [[profileBtn], row2] };
 }
 
-async function checkRateLimit(env, key, limit = 40, windowSec = 60) {
+export async function checkRateLimit(env, key, limit = 40, windowSec = 60) {
   if (!env.TOPIC_MAP) return true;
   const count = Number((await env.TOPIC_MAP.get(key)) || 0);
   if (count >= limit) return false;

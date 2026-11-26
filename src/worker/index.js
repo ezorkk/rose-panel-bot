@@ -1,5 +1,6 @@
 // Main Cloudflare Worker Entrypoint for RosePanel Bot
 
+import { runProbeAlerts } from './alerts.js';
 import { handleApiRequest } from './api.js';
 import { parseAdminIds } from './auth.js';
 import {
@@ -7,7 +8,7 @@ import {
   handleTelegramUpdate,
   syncTelegramBotSurface,
 } from './bot.js';
-import { loadPanelConfig, resolveSupergroupId, safeGetJSON } from './config.js';
+import { loadPanelConfig, resolveSupergroupId, safeGetJSON, savePanelConfig } from './config.js';
 import { serveEmbeddedAsset } from './embedded-assets.js';
 import { tgCall } from './telegram.js';
 import { renderTurnstileVerifyPage, verifyTurnstileToken } from './turnstile.js';
@@ -61,6 +62,9 @@ async function handleSetup(request, env, url) {
   results.setWebhook = await tgCall(env, 'setWebhook', webhookPayload);
 
   // 2. Sync commands, pre-Start description, cached @username & bottom-left menu button
+  if (/^https:\/\//i.test(origin) && config.siteOrigin !== origin && env.TOPIC_MAP) {
+    await savePanelConfig(env, { siteOrigin: origin }).catch(() => {});
+  }
   const synced = await syncTelegramBotSurface(env, origin, config);
   Object.assign(results, synced.results || {});
 
@@ -240,5 +244,16 @@ export default {
     }
 
     return new Response('Not Found', { status: 404 });
+  },
+
+  async scheduled(event, env, ctx) {
+    const work = runProbeAlerts(env, event?.scheduledTime ?? Date.now()).catch((err) => {
+      console.error('Probe alerts cron error:', err);
+    });
+    if (ctx?.waitUntil) {
+      ctx.waitUntil(work);
+    } else {
+      await work;
+    }
   },
 };
