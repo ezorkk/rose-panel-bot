@@ -6,7 +6,7 @@
 import { parseAdminIds } from './auth.js';
 import { resolveSupergroupId, safeGetJSON, safePutJSON } from './config.js';
 import { buildPanelButton, escapeHtml, tgCall } from './telegram.js';
-import { formatDisplayName, recordVisitorExchange, upsertVisitorProfile } from './visitors.js';
+import { formatDisplayName, formatSourceLabel, recordVisitorExchange, upsertVisitorProfile } from './visitors.js';
 
 export const DM_LAST_HEADER_KEY = 'dm:last_header';
 export const DM_OWNER_UNREACHABLE_KEY = 'dm:owner_unreachable';
@@ -102,7 +102,7 @@ export async function lookupDmMessageMap(env, ownerMsgId) {
  * copies the original message verbatim, maps both message IDs in KV (`dmmap:*`), and
  * captures push errors (e.g. 403 when owner hasn't /started the bot) without throwing.
  */
-export async function pushToOwner(env, origin, msg, knownPreview = undefined) {
+export async function pushToOwner(env, origin, msg, knownPreview = undefined, visitorSource = '') {
   const ownerId = getOwnerChatId(env);
   if (!ownerId) {
     return { mode: 'off', delivered: false };
@@ -135,6 +135,9 @@ export async function pushToOwner(env, origin, msg, knownPreview = undefined) {
         ? `<a href="tg://user?id=${safeUid}"><b>${escapeHtml(displayName)}</b></a>`
         : `<b>${escapeHtml(displayName)}</b>`;
       const lines = [`👤 ${nameHtml}${handlePart} · <code>${escapeHtml(uid)}</code>`];
+      if (visitorSource) {
+        lines.push(`• 来源：${escapeHtml(formatSourceLabel(visitorSource))}`);
+      }
       if (preview) {
         lines.push(escapeHtml(preview));
       }
@@ -207,7 +210,7 @@ export async function deliverVisitorMessage(env, origin, msg, options = {}) {
   const user = msg.from;
   const uid = String(user.id);
   const preview = previewTextOfMessage(msg);
-  await upsertVisitorProfile(env, user, { incrementMsg: false, lastPreview: preview });
+  const profile = await upsertVisitorProfile(env, user, { incrementMsg: false, lastPreview: preview });
 
   let delivery;
   if (mode === 'topic') {
@@ -219,7 +222,7 @@ export async function deliverVisitorMessage(env, origin, msg, options = {}) {
       ? { mode: 'topic', delivered: true, supergroupId: topicRes.supergroupId, threadId: topicRes.threadId }
       : { mode: 'topic', delivered: false };
   } else {
-    delivery = await pushToOwner(env, origin, msg, preview);
+    delivery = await pushToOwner(env, origin, msg, preview, profile?.source || '');
   }
 
   await recordVisitorExchange(env, uid, msg, {

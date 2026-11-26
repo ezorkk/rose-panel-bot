@@ -10,6 +10,7 @@ import { assessIncomingRisk, checkCasBlacklist, normalizeAntiSpamText } from '..
 import { signMediaToken, verifyMediaToken, verifyTelegramInitData } from '../src/worker/auth.js';
 import {
   buildVisitorCardCaption,
+  buildVisitorCardText,
   completeTurnstileVerification,
   generateInlineChallenge,
   generateStickerChallenge,
@@ -44,16 +45,24 @@ import { BRAND_NAME, BRAND_SIGNATURE } from '../web/src/lib/brand.js';
 import pkg from '../package.json' with { type: 'json' };
 import {
   applyVisitorAction,
+  buildSourceLink,
   clearVisitorHistory,
+  computeSourceStats,
   extractLinksFromMessage,
   extractPhotoFromMessage,
   getVisitorDetail,
   getVisitorHistory,
   getVisitorOverview,
   listVisitors,
+  normalizeSourceParam,
   recordVisitorExchange,
+  rememberPendingSource,
   upsertVisitorProfile,
 } from '../src/worker/visitors.js';
+import {
+  buildSourceLink as buildClientSourceLink,
+  normalizeSourceParam as normalizeClientSourceParam,
+} from '../web/src/lib/telegram.js';
 
 // Minimal in-memory Cloudflare KV mock
 function createMemoryKV() {
@@ -4262,5 +4271,362 @@ describe('Share card poster & Open Graph link preview (v1.8)', () => {
 
     const withoutBot = sanitizePublicConfig(config, { TOPIC_MAP: kv }, false, 'https://panel.example.com');
     expect(withoutBot.shareUrl).toBe('https://panel.example.com/');
+  });
+});
+
+describe('Visitor source parameter attribution & promo links (v1.8)', () => {
+  it('normalizes valid source params and rejects empty, uppercase, spaces, special chars, and >24 chars', () => {
+    for (const fn of [normalizeSourceParam, normalizeClientSourceParam]) {
+      expect(fn('src_site')).toBe('site');
+      expect(fn('site')).toBe('site');
+      expect(fn('src_nodeseek_2026')).toBe('nodeseek_2026');
+      expect(fn('a'.repeat(24))).toBe('a'.repeat(24));
+      expect(fn(`src_${'a'.repeat(24)}`)).toBe('a'.repeat(24));
+
+      expect(fn('')).toBe('');
+      expect(fn('src_')).toBe('');
+      expect(fn('Site')).toBe('');
+      expect(fn('src_Site')).toBe('');
+      expect(fn('my site')).toBe('');
+      expect(fn('src_my site')).toBe('');
+      expect(fn('src_<script>')).toBe('');
+      expect(fn('foo-bar')).toBe('');
+      expect(fn('a'.repeat(25))).toBe('');
+      expect(fn(`src_${'a'.repeat(25)}`)).toBe('');
+      expect(fn(null)).toBe('');
+      expect(fn(123)).toBe('');
+    }
+  });
+
+  it('records src:{uid} during /start before verification, persists onto profile on first message, and deletes src:{uid}', async () => {
+    const kv = createMemoryKV();
+    const env = {
+      TOPIC_MAP: kv,
+      BOT_TOKEN: '123456:TEST_TOKEN',
+      ADMIN_IDS: '999001',
+    };
+    await savePanelConfig(env, {
+      pmBot: { enableVerification: true, verificationMode: 'emoji', enableCasCheck: false },
+    });
+
+    const tgCalls = [];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, opts) => {
+      const method = String(url).split('/').pop();
+      const body = opts?.body ? JSON.parse(opts.body) : {};
+      tgCalls.push({ method, body });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 400 + tgCalls.length } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    try {
+      const visitor = { id: 50101, first_name: 'Newcomer', username: 'newcomer' };
+      const putSpy = vi.spyOn(kv, 'put');
+
+      // 1. Visitor taps /start src_site while still unverified
+      await handleTelegramUpdate(
+        {
+          update_id: 1,
+          message: {
+            message_id: 10,
+            from: visitor,
+            chat: { id: 50101, type: 'private' },
+            text: '/start src_site',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+
+      // Pending source written with 7d TTL; visitor is NOT yet in visitor list
+      expect(await kv.get('src:50101')).toBe('site');
+      const srcPut = putSpy.mock.calls.find(([k]) => k === 'src:50101');
+      expect(srcPut?.[2]).toEqual({ expirationTtl: 7 * 86400 });
+      expect(await kv.get('user:50101')).toBeNull();
+
+      // 2. Visitor passes verification and sends first message
+      await kv.put('verified:50101', 'emoji:v1');
+      await handleTelegramUpdate(
+        {
+          update_id: 2,
+          message: {
+            message_id: 11,
+            from: visitor,
+            chat: { id: 50101, type: 'private' },
+            text: '你好，从小站过来的！',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+
+      const detail = await getVisitorDetail(env, '50101');
+      expect(detail.source).toBe('site');
+      expect(detail.source_at).toBeTruthy();
+      expect(await kv.get('src:50101')).toBeNull();
+
+      // DM push header card also displays the source
+      const headerPush = tgCalls.find(
+        (c) => c.method === 'sendMessage' && String(c.body.chat_id) === '999001' && String(c.body.text || '').includes('50101')
+      );
+      expect(headerPush?.body?.text).toContain('• 来源：个人小站');
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('keeps first-touch source only: never overwrites pending src:{uid} or existing visitor source', async () => {
+    const kv = createMemoryKV();
+    const env = {
+      TOPIC_MAP: kv,
+      BOT_TOKEN: '123456:TEST_TOKEN',
+      ADMIN_IDS: '999001',
+    };
+    await savePanelConfig(env, {
+      pmBot: { enableVerification: false, verificationMode: 'off', enableCasCheck: false },
+    });
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ ok: true, result: { message_id: 501 } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+    );
+
+    try {
+      const visitor = { id: 50202, first_name: 'FirstTouch' };
+      await handleTelegramUpdate(
+        {
+          update_id: 10,
+          message: { message_id: 20, from: visitor, chat: { id: 50202, type: 'private' }, text: '/start src_site' },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(await kv.get('src:50202')).toBe('site');
+
+      // Second /start with different channel must NOT overwrite
+      const putSpy = vi.spyOn(kv, 'put');
+      await handleTelegramUpdate(
+        {
+          update_id: 11,
+          message: { message_id: 21, from: visitor, chat: { id: 50202, type: 'private' }, text: '/start src_channel' },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(await kv.get('src:50202')).toBe('site');
+      expect(putSpy.mock.calls.filter(([k]) => k === 'src:50202')).toHaveLength(0);
+
+      // Persist onto profile via first message
+      await upsertVisitorProfile(env, visitor, { incrementMsg: true, lastPreview: 'hi' });
+      expect((await getVisitorDetail(env, '50202')).source).toBe('site');
+      expect(await kv.get('src:50202')).toBeNull();
+
+      // Returning visitor with existing source arriving via another link does not overwrite or write src:{uid}
+      putSpy.mockClear();
+      const wrote = await rememberPendingSource(env, '50202', 'poster');
+      expect(wrote).toBe(false);
+      expect(await kv.get('src:50202')).toBeNull();
+      expect(putSpy).not.toHaveBeenCalled();
+      expect((await getVisitorDetail(env, '50202')).source).toBe('site');
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('ignores /start panel, bare /start, invalid /start src_<script>, and admin /start src_site', async () => {
+    const kv = createMemoryKV();
+    const env = {
+      TOPIC_MAP: kv,
+      BOT_TOKEN: '123456:TEST_TOKEN',
+      ADMIN_IDS: '999001',
+    };
+    await savePanelConfig(env, {
+      pmBot: { enableVerification: true, verificationMode: 'emoji', enableCasCheck: false },
+    });
+
+    const tgCalls = [];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, opts) => {
+      tgCalls.push({ method: String(url).split('/').pop(), body: opts?.body ? JSON.parse(opts.body) : {} });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 600 + tgCalls.length } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    try {
+      // Non-src /start variants do not write src:* and still trigger normal verification
+      for (const [uid, text] of [
+        [50301, '/start panel'],
+        [50302, '/start'],
+        [50303, '/start src_<script>'],
+      ]) {
+        await handleTelegramUpdate(
+          {
+            update_id: uid,
+            message: { message_id: 30, from: { id: uid, first_name: 'Guest' }, chat: { id: uid, type: 'private' }, text },
+          },
+          env,
+          'https://panel.test'
+        );
+        expect(await kv.get(`src:${uid}`)).toBeNull();
+        // Normal verification flow still triggered
+        expect(tgCalls.some((c) => c.method === 'sendMessage' && Number(c.body.chat_id) === uid)).toBe(true);
+      }
+
+      // Admin /start src_site never records source
+      await handleTelegramUpdate(
+        {
+          update_id: 999,
+          message: {
+            message_id: 31,
+            from: { id: 999001, first_name: 'Owner' },
+            chat: { id: 999001, type: 'private' },
+            text: '/start src_site',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(await kv.get('src:999001')).toBeNull();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('records valid source from POST /api/chat/start and ignores invalid source', async () => {
+    const kv = createMemoryKV();
+    const botToken = '123456:CHAT_SRC_SECRET';
+    const env = {
+      TOPIC_MAP: kv,
+      BOT_TOKEN: botToken,
+      ADMIN_IDS: '999001',
+    };
+    await savePanelConfig(env, {
+      pmBot: { enableVerification: true, verificationMode: 'emoji', enableCasCheck: false },
+    });
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ ok: true, result: { message_id: 701 } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+    );
+
+    try {
+      const guest1Init = await signInitData(
+        { user: JSON.stringify({ id: 50401, first_name: 'PosterUser' }), auth_date: Math.floor(Date.now() / 1000) },
+        botToken
+      );
+      const res1 = await worker.fetch(
+        new Request('https://panel.test/api/chat/start', {
+          method: 'POST',
+          headers: { 'X-Telegram-Init-Data': guest1Init, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ source: 'poster' }),
+        }),
+        env
+      );
+      expect(res1.status).toBe(200);
+      expect(await kv.get('src:50401')).toBe('poster');
+
+      const guest2Init = await signInitData(
+        { user: JSON.stringify({ id: 50402, first_name: 'BadSrcUser' }), auth_date: Math.floor(Date.now() / 1000) },
+        botToken
+      );
+      const res2 = await worker.fetch(
+        new Request('https://panel.test/api/chat/start', {
+          method: 'POST',
+          headers: { 'X-Telegram-Init-Data': guest2Init, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ source: 'BAD <SCRIPT>' }),
+        }),
+        env
+      );
+      expect(res2.status).toBe(200);
+      expect(await kv.get('src:50402')).toBeNull();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('renders visitor card source with built-in label or HTML-escaped custom channel name', () => {
+    const baseDetail = {
+      userId: '50501',
+      displayName: 'Carol',
+      username: 'carol',
+      status: 'verified',
+      msg_count: 1,
+      visitor_msg_count: 1,
+      admin_msg_count: 0,
+      photo_count: 0,
+      link_count: 0,
+    };
+
+    const posterCard = buildVisitorCardText({ ...baseDetail, source: 'poster' });
+    expect(posterCard).toContain('• 来源：分享海报');
+
+    const customCard = buildVisitorCardText({ ...baseDetail, source: 'nodeseek' });
+    expect(customCard).toContain('• 来源：nodeseek');
+
+    const xssCard = buildVisitorCardText({ ...baseDetail, source: 'a<script>"x"</script>' });
+    expect(xssCard).not.toContain('<script>');
+    expect(xssCard).toContain('• 来源：a&lt;script&gt;&quot;x&quot;&lt;/script&gt;');
+
+    const noSourceCard = buildVisitorCardText({ ...baseDetail, source: '' });
+    expect(noSourceCard).not.toContain('• 来源：');
+  });
+
+  it('computes source stats on the fly with legacy visitors grouped under 未知 and zero KV writes on read', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, ADMIN_IDS: '999001' };
+
+    await rememberPendingSource(env, '60101', 'poster');
+    await upsertVisitorProfile(env, { id: 60101, first_name: 'U1' }, { incrementMsg: true });
+    await rememberPendingSource(env, '60102', 'poster');
+    await upsertVisitorProfile(env, { id: 60102, first_name: 'U2' }, { incrementMsg: true });
+    await rememberPendingSource(env, '60103', 'nodeseek');
+    await upsertVisitorProfile(env, { id: 60103, first_name: 'U3' }, { incrementMsg: true });
+    // Legacy visitor without any source
+    await upsertVisitorProfile(env, { id: 60104, first_name: 'Legacy' }, { incrementMsg: true });
+
+    // Warm one-time migration flags & summary cache
+    const firstList = await listVisitors(env);
+    expect(firstList.sourceStats).toEqual([
+      { source: 'poster', label: '分享海报', count: 2 },
+      { source: 'nodeseek', label: 'nodeseek', count: 1 },
+      { source: '', label: '未知', count: 1 },
+    ]);
+
+    // Subsequent reads of listVisitors, getVisitorOverview, and computeSourceStats must produce ZERO KV writes
+    const putSpy = vi.spyOn(kv, 'put');
+    const secondList = await listVisitors(env);
+    const overview = await getVisitorOverview(env);
+    const directStats = computeSourceStats(secondList.items);
+
+    expect(putSpy).not.toHaveBeenCalled();
+    expect(secondList.sourceStats).toEqual(firstList.sourceStats);
+    expect(overview.sourceStats).toEqual(firstList.sourceStats);
+    expect(overview.recent.some((v) => v.userId === '60101' && v.source === 'poster')).toBe(true);
+    expect(directStats).toEqual(firstList.sourceStats);
+  });
+
+  it('builds source links correctly for bot, app, and web kinds and uses & when query already exists', () => {
+    for (const fn of [buildSourceLink, buildClientSourceLink]) {
+      expect(fn('https://t.me/mybot', 'site', 'bot')).toBe('https://t.me/mybot?start=src_site');
+      expect(fn('https://t.me/mybot', 'src_site', 'bot')).toBe('https://t.me/mybot?start=src_site');
+      expect(fn('https://t.me/mybot/panel', 'poster', 'app')).toBe('https://t.me/mybot/panel?startapp=src_poster');
+      expect(fn('https://example.com/', 'link', 'web')).toBe('https://example.com/?src=link');
+
+      // Preserves existing query string with `&`
+      expect(fn('https://t.me/mybot?ref=1', 'channel', 'bot')).toBe('https://t.me/mybot?ref=1&start=src_channel');
+      expect(fn('https://t.me/mybot/panel?foo=bar', 'link', 'app')).toBe('https://t.me/mybot/panel?foo=bar&startapp=src_link');
+      expect(fn('https://example.com/?tab=profile', 'poster', 'web')).toBe('https://example.com/?tab=profile&src=poster');
+
+      // Invalid source returns base untouched
+      expect(fn('https://t.me/mybot', 'INVALID!', 'bot')).toBe('https://t.me/mybot');
+    }
   });
 });

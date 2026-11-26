@@ -2063,3 +2063,53 @@ select {
   flex: 1 1 130px;
   justify-content: center;
 }
+
+/* Visitor insights bar (source stats & monthly visits) */
+.visitor-insight-bar {
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.visitor-insight-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  line-height: 1.5;
+}
+
+.visitor-insight-label {
+  font-weight: 700;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.visitor-insight-val {
+  color: var(--text-secondary);
+}
+
+/* Promo link helper rows inside Settings */
+.promo-link-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg-subtle);
+  border-radius: 14px;
+  padding: 9px 11px;
+}
+
+.promo-link-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.promo-link-url {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  word-break: break-all;
+}

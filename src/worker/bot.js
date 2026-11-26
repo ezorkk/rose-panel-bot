@@ -41,9 +41,12 @@ import {
 import {
   applyVisitorAction,
   formatDisplayName,
+  formatSourceLabel,
   getVisitorDetail,
+  normalizeSourceParam,
   recallAdminVisitorMessage,
   recordVisitorExchange,
+  rememberPendingSource,
   upsertVisitorProfile,
 } from './visitors.js';
 
@@ -280,7 +283,7 @@ function serializePendingMessage(msg) {
   };
 }
 
-function buildVisitorCardText(detail) {
+export function buildVisitorCardText(detail) {
   const statusMap = {
     banned: '🚫 已拉黑',
     trusted: '⭐ 永久信任',
@@ -302,6 +305,9 @@ function buildVisitorCardText(detail) {
     `• 聊天统计：共 <b>${detail.msg_count || 0}</b> 条（对方 ${detail.visitor_msg_count || 0} · 我 ${detail.admin_msg_count || 0}）`,
     `• 归档媒体：🖼️ ${detail.photo_count || 0} 图 · 🔗 ${detail.link_count || 0} 链`,
   ];
+  if (detail.source) {
+    lines.push(`• 来源：${escapeHtml(formatSourceLabel(detail.source))}`);
+  }
   if (detail.note) {
     lines.push(`• 备注：${escapeHtml(detail.note)}`);
   }
@@ -2194,6 +2200,14 @@ export async function handleTelegramUpdate(update, env, requestOrigin) {
         if (inboxMode === 'dm' && uid === getOwnerChatId(env)) {
           await clearOwnerUnreachable(env);
         }
+        // Record first-touch source attribution (`src_<channel>`) before verification so
+        // visitors who must verify first still retain their referral source.
+        if (!isAdmin && parsed.args && parsed.args.startsWith('src_')) {
+          const src = normalizeSourceParam(parsed.args);
+          if (src) {
+            await rememberPendingSource(env, uid, src).catch(() => {});
+          }
+        }
         const verified = await env.TOPIC_MAP.get(`verified:${uid}`);
         const needsVerify = await env.TOPIC_MAP.get(`needs_verify:${uid}`);
         const verifyMode =
@@ -2344,7 +2358,7 @@ export async function handleTelegramUpdate(update, env, requestOrigin) {
  * Initiates private chat / verification right from the Mini App `[发私信]` button
  * so collapsing the WebApp drops the visitor directly onto an active verification prompt or input box.
  */
-export async function initiateChatFromMiniApp(env, requestOrigin, tgUser, config = null) {
+export async function initiateChatFromMiniApp(env, requestOrigin, tgUser, config = null, options = {}) {
   if (!env.BOT_TOKEN || !tgUser?.id) {
     return { ok: false, needsDeepLink: true };
   }
@@ -2357,6 +2371,11 @@ export async function initiateChatFromMiniApp(env, requestOrigin, tgUser, config
   const isAdmin = await isUserAdmin(env, tgUser.id, tgCall);
   if (!isAdmin && (await env.TOPIC_MAP?.get(`banned:${uid}`)) === '1') {
     return { ok: true, needsDeepLink: false };
+  }
+
+  const incomingSource = normalizeSourceParam(options?.source || '');
+  if (!isAdmin && incomingSource) {
+    await rememberPendingSource(env, uid, incomingSource).catch(() => {});
   }
 
   const inboxMode = await resolveInboxMode(env);

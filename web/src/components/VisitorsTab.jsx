@@ -21,7 +21,7 @@ import {
   X,
 } from 'lucide-react';
 import { apiRequest, formatTimeAgo } from '../lib/api.js';
-import { confirmDialog, copyText, haptic, openExternalUrl } from '../lib/telegram.js';
+import { confirmDialog, copyText, formatSourceLabel, haptic, openExternalUrl } from '../lib/telegram.js';
 import { Avatar } from './Emblems.jsx';
 
 const MAX_REPLY_PHOTO_BYTES = 10 * 1024 * 1024;
@@ -38,6 +38,7 @@ const STATUS_META = {
 export default function VisitorsTab({ initialVisitorId = '', onClearInitial, onToast }) {
   const [visitors, setVisitors] = useState([]);
   const [stats, setStats] = useState({ total: 0, active: 0, trusted: 0, banned: 0, closed: 0 });
+  const [sourceStats, setSourceStats] = useState([]);
   const [blockedSpamCount, setBlockedSpamCount] = useState(0);
   const [filter, setFilter] = useState('all');
   const [search, setSearch] = useState('');
@@ -77,6 +78,9 @@ export default function VisitorsTab({ initialVisitorId = '', onClearInitial, onT
       const res = await apiRequest(`/api/admin/visitors?${params.toString()}`);
       setVisitors(res.items || []);
       setStats(res.stats || stats);
+      if (Array.isArray(res.sourceStats)) {
+        setSourceStats(res.sourceStats);
+      }
       if (typeof res.blockedSpamCount === 'number') {
         setBlockedSpamCount(res.blockedSpamCount);
       }
@@ -377,6 +381,17 @@ export default function VisitorsTab({ initialVisitorId = '', onClearInitial, onT
         >
           <span>🛡️ 四层反广告护盾运行中</span>
           <span>已累计拦截 {blockedSpamCount} 次骚扰/广告</span>
+        </div>
+      )}
+
+      {sourceStats.length > 0 && (
+        <div className="card visitor-insight-bar">
+          <div className="visitor-insight-line">
+            <span className="visitor-insight-label">来源统计</span>
+            <span className="visitor-insight-val">
+              {sourceStats.map((s) => `${s.label} ${s.count}`).join(' · ')}
+            </span>
+          </div>
         </div>
       )}
 
@@ -891,6 +906,15 @@ export default function VisitorsTab({ initialVisitorId = '', onClearInitial, onT
                     <span style={{ color: 'var(--text-secondary)' }}>最近活跃</span>
                     <span>{formatTimeAgo(activeVisitor.last_seen_at)}</span>
                   </div>
+                  {activeVisitor.source && (
+                    <div className="list-row">
+                      <span style={{ color: 'var(--text-secondary)' }}>访客来源</span>
+                      <span>
+                        {formatSourceLabel(activeVisitor.source)}
+                        {activeVisitor.source_at ? ` · ${formatTimeAgo(activeVisitor.source_at)}` : ''}
+                      </span>
+                    </div>
+                  )}
                   {activeVisitor.last_preview && (
                     <div className="list-row">
                       <span style={{ color: 'var(--text-secondary)', flexShrink: 0 }}>最近消息</span>

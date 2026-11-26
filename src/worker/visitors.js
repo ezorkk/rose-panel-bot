@@ -18,6 +18,112 @@ const MAX_LINKS = 200;
 const MAX_PM_IDS = 200;
 const MAX_MESSAGES = 60;
 
+export const SOURCE_PARAM_RE = /^[a-z0-9_]{1,24}$/;
+export const PENDING_SOURCE_TTL_SECONDS = 7 * 86400;
+export const BUILTIN_SOURCE_LABELS = {
+  poster: '分享海报',
+  link: '名片链接',
+  site: '个人小站',
+  channel: '频道',
+};
+
+/**
+ * Normalizes a visitor attribution channel name (`src_site` or `site` -> `site`).
+ * Strictly accepts lowercase ASCII letters, digits, and underscores (1–24 chars).
+ */
+export function normalizeSourceParam(raw) {
+  if (typeof raw !== 'string') return '';
+  const stripped = raw.startsWith('src_') ? raw.slice(4) : raw;
+  return SOURCE_PARAM_RE.test(stripped) ? stripped : '';
+}
+
+export function formatSourceLabel(source) {
+  const raw = String(source || '').trim();
+  if (!raw) return '未知';
+  const stripped = raw.startsWith('src_') ? raw.slice(4) : raw;
+  if (!stripped) return '未知';
+  return BUILTIN_SOURCE_LABELS[stripped] || stripped;
+}
+
+/**
+ * Appends a source attribution parameter to a bot/app/web link without clobbering existing query params.
+ *   kind === 'bot' -> ?start=src_<x>
+ *   kind === 'app' -> ?startapp=src_<x>
+ *   kind === 'web' -> ?src=<x>
+ */
+export function buildSourceLink(base, source, kind = 'web') {
+  const cleanBase = String(base || '').trim();
+  if (!cleanBase) return '';
+  const normalized = normalizeSourceParam(source);
+  if (!normalized) return cleanBase;
+  const hashIdx = cleanBase.indexOf('#');
+  const beforeHash = hashIdx >= 0 ? cleanBase.slice(0, hashIdx) : cleanBase;
+  const hashPart = hashIdx >= 0 ? cleanBase.slice(hashIdx) : '';
+  const sep = beforeHash.includes('?') ? '&' : '?';
+  if (kind === 'bot') {
+    return `${beforeHash}${sep}start=src_${normalized}${hashPart}`;
+  }
+  if (kind === 'app') {
+    return `${beforeHash}${sep}startapp=src_${normalized}${hashPart}`;
+  }
+  return `${beforeHash}${sep}src=${normalized}${hashPart}`;
+}
+
+/**
+ * Records a visitor's first attribution channel in `src:{uid}` (7d TTL).
+ * Strictly first-touch: if `src:{uid}` or `user:{uid}.source` already exists, does nothing (0 KV writes).
+ */
+export async function rememberPendingSource(env, userId, rawSource) {
+  if (!env?.TOPIC_MAP) return false;
+  const uid = String(userId || '').trim();
+  if (!/^\d+$/.test(uid)) return false;
+  const source = normalizeSourceParam(rawSource);
+  if (!source) return false;
+
+  const pendingKey = `src:${uid}`;
+  const [existingPending, existingUser] = await Promise.all([
+    env.TOPIC_MAP.get(pendingKey),
+    safeGetJSON(env.TOPIC_MAP, `user:${uid}`, null),
+  ]);
+  if (existingPending || existingUser?.source) {
+    return false;
+  }
+
+  await env.TOPIC_MAP.put(pendingKey, source, { expirationTtl: PENDING_SOURCE_TTL_SECONDS });
+  return true;
+}
+
+/**
+ * Computes channel breakdown on the fly from visitor items without any KV writes.
+ * Unknown/legacy visitors without `source` are grouped into `未知` at the end.
+ */
+export function computeSourceStats(visitors = []) {
+  const counts = new Map();
+  let unknownCount = 0;
+
+  for (const v of Array.isArray(visitors) ? visitors : []) {
+    const src = normalizeSourceParam(v?.source || '');
+    if (!src) {
+      unknownCount += 1;
+    } else {
+      counts.set(src, (counts.get(src) || 0) + 1);
+    }
+  }
+
+  const rows = Array.from(counts.entries())
+    .map(([source, count]) => ({
+      source,
+      label: formatSourceLabel(source),
+      count,
+    }))
+    .sort((a, b) => (b.count !== a.count ? b.count - a.count : a.source.localeCompare(b.source)));
+
+  if (unknownCount > 0) {
+    rows.push({ source: '', label: '未知', count: unknownCount });
+  }
+  return rows;
+}
+
 export async function invalidateVisitorSummaryCache(env) {
   if (!env?.TOPIC_MAP) return;
   try {
@@ -112,6 +218,19 @@ export async function upsertVisitorProfile(env, tgUser, extra = {}) {
   const existingAdmin = Number(existing.admin_msg_count) || 0;
 
   const incVisitor = extra.incrementMsg ? 1 : 0;
+  let resolvedSource = existing.source || '';
+  let resolvedSourceAt = existing.source_at || null;
+  let consumedPendingKey = '';
+  if (!resolvedSource) {
+    const rawPending = await env.TOPIC_MAP.get(`src:${uid}`);
+    const pendingSource = normalizeSourceParam(rawPending || '');
+    if (pendingSource) {
+      resolvedSource = pendingSource;
+      resolvedSourceAt = now;
+      consumedPendingKey = `src:${uid}`;
+    }
+  }
+
   const updated = {
     ...existing,
     userId: uid,
@@ -128,11 +247,15 @@ export async function upsertVisitorProfile(env, tgUser, extra = {}) {
     link_count: Number(existing.link_count) || 0,
     last_preview: extra.lastPreview !== undefined ? String(extra.lastPreview).slice(0, 120) : existing.last_preview || '',
     note: existing.note || '',
+    ...(resolvedSource ? { source: resolvedSource, source_at: resolvedSourceAt || now } : {}),
     ...(extra.threadId !== undefined ? { thread_id: extra.threadId } : {}),
     ...(extra.closed !== undefined ? { closed: extra.closed } : {}),
   };
 
   await safePutJSON(env.TOPIC_MAP, key, updated);
+  if (consumedPendingKey) {
+    await env.TOPIC_MAP.delete(consumedPendingKey).catch(() => {});
+  }
   await addToVisitorIndex(env, uid);
   await invalidateVisitorSummaryCache(env);
   return updated;
@@ -455,6 +578,8 @@ export async function getVisitorDetail(env, userId, knownSupergroupId = null) {
     link_count: Number(base.link_count || 0),
     last_preview: base.last_preview || '',
     note: base.note || '',
+    source: base.source || '',
+    source_at: base.source_at || null,
     isBanned,
     isTrusted,
     isVerified,
@@ -466,7 +591,7 @@ export async function getVisitorDetail(env, userId, knownSupergroupId = null) {
 export async function listVisitors(env, options = {}) {
   const { search = '', filter = 'all', limit = 60 } = options;
   if (!env.TOPIC_MAP) {
-    return { stats: { total: 0, active: 0, trusted: 0, banned: 0, closed: 0 }, items: [] };
+    return { stats: { total: 0, active: 0, trusted: 0, banned: 0, closed: 0 }, sourceStats: [], items: [] };
   }
 
   const [indexedRaw, migrated, bannedMigrated] = await Promise.all([
@@ -539,15 +664,24 @@ export async function listVisitors(env, options = {}) {
     banned: details.filter((v) => v.isBanned).length,
     closed: details.filter((v) => v.isClosed && !v.isBanned).length,
   };
+  const sourceStats = computeSourceStats(details);
 
-  // Opportunistically refresh single-key summary cache whenever full listing runs
+  // Opportunistically refresh single-key summary cache only when missing or expired (avoids unnecessary KV writes)
   if (!search && filter === 'all') {
-    await safePutJSON(
-      env.TOPIC_MAP,
-      VISITOR_SUMMARY_CACHE_KEY,
-      { stats, recent: details.slice(0, 5), cachedAt: Date.now() },
-      { expirationTtl: 600 }
-    ).catch(() => {});
+    const existingCache = await safeGetJSON(env.TOPIC_MAP, VISITOR_SUMMARY_CACHE_KEY, null);
+    const cacheFresh =
+      existingCache &&
+      existingCache.stats &&
+      Array.isArray(existingCache.sourceStats) &&
+      Date.now() - Number(existingCache.cachedAt || 0) < VISITOR_SUMMARY_TTL_MS;
+    if (!cacheFresh) {
+      await safePutJSON(
+        env.TOPIC_MAP,
+        VISITOR_SUMMARY_CACHE_KEY,
+        { stats, sourceStats, recent: details.slice(0, 5), cachedAt: Date.now() },
+        { expirationTtl: 600 }
+      ).catch(() => {});
+    }
   }
 
   const q = String(search || '').trim().toLowerCase();
@@ -557,7 +691,7 @@ export async function listVisitors(env, options = {}) {
     if (filter === 'closed' && (!v.isClosed || v.isBanned)) return false;
     if (filter === 'active' && (v.isBanned || v.isClosed)) return false;
     if (q) {
-      const hay = `${v.displayName} ${v.username} ${v.userId} ${v.note} ${v.last_preview}`.toLowerCase();
+      const hay = `${v.displayName} ${v.username} ${v.userId} ${v.note} ${v.last_preview} ${v.source} ${formatSourceLabel(v.source)}`.toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
@@ -565,6 +699,7 @@ export async function listVisitors(env, options = {}) {
 
   return {
     stats,
+    sourceStats,
     items: filtered.slice(0, limit),
   };
 }
@@ -575,12 +710,13 @@ export async function listVisitors(env, options = {}) {
  */
 export async function getVisitorOverview(env) {
   if (!env.TOPIC_MAP) {
-    return { stats: { total: 0, active: 0, trusted: 0, banned: 0, closed: 0 }, recent: [], cached: false };
+    return { stats: { total: 0, active: 0, trusted: 0, banned: 0, closed: 0 }, sourceStats: [], recent: [], cached: false };
   }
   const cached = await safeGetJSON(env.TOPIC_MAP, VISITOR_SUMMARY_CACHE_KEY, null);
   if (cached && cached.stats && Date.now() - Number(cached.cachedAt || 0) < VISITOR_SUMMARY_TTL_MS) {
     return {
       stats: cached.stats,
+      sourceStats: Array.isArray(cached.sourceStats) ? cached.sourceStats : [],
       recent: Array.isArray(cached.recent) ? cached.recent : [],
       cached: true,
     };
@@ -588,6 +724,7 @@ export async function getVisitorOverview(env) {
   const listed = await listVisitors(env, { limit: 5 });
   return {
     stats: listed.stats,
+    sourceStats: listed.sourceStats,
     recent: listed.items,
     cached: false,
   };

@@ -21,8 +21,10 @@ import {
 import { Avatar, StubEmblem, TicketEmblem } from './Emblems.jsx';
 import { apiRequest, formatTimeAgo } from '../lib/api.js';
 import {
+  buildSourceLink,
   closeMiniApp,
   copyText,
+  getLaunchSource,
   getTelegramInitData,
   getTelegramWebApp,
   haptic,
@@ -98,6 +100,9 @@ export default function TicketTab({
   const resolvedShareUrl =
     String(config.shareUrl || '').trim() ||
     (typeof window !== 'undefined' ? `${window.location.origin}/` : '');
+  const shareLinkKind = /^https:\/\/t\.me\//i.test(resolvedShareUrl) ? 'app' : 'web';
+  const posterShareUrl = buildSourceLink(resolvedShareUrl, 'poster', shareLinkKind);
+  const copyShareUrl = buildSourceLink(resolvedShareUrl, 'link', shareLinkKind);
   const tgPlatform = getTelegramWebApp()?.platform || '';
   const inTelegramWebView = Boolean(getTelegramInitData() || (tgPlatform && tgPlatform !== 'unknown'));
 
@@ -115,7 +120,7 @@ export default function TicketTab({
         tagline: profile.tagline || '',
         tags: parsedTags.slice(0, 6),
         avatarSrc: ownerAvatarSrc,
-        shareUrl: resolvedShareUrl,
+        shareUrl: posterShareUrl,
       });
       setPosterData({
         ...generated,
@@ -209,11 +214,11 @@ export default function TicketTab({
                 <Download size={14} /> 保存图片
               </button>
             )}
-            {resolvedShareUrl && (
+            {copyShareUrl && (
               <button
                 type="button"
                 className="btn btn-soft btn-sm"
-                onClick={() => handleCopy(resolvedShareUrl, '名片链接')}
+                onClick={() => handleCopy(copyShareUrl, '名片链接')}
               >
                 <Link2 size={14} /> 复制名片链接
               </button>
@@ -227,15 +232,23 @@ export default function TicketTab({
     const rawBot = String(bot?.username || '').replace(/^@/, '').trim();
     const cleanHandle = String(profile.handle || '').replace(/^@/, '').trim();
     const uname = rawBot || (cleanHandle && cleanHandle !== 'your_bot' && /bot$/i.test(cleanHandle) ? cleanHandle : '');
+    const launchSource = getLaunchSource();
+    const pmDeepLink = uname
+      ? launchSource
+        ? buildSourceLink(`https://t.me/${uname}`, launchSource, 'bot')
+        : `https://t.me/${uname}?start=pm`
+      : '';
     haptic('medium');
 
     // Inside Telegram Mini App:
-    // - From a group: deep-link straight to `?start=pm` (auto-triggers verification!) and close WebApp
-    // - From private chat: ask backend to pop verification/prompt into the chat & collapse the WebApp sheet!
+    // - From a group without source attribution: deep-link straight to `?start=pm` and close WebApp
+    // - Otherwise (private chat or referral `src_*` launch): notify backend `/api/chat/start` with `source`
+    //   so attribution is saved before collapsing or opening the bot DM.
     if (getTelegramInitData()) {
-      if (isOpenedFromGroup()) {
-        if (uname) {
-          openExternalUrl(`https://t.me/${uname}?start=pm`);
+      const fromGroupOrDirect = isOpenedFromGroup();
+      if (fromGroupOrDirect && !launchSource) {
+        if (pmDeepLink) {
+          openExternalUrl(pmDeepLink);
           closeMiniApp();
         } else {
           onToast('请直接私聊机器人发送消息');
@@ -244,14 +257,20 @@ export default function TicketTab({
       }
       try {
         setOpeningPm(true);
-        const res = await apiRequest('/api/chat/start', { method: 'POST' });
-        if (res?.needsDeepLink && uname) {
-          openExternalUrl(`https://t.me/${uname}?start=pm`);
+        const res = await apiRequest('/api/chat/start', {
+          method: 'POST',
+          ...(launchSource ? { body: { source: launchSource } } : {}),
+        });
+        if (res?.needsDeepLink && pmDeepLink) {
+          openExternalUrl(pmDeepLink);
+        } else if (fromGroupOrDirect && uname) {
+          // Opened via Direct Link (e.g. poster QR): jump straight into the bot chat without duplicating /start
+          openExternalUrl(`https://t.me/${uname}`);
         }
         closeMiniApp();
       } catch {
-        if (uname) {
-          openExternalUrl(`https://t.me/${uname}?start=pm`);
+        if (pmDeepLink) {
+          openExternalUrl(pmDeepLink);
           closeMiniApp();
         } else {
           onToast('请点击右上角关闭面板，直接在下方聊天框打字发消息');
@@ -263,7 +282,7 @@ export default function TicketTab({
     }
 
     if (uname) {
-      openExternalUrl(`https://t.me/${uname}`);
+      openExternalUrl(launchSource ? buildSourceLink(`https://t.me/${uname}`, launchSource, 'bot') : `https://t.me/${uname}`);
     } else {
       onToast('直接在机器人私聊窗口打字发消息即可联系');
     }

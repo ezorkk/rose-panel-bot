@@ -163,7 +163,9 @@ export async function handleApiRequest(request, env, url, ctx = null) {
     if (!auth.user?.id) {
       return json({ ok: true, needsDeepLink: true });
     }
-    const chatRes = await initiateChatFromMiniApp(env, url.origin, auth.user, config);
+    const body = await readJsonBody(request);
+    const source = typeof body?.source === 'string' ? body.source : '';
+    const chatRes = await initiateChatFromMiniApp(env, url.origin, auth.user, config, { source });
     return json({ ok: true, ...chatRes });
   }
 

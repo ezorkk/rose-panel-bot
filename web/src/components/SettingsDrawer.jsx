@@ -5,9 +5,11 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Copy,
   ExternalLink,
   GitFork,
   Globe,
+  Link2,
   Lock,
   Plus,
   RefreshCw,
@@ -17,7 +19,7 @@ import {
   X,
 } from 'lucide-react';
 import { apiRequest } from '../lib/api.js';
-import { confirmDialog, openExternalUrl } from '../lib/telegram.js';
+import { buildSourceLink, confirmDialog, copyText, openExternalUrl } from '../lib/telegram.js';
 import { TgStickerMedia, TicketEmblem } from './Emblems.jsx';
 import {
   CHANGELOG_URL,
@@ -64,6 +66,8 @@ const PROBE_PROVIDER_OPTIONS = [
 export default function SettingsDrawer({
   initialSection = 'profile',
   adminConfig,
+  botInfo = null,
+  shareUrl = '',
   appVersion = '',
   onOpenWhatsNew,
   onClose,
@@ -956,6 +960,85 @@ export default function SettingsDrawer({
                   </div>
                 ))}
               </div>
+            </div>
+
+            {/* Promo & Referral Links Helper (Section 8) */}
+            <div className="card">
+              <div className="card-header" style={{ marginBottom: 8 }}>
+                <span className="card-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <Link2 size={15} color="var(--accent)" /> 名片分享 · 推广链接
+                </span>
+              </div>
+              {(() => {
+                const botUsername = String(botInfo?.username || draft.botUsername || '')
+                  .trim()
+                  .replace(/^@/, '');
+                const appShortName = String(botInfo?.appShortName || '')
+                  .trim()
+                  .replace(/^\/+|\/+$/g, '');
+                if (!botUsername) {
+                  return (
+                    <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+                      需要先配置 <code>BOT_USERNAME</code>。
+                    </div>
+                  );
+                }
+                const siteShareBase =
+                  String(shareUrl || '').trim() ||
+                  (typeof window !== 'undefined' ? `${window.location.origin}/` : '');
+                const cardShareLink = appShortName
+                  ? buildSourceLink(`https://t.me/${botUsername}/${appShortName}`, 'link', 'app')
+                  : buildSourceLink(siteShareBase, 'link', 'web');
+                const promoLinks = [
+                  {
+                    id: 'site',
+                    label: '放在个人小站的「联系我」按钮',
+                    url: buildSourceLink(`https://t.me/${botUsername}`, 'site', 'bot'),
+                  },
+                  {
+                    id: 'channel',
+                    label: '放在频道简介',
+                    url: buildSourceLink(`https://t.me/${botUsername}`, 'channel', 'bot'),
+                  },
+                  ...(cardShareLink
+                    ? [
+                        {
+                          id: 'card',
+                          label: '分享名片',
+                          url: cardShareLink,
+                        },
+                      ]
+                    : []),
+                ];
+                return (
+                  <>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {promoLinks.map((item) => (
+                        <div key={item.id} className="promo-link-row">
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div className="promo-link-label">{item.label}</div>
+                            <div className="promo-link-url">{item.url}</div>
+                          </div>
+                          <button
+                            type="button"
+                            className="btn btn-soft btn-sm"
+                            style={{ flexShrink: 0 }}
+                            onClick={async () => {
+                              const ok = await copyText(item.url);
+                              onToast(ok ? `已复制「${item.label}」链接` : '复制失败');
+                            }}
+                          >
+                            <Copy size={12} /> 复制
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 10, lineHeight: 1.55 }}>
+                      也可以把 <code>src_</code> 后面换成任意英文渠道名，例如 <code>src_nodeseek</code>，来源统计里就会单独显示。
+                    </div>
+                  </>
+                );
+              })()}
             </div>
           </>
         )}
