@@ -148,7 +148,7 @@ Unused modules stay completely hidden and add zero overhead:
 2. Open Cloudflare Dashboard → **Workers & Pages → Create → Workers → Import a repository** and select your fork:
    - **Build command**: `npm run build`
    - **Deploy command**: `npx wrangler deploy`
-3. In **Settings → Variables & Bindings**, confirm `TOPIC_MAP` KV is bound and add 4 core variables:
+3. In **Settings → Variables & Bindings**, confirm `TOPIC_MAP` KV is bound (plus recommended D1 binding `DB` pointing to database `rose-panel-bot` — Wrangler v4 auto-provisions it when permitted, or see [manual D1 binding steps](docs/SETUP_GUIDE.md#d1-storage); falls back seamlessly to KV when unbound) and add 4 core variables:
    - `BOT_TOKEN` (**Secret**) · `WEBHOOK_SECRET` (**Secret**, any random string)
    - `ADMIN_IDS` (**must be a Text variable, not Secret** — your numeric UID) · `BOT_USERNAME` (**Text**, without `@`)
 4. Visit `https://<your-worker-domain>/setup?secret=<WEBHOOK_SECRET>` once until you see `"ok": true`, then send `/start` to your bot in PM — **Bot DM push + 4-layer anti-spam work immediately** with `ADMIN_IDS` (no group required!). *(Optional, recommended for high-volume inboxes)* Create a private group with **Topics** enabled, add the bot as Administrator, and send **`/bind`** to auto-switch into per-visitor Forum Topics!
@@ -170,7 +170,7 @@ Read AGENTS.md in this repo, ask me which modules I want (or if I prefer a light
 # 1. Clone & install dependencies (Node.js 20+)
 git clone https://github.com/mango0114/rose-panel-bot.git && cd rose-panel-bot && npm ci
 
-# 2. Login & deploy (Wrangler v4 auto-provisions TOPIC_MAP KV)
+# 2. Login & deploy (Wrangler v4 auto-provisions TOPIC_MAP KV and rose-panel-bot D1 DB)
 npx wrangler login
 npm run build && npx wrangler deploy --var ADMIN_IDS:YOUR_NUMERIC_UID --var BOT_USERNAME:YOUR_BOT_USERNAME
 
@@ -226,9 +226,9 @@ Then reverse-proxy `127.0.0.1:8787` with Caddy for automatic HTTPS.
 
 ---
 
-## 🔄 Upgrading Existing Deployments (100% KV Data Preserved)
+## 🔄 Upgrading Existing Deployments (KV Data Preserved & Auto-Migrated to D1)
 
-> **✅ Never touch your Cloudflare KV!** Upgrading only replaces Worker code (`wrangler.toml` enables `keep_vars = true` so plain-text vars stay safe across deploys). Your card, sites, probe, visitors, and group binding stay **100% intact**. ⚠️ Do not create a new Worker or re-click a 1-click deploy button.
+> **✅ KV data is 100% preserved!** Upgrading only replaces Worker code (`wrangler.toml` enables `keep_vars = true` so plain-text vars stay safe across deploys). Your card, sites, probe, visitors, and group binding stay **100% intact** in KV; once D1 (`DB`) is bound, visitor chat history migrates automatically on demand (or via 1-click batch migration in **⚙️ Settings → 版本更新 → 数据存储**), and deployments without `DB` continue using KV seamlessly. ⚠️ Do not create a new Worker or re-click a 1-click deploy button.
 
 - **🔀 GitHub Fork Users (Easiest)**: Open **⚙️ Settings → 版本更新** in the Mini App, tap **检查新版本**; after filling **我 Fork 的 GitHub 仓库** (your fork's repo, e.g. `yourname/rose-panel-bot`), use **前往我的 Fork 点 Sync fork** (no token needed), or add a single-repo Fine-grained Token and tap **一键同步 Fork 并触发云端更新** — Cloudflare rebuilds in ~30s.
 - **🤖 Standalone Repo / AI Users**: Send this prompt to your AI assistant:
@@ -243,7 +243,8 @@ Then reverse-proxy `127.0.0.1:8787` with Caddy for automatic HTTPS.
 
 | Variable | Type | Required | Description |
 | :--- | :--- | :---: | :--- |
-| `TOPIC_MAP` | KV Binding | ✅ | Persists panel config, sites, visitor archive, and check-in data |
+| `TOPIC_MAP` | KV Binding | ✅ | Persists panel config, sites, visitor profiles/verification, and check-in data (plus chat history when `DB` is unbound) |
+| `DB` | D1 Binding | Recommended | Cloudflare D1 database (`rose-panel-bot`) for unlimited visitor chat history & message maps with minimal KV writes (auto-initializes tables & migrates KV history; falls back to KV when unbound) |
 | `BOT_TOKEN` | Secret | ✅ | Telegram Bot Token from `@BotFather` |
 | `ADMIN_IDS` | Text | ✅ | Admin numeric Telegram UID(s), comma-separated (`<0.1ms` in-memory auth) |
 | `WEBHOOK_SECRET` | Secret | ✅ | Random secret protecting `/`, `/webhook`, and `/setup` |

@@ -148,7 +148,7 @@ flowchart LR
 2. 打开 Cloudflare Dashboard → **Workers & Pages → Create → Workers → Import a repository**，选择你刚 Fork 的仓库：
    - **Build command**：`npm run build`
    - **Deploy command**：`npx wrangler deploy`
-3. 部署后进入 Worker 的 **Settings → Variables & Bindings**，确认绑定了 `TOPIC_MAP` KV，并填入 4 个核心变量：
+3. 部署后进入 Worker 的 **Settings → Variables & Bindings**，确认已绑定 `TOPIC_MAP` KV（以及推荐绑定名为 `DB`、库名为 `rose-panel-bot` 的 D1 数据库；Wrangler v4 默认会自动创建，若未自动绑定可[按步骤手动绑定](docs/SETUP_GUIDE.md#d1-storage)，未绑定时也会自动回退使用 KV），并填入 4 个核心变量：
    - `BOT_TOKEN`（**Secret**）· `WEBHOOK_SECRET`（**Secret**，随机填一串英文数字）
    - `ADMIN_IDS`（**务必选 Text 文本变量**，填你的纯数字 UID）· `BOT_USERNAME`（**Text**，不含 `@`）
 4. 浏览器访问一次 `https://<你的Worker域名>/setup?secret=<WEBHOOK_SECRET>` 看到 `"ok": true` 即上线！此时给你的 Bot 发一次 `/start` 即可直接启用 **Bot 私聊直推**（配好 `ADMIN_IDS` 就能收发私信与开启人机验证，无需建群）；*(可选 · 推荐高频用户)* 如需为每位访客分独立话题，再建开启「话题 (Topics)」的私密群、把机器人设为管理员后发一句 **`/bind`** 即可自动切换！
@@ -170,7 +170,7 @@ flowchart LR
 # 1. 拉取代码并安装依赖（需 Node.js 20+）
 git clone https://github.com/mango0114/rose-panel-bot.git && cd rose-panel-bot && npm ci
 
-# 2. 登录 Cloudflare 并构建部署（Wrangler v4 自动创建 TOPIC_MAP KV）
+# 2. 登录 Cloudflare 并构建部署（Wrangler v4 自动创建 TOPIC_MAP KV 与 rose-panel-bot D1 数据库）
 npx wrangler login
 npm run build && npx wrangler deploy --var ADMIN_IDS:你的数字UID --var BOT_USERNAME:你的Bot用户名
 
@@ -226,9 +226,9 @@ npx wrangler dev --ip 127.0.0.1 --port 8787 --persist-to ./.wrangler/state --sho
 
 ---
 
-## 🔄 老用户如何升级到最新版（100% 保留 KV 数据）
+## 🔄 老用户如何升级到最新版（KV 数据保留，聊天数据自动迁移到 D1）
 
-> **✅ 无需修改 Cloudflare KV！** 升级只更新代码，原有的名片、小站、探针、访客与通知群绑定 **100% 原样保留**（`wrangler.toml` 已开启 `keep_vars = true`，重部署不误清普通变量）。⚠️ **切勿新建 Worker 或重新点击一键部署按钮**，否则会建出全新的空实例。
+> **✅ KV 数据 100% 保留不删！** 升级只更新代码，原有的名片、小站、探针、访客与通知群绑定 **100% 原样保留**（`wrangler.toml` 已开启 `keep_vars = true`，重部署不误清普通变量）；绑定 D1 数据库（`DB`）后，聊天记录会自动按需迁移到 D1（也可在 **⚙️ 设置 → 版本更新 → 数据存储** 点「一键迁移」），未绑定 D1 则继续走原有 KV，完全不受影响。⚠️ **切勿新建 Worker 或重新点击一键部署按钮**，否则会建出全新的空实例。
 
 - **🔀 Fork 部署用户（最简单）**：打开小程序 **⚙️ 设置 → 版本更新** 点 **「检查新版本」**；在「我 Fork 的 GitHub 仓库」填入 `你的用户名/rose-panel-bot` 后，点 **「前往我的 Fork 点 Sync fork」**（零密钥），或再填单仓 Fine-grained Token 点 **「一键同步 Fork 并触发云端更新」**，约 30 秒云端重建上线。
 - **🤖 独立副本 / AI 部署用户**：把下面这段话发给你的 AI 助手：
@@ -243,7 +243,8 @@ npx wrangler dev --ip 127.0.0.1 --port 8787 --persist-to ./.wrangler/state --sho
 
 | 变量名 | 类型 | 必填 | 说明 |
 | :--- | :--- | :---: | :--- |
-| `TOPIC_MAP` | KV Binding | ✅ | 持久化面板配置、小站、访客与媒体归档、签到数据 |
+| `TOPIC_MAP` | KV Binding | ✅ | 持久化面板配置、小站、访客资料与验证状态、签到数据（未绑定 `DB` 时同时承载聊天记录） |
+| `DB` | D1 Binding | 推荐 | 绑定名为 `rose-panel-bot` 的 Cloudflare D1 数据库，用于无限量存储聊天记录与消息映射、大幅节省每日 KV 写入配额（自动建表与迁移；未绑定时自动走 KV） |
 | `BOT_TOKEN` | Secret | ✅ | `@BotFather` 颁发的 Telegram Bot Token |
 | `ADMIN_IDS` | Text | ✅ | 站长数字 UID，多个用英文逗号分隔（`<0.1ms` 内存极速鉴权） |
 | `WEBHOOK_SECRET` | Secret | ✅ | 随机密钥，保护 Webhook（含 `/` 与 `/webhook`）与 `/setup` |

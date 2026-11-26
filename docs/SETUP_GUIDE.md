@@ -96,6 +96,7 @@ flowchart TD
    - 点 **Save and Deploy** 等待约 30 秒完成首次部署。
    - 进入 Worker 的 **Settings → Variables & Bindings**：
      - 确认已绑定名为 `TOPIC_MAP` 的 KV Namespace（没有就新建一个 KV 并绑定命名为 `TOPIC_MAP`）；
+     - *(推荐)* 确认已绑定变量名为 `DB` 的 D1 数据库（Wrangler v4 默认会自动创建 `rose-panel-bot`；若列表里没有 `DB`，可按页底 [Q4 手动绑定 D1 步骤](#d1-storage) 30 秒补绑，不绑也能直接用 KV）；
      - 填入以下 4 个核心变量：
        | 变量名 | 类型 | 填什么 |
        | :--- | :--- | :--- |
@@ -159,8 +160,8 @@ https://你的域名/setup?secret=你刚填的WEBHOOK_SECRET
 这是因为该域名在 Cloudflare 的全局 SSL/TLS 为 **Flexible**，Worker 访问同域名子站时会被降级为 HTTP，而源站又强制跳 HTTPS。  
 **解决**：Cloudflare 控制台 → 你的域名 → **Rules → Configuration Rules** 新建规则，条件匹配探针域名和面板域名，把 **SSL** 单独改为 **Full** 即可，不影响同域名下其他子站。
 
-### Q3：后续项目发布新版本，怎么更新？需要改 Cloudflare KV 吗？
-**完全不需要去 Cloudflare KV 里改任何东西！** 升级只更新代码，原有的名片、小站、探针、访客记录与通知群绑定都会 **100% 原样保留**（⚠️ **请勿重新点击 Deploy to Cloudflare 按钮**，那会新建一个空的 Worker 和 KV）。升级到 `v1.9.0+` 后，在面板 **⚙️ 设置** 里点一次「保存全部设置」即可自动补齐 Webhook 订阅、启用表情回应同步。
+### Q3：后续项目发布新版本，怎么更新？KV 里的数据会丢吗？
+**KV 数据 100% 原样保留，绝不删除！** 升级只更新代码，原有的名片、小站、探针、访客记录与通知群绑定都会完整保留（⚠️ **请勿重新点击 Deploy to Cloudflare 按钮**，那会新建一个空的 Worker 和 KV）。绑定 D1 数据库（`DB`）后，老访客的聊天记录会在打开时自动无感迁移到 D1（也可在面板 **⚙️ 设置 → 版本更新 → 数据存储** 点「一键迁移」），未绑定 D1 则继续走原有 KV。升级到 `v1.9.0+` 后，在面板 **⚙️ 设置** 里点一次「保存全部设置」即可自动补齐 Webhook 订阅、启用表情回应同步。
 - **方式 A · 通过 GitHub Fork 部署（最简单）**：
   - 前往你的 GitHub Fork 页面点击 **`Sync fork → Update branch`**（升至 `v1.4.0+` 后也可直接在小程序 **⚙️ 设置 → 版本更新** 内查看红点并一键同步），Cloudflare 约 30 秒自动完成重建上线。
 - **方式 B · 直接交给 AI 一键更新（适合一键按钮独立副本 / AI 部署用户）**：
@@ -177,3 +178,13 @@ https://你的域名/setup?secret=你刚填的WEBHOOK_SECRET
     git fetch upstream && git merge upstream/main --allow-unrelated-histories && git push origin main
     ```
 - **方式 D · 本地 CLI 部署**：执行 `git pull && npm install && npm run build && npx wrangler deploy --keep-vars`（`v1.2.1` 及更早版本若 webhook 仍指向根路径 `/`，升级后请再访问一次 `https://<你的域名>/setup?secret=<WEBHOOK_SECRET>`）。
+
+<a id="d1-storage"></a>
+### Q4：设置页显示「KV（未绑定 D1）」，如何手动绑定 Cloudflare D1 数据库？
+不绑定 D1 时机器人也能 100% 正常工作（完全走 KV）。如果你收发私信较多、希望省下每日免费 KV 写入额度并保留超过 60 条的完整聊天历史，只需 30 秒即可免费绑定 D1（无需手动建表，程序会自动建表并迁移旧聊天记录）：
+1. 登录 Cloudflare Dashboard → 左侧菜单 **Storage & Databases → D1 SQL Database → Create Database**；
+2. 数据库名称请填 **`rose-panel-bot`**（与 `wrangler.toml` 中的 `database_name` 保持一致，避免后续自动构建时重复创建新库；若同一账号下部署了多个机器人实例，请同时修改各自仓库 `wrangler.toml` 中的 `database_name` 以区分）；
+3. 进入你的 Worker → **Settings → Bindings (Variables & Bindings) → Add → D1 database**：
+   - **Variable name（变量名）**：填 **`DB`**（全大写）
+   - **D1 database**：选择刚创建的 `rose-panel-bot`，点 **Deploy / Save** 保存；
+4. 重新打开小程序 **⚙️ 设置 → 版本更新**，「数据存储」即变为 `D1` 模式，点一次 **「一键迁移」** 即可把已有访客历史搬入 D1（KV 旧数据保留不删）。
