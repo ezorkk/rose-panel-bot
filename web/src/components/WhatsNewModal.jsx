@@ -12,6 +12,32 @@ export const HIDE_STAR_STRIP_STORAGE_KEY = 'rose_hide_star_strip';
 
 export const RECENT_RELEASES = [
   {
+    version: '1.10.0',
+    url: 'https://github.com/mango0114/rose-panel-bot/releases/tag/v1.10.0',
+    items: [
+      {
+        tag: '新增',
+        tone: 'new',
+        text: '新访客观察期：刚通过人机验证的新访客发送链接、@用户名、联系方式或转发消息时先扣下不转发，静默通知站长在通知按钮或面板内「放行（按序补发）」或「拉黑」，支持链接白名单域名',
+      },
+      {
+        tag: '改进',
+        tone: 'imp',
+        text: '名片首页「站长速览」精简为一行防护/待审核提示条，今日拦截按站长时区计数，累计拦截统计与待审核筛选整合至「访客」页并附带底部导航小红点',
+      },
+      {
+        tag: '新增',
+        tone: 'new',
+        text: '底部导航支持在设置中通过上移/下移自定义顺序，排第一的可见页面即默认页（访客不可见页面自动跳过，深链接优先）',
+      },
+      {
+        tag: '新增',
+        tone: 'new',
+        text: '广告屏蔽关键词新增 6 组广告特有短语预设（默认不选），支持单击开关与整组一键添加',
+      },
+    ],
+  },
+  {
     version: '1.9.0',
     url: 'https://github.com/mango0114/rose-panel-bot/releases/tag/v1.9.0',
     items: [

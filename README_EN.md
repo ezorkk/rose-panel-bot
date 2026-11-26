@@ -57,7 +57,7 @@
   <img src="docs/assets/demo-panel.webp" alt="Photo archive, live multi-protocol probe refresh, private sites, and 224x84 pixel Day/Night slider" width="94%" />
 </div>
 
-- **224×84 Pixel Day/Night Bubble Slider**: scrub the crystal magnifier to toggle **Dark / Follow Telegram / Light** with a full-screen circular View Transition ripple synced to Telegram chrome; edge-injected splash + local SWR cache open in 0.2s, with an automatic **What's New** modal after upgrades;
+- **224×84 Pixel Day/Night Bubble Slider**: scrub the crystal magnifier to toggle **Dark / Follow Telegram / Light** with a full-screen circular View Transition ripple synced to Telegram chrome; edge-injected splash + local SWR cache open in 0.2s, with **customizable bottom navigation order & default landing tab** (auto-skipping tabs hidden from guests while preserving deep links) and an automatic **What's New** modal after upgrades;
 - Filter exchanged photos by sender; inspect live **Komari / Nezha (v1·v0) / NodeGet / Generic JSON** server metrics (with optional offline & resource alerts, off by default) and **Public / 🔒 Private** site bookmarks; generate **light/dark shareable QR card posters with Open Graph previews, `src_` referral tracking, and monthly unique visitor counts**; swap animated `.webp` / `.webm` / `.tgs` emblems via `/set` with 3-way private avatar options.
 
 ---
@@ -111,7 +111,7 @@ flowchart LR
   TS -- "Verified" --> INBOX
 ```
 
-Switch anytime inside **⚙️ Settings → 防骚扰验证 (Anti-Spam Verification)** (or disable verification for direct forwarding):
+Switch anytime inside **⚙️ Settings → 防骚扰验证 (Anti-Spam Verification)** (or disable verification for direct forwarding), with visual controls for **New Visitor Probation** (holds links, `@username` mentions, contact info, or forwarded messages from newly verified visitors for silent admin approval/ban with domain allowlists and ordered replay — zero message loss) and **6 grouped ad-phrase blocked keyword presets** (all off by default, toggle per phrase or add by group):
 
 | Mode | Experience & Mechanism | Anti-Abuse Protection |
 | :--- | :--- | :--- |
