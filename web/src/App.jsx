@@ -457,6 +457,7 @@ export default function App() {
         {effectiveTab === 'visitors' && isAdmin && (
           <VisitorsTab
             initialVisitorId={deepVisitorId}
+            initialVisitStats={bootstrap?.visitStats || null}
             onClearInitial={() => setDeepVisitorId('')}
             onToast={showToast}
           />

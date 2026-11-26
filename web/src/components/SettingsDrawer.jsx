@@ -874,6 +874,34 @@ export default function SettingsDrawer({
                 />
               </div>
 
+              <div
+                style={{
+                  marginTop: 12,
+                  paddingTop: 12,
+                  borderTop: '1px solid var(--border)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 12,
+                }}
+              >
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>在名片上公开显示本月访客数</div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3, lineHeight: 1.5 }}>
+                    只统计通过 Telegram 打开名片的访客，每人每月计一次，不含你自己。
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={Boolean(draft.profile.showVisitCounter)}
+                  className={`switch ${draft.profile.showVisitCounter ? 'on' : ''}`}
+                  onClick={() => updateField('profile', 'showVisitCounter', !draft.profile.showVisitCounter)}
+                >
+                  <span className="switch-knob" />
+                </button>
+              </div>
+
               <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
                 <div className="field-label" style={{ marginBottom: 8 }}>
                   开屏加载页风格（新访客首次打开 0ms 即显）

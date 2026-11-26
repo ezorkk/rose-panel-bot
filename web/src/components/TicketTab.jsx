@@ -161,6 +161,16 @@ export default function TicketTab({
     onToast('已开始保存名片海报');
   };
 
+  const publicMonthlyVisits =
+    config?.visitStats && typeof config.visitStats.thisMonth === 'number'
+      ? config.visitStats.thisMonth
+      : null;
+
+  const renderVisitCounter = () =>
+    publicMonthlyVisits !== null && (
+      <div className="card-visit-counter">👀 本月访客 {publicMonthlyVisits} 人</div>
+    );
+
   const renderShareSheet = () =>
     shareOpen && (
       <div className="sheet-backdrop" onClick={() => setShareOpen(false)}>
@@ -516,6 +526,7 @@ export default function TicketTab({
           </div>
         </div>
 
+        {renderVisitCounter()}
         {renderShareSheet()}
 
         {/* Levels Sheet */}
@@ -846,6 +857,7 @@ export default function TicketTab({
         </div>
       )}
 
+      {renderVisitCounter()}
       {renderShareSheet()}
     </>
   );

@@ -73,7 +73,8 @@ When a user asks you to **upgrade / overwrite an existing RosePanel Bot deployme
 - `src/worker/antispam.js` — 4-layer shield: CAS blacklist (`api.cas.chat`), Unicode de-obfuscation, unverified media/link/forward risk scoring, spam counter.
 - `src/worker/inbox.js` — Unified visitor delivery layer (`resolveInboxMode`, `deliverVisitorMessage`, `pushToOwner`, `dmmap:*` mapping & unreachable tracking).
 - `src/worker/bot.js` — Webhook router for PM forwarding, 4-mode verification (Sticker Quiz / Emoji / Quiz / Turnstile), admin `/set` (alias `/setbadge`) & `/add` (alias `/addverify`), group `/checkin` & `/rank`.
-- `src/worker/visitors.js` — KV-compatible visitor profiles, bidirectional photo/link archive, and two-mode history clear.
+- `src/worker/visitors.js` — KV-compatible visitor profiles, `src_<channel>` first-touch attribution, bidirectional photo/link archive, and two-mode history clear.
+- `src/worker/visitStats.js` — Monthly unique Telegram visitor counter (`recordMonthlyVisit`, `getVisitStats`) with 0 KV writes on repeat visits and fail-open error handling.
 - `src/worker/komari.js` — Pluggable probe module: `PROBE_PROVIDERS` registry (`komari`, `nezha`, `nodeget`, `json`) + `normalizeNodeMetrics`. Add new probe providers here.
 - `src/worker/alerts.js` — Scheduled probe offline / recovery / resource threshold alerting (`runProbeAlerts`, `sendTestProbeAlert`, zero KV writes when disabled or healthy).
 - `src/worker/updater.js` & `src/worker/version.js` — Admin-only GitHub latest release checker (6h KV cache) & optional Fork `merge-upstream` 1-click syncer.

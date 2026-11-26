@@ -127,7 +127,7 @@ Unused modules stay completely hidden and add zero overhead:
 
 | Module | Default | Activation | Notes |
 | :--- | :---: | :--- | :--- |
-| **🪪 Personal Card + 🌐 Public/Private Sites** | Core | `BOT_TOKEN` + `TOPIC_MAP` KV | 0.2s panel with pixel Day/Night slider, animated emblems, dual-layer sites, shareable QR poster, Open Graph link previews & `src_<channel>` referral tracking (with in-app promo link helper) |
+| **🪪 Personal Card + 🌐 Public/Private Sites** | Core | `BOT_TOKEN` + `TOPIC_MAP` KV | 0.2s panel with pixel Day/Night slider, animated emblems, dual-layer sites, shareable QR poster, Open Graph link previews, `src_<channel>` referral tracking & per-user monthly visitor count (admin-only by default; fail-open if Cloudflare KV's ~500 new visitors/day free write quota is exceeded, never blocking card loads) |
 | **👤 Bidirectional PM Bot + 4-Layer Shield** | Optional | Works with `ADMIN_IDS` (Bot DM push), or `/bind` in a Topics group (optional, recommended for high volume) | Ready out-of-the-box via Bot DM push (quote-reply to respond), direct in-panel chat/photos, archive, CAS & sticker quizzes; `/bind` switches automatically to per-visitor Forum Topics |
 | **📡 Pluggable Server Probe** | Optional | Pick provider & URL in Mini App | **Komari / Nezha (v1·v0) / NodeGet / Generic JSON**; Admin-Only toggle & optional offline/resource alerts (off by default) |
 | **🛡️ CF Turnstile Strict Mode** | Optional | `TURNSTILE_SITE_KEY` & `SECRET` | Auto-escalates high-risk ads or toggle manually in Settings |

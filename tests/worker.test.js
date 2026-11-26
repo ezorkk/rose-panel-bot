@@ -41,6 +41,13 @@ import { normalizeStickerObject, parseStickerPackName } from '../src/worker/tele
 import { renderTurnstileVerifyPage } from '../src/worker/turnstile.js';
 import { checkLatestRelease, compareSemver, syncForkWithUpstream } from '../src/worker/updater.js';
 import { APP_VERSION } from '../src/worker/version.js';
+import {
+  VISIT_COUNT_TTL_SECONDS,
+  VISIT_SEEN_TTL_SECONDS,
+  getMonthKeys,
+  getVisitStats,
+  recordMonthlyVisit,
+} from '../src/worker/visitStats.js';
 import { BRAND_NAME, BRAND_SIGNATURE } from '../web/src/lib/brand.js';
 import pkg from '../package.json' with { type: 'json' };
 import {
@@ -4628,5 +4635,205 @@ describe('Visitor source parameter attribution & promo links (v1.8)', () => {
       // Invalid source returns base untouched
       expect(fn('https://t.me/mybot', 'INVALID!', 'bot')).toBe('https://t.me/mybot');
     }
+  });
+});
+
+describe('Monthly unique visitor counter (v1.8)', () => {
+  it('counts a returning visitor once per month and performs zero KV writes on repeat opens', async () => {
+    const kv = createMemoryKV();
+    const botToken = '123456:VISIT_SECRET';
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '900001' };
+
+    const visitorInit = await signInitData(
+      { user: JSON.stringify({ id: 70001, first_name: 'Alice' }), auth_date: Math.floor(Date.now() / 1000) },
+      botToken
+    );
+
+    const putSpy = vi.spyOn(kv, 'put');
+
+    // Open #1 -> writes visit:seen:* and visit:count:* (2 writes)
+    const r1 = await worker.fetch(
+      new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': visitorInit } }),
+      env
+    );
+    expect(r1.status).toBe(200);
+    expect(putSpy).toHaveBeenCalledTimes(2);
+
+    // Verify TTLs on both KV keys
+    const seenCall = putSpy.mock.calls.find(([k]) => k.startsWith('visit:seen:'));
+    const countCall = putSpy.mock.calls.find(([k]) => k.startsWith('visit:count:'));
+    expect(seenCall?.[2]).toEqual({ expirationTtl: VISIT_SEEN_TTL_SECONDS });
+    expect(countCall?.[2]).toEqual({ expirationTtl: VISIT_COUNT_TTL_SECONDS });
+
+    // Opens #2 & #3 -> ZERO KV writes
+    putSpy.mockClear();
+    const r2 = await worker.fetch(
+      new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': visitorInit } }),
+      env
+    );
+    const r3 = await worker.fetch(
+      new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': visitorInit } }),
+      env
+    );
+    expect(r2.status).toBe(200);
+    expect(r3.status).toBe(200);
+    expect(putSpy).not.toHaveBeenCalled();
+
+    const stats = await getVisitStats(env);
+    expect(stats.thisMonth).toBe(1);
+  });
+
+  it('counts two distinct Telegram visitors as 2 and ignores admin, preview, and anonymous web visits', async () => {
+    const kv = createMemoryKV();
+    const botToken = '123456:VISIT_MULTI';
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '900001', DEV_PREVIEW: 'true' };
+
+    const u1Init = await signInitData(
+      { user: JSON.stringify({ id: 71001, first_name: 'One' }), auth_date: Math.floor(Date.now() / 1000) },
+      botToken
+    );
+    const u2Init = await signInitData(
+      { user: JSON.stringify({ id: 71002, first_name: 'Two' }), auth_date: Math.floor(Date.now() / 1000) },
+      botToken
+    );
+    const adminInit = await signInitData(
+      { user: JSON.stringify({ id: 900001, first_name: 'Owner' }), auth_date: Math.floor(Date.now() / 1000) },
+      botToken
+    );
+
+    // 2 real Telegram visitors
+    await worker.fetch(
+      new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': u1Init } }),
+      env
+    );
+    await worker.fetch(
+      new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': u2Init } }),
+      env
+    );
+    expect((await getVisitStats(env)).thisMonth).toBe(2);
+
+    // Admin, local preview (guest & admin), and anonymous web visits must NOT increment count
+    await worker.fetch(
+      new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': adminInit } }),
+      env
+    );
+    await worker.fetch(
+      new Request('http://localhost:8787/api/bootstrap', { headers: { 'X-Dev-Role': 'guest' } }),
+      env
+    );
+    await worker.fetch(
+      new Request('http://localhost:8787/api/bootstrap', { headers: { 'X-Dev-Role': 'admin' } }),
+      env
+    );
+    await worker.fetch(new Request('https://panel.test/api/bootstrap'), env);
+
+    expect((await getVisitStats(env)).thisMonth).toBe(2);
+  });
+
+  it('calculates month rollover using owner timezoneOffsetHours and exposes lastMonth accurately', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv };
+    const cfg = { community: { timezoneOffsetHours: 8 } };
+
+    // UTC 2026-01-31 15:30 = UTC+8 2026-01-31 23:30 -> January (202601)
+    const janDate = new Date('2026-01-31T15:30:00Z');
+    expect(getMonthKeys(janDate, 8)).toEqual({ thisMonthKey: '202601', lastMonthKey: '202512' });
+    await recordMonthlyVisit(env, '72001', cfg, janDate);
+    await recordMonthlyVisit(env, '72002', cfg, janDate);
+
+    // UTC 2026-01-31 16:30 = UTC+8 2026-02-01 00:30 -> February (202602)
+    const febDate = new Date('2026-01-31T16:30:00Z');
+    expect(getMonthKeys(febDate, 8)).toEqual({ thisMonthKey: '202602', lastMonthKey: '202601' });
+
+    // Before anyone opens in Feb: thisMonth is 0, lastMonth is 2
+    expect(await getVisitStats(env, cfg, febDate)).toEqual({ thisMonth: 0, lastMonth: 2 });
+
+    // Same user opening in Feb counts as 1 for Feb without touching Jan
+    await recordMonthlyVisit(env, '72001', cfg, febDate);
+    expect(await getVisitStats(env, cfg, febDate)).toEqual({ thisMonth: 1, lastMonth: 2 });
+  });
+
+  it('fails open on KV write errors so /api/bootstrap still succeeds normally', async () => {
+    const kv = createMemoryKV();
+    const botToken = '123456:VISIT_FAILOPEN';
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '900001' };
+
+    vi.spyOn(kv, 'put').mockRejectedValue(new Error('KV daily write quota exceeded'));
+
+    const guestInit = await signInitData(
+      { user: JSON.stringify({ id: 73001, first_name: 'QuotaTest' }), auth_date: Math.floor(Date.now() / 1000) },
+      botToken
+    );
+    const res = await worker.fetch(
+      new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': guestInit } }),
+      env
+    );
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.ok).toBe(true);
+  });
+
+  it('hides visitStats when showVisitCounter is false, exposes only thisMonth when true, and always gives admin both numbers', async () => {
+    const kv = createMemoryKV();
+    const botToken = '123456:VISIT_VISIBILITY';
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '900001' };
+
+    const cfgDefault = await loadPanelConfig(env);
+    expect(cfgDefault.profile.showVisitCounter).toBe(false);
+
+    // Seed this month + last month totals
+    const { thisMonthKey, lastMonthKey } = getMonthKeys(new Date(), cfgDefault.community.timezoneOffsetHours);
+    await kv.put(`visit:count:${thisMonthKey}`, JSON.stringify({ n: 42 }));
+    await kv.put(`visit:count:${lastMonthKey}`, JSON.stringify({ n: 31 }));
+
+    const guestInit = await signInitData(
+      { user: JSON.stringify({ id: 74001, first_name: 'Viewer' }), auth_date: Math.floor(Date.now() / 1000) },
+      botToken
+    );
+    const adminInit = await signInitData(
+      { user: JSON.stringify({ id: 900001, first_name: 'Owner' }), auth_date: Math.floor(Date.now() / 1000) },
+      botToken
+    );
+
+    // 1. showVisitCounter === false (default)
+    const guestOff = await (
+      await worker.fetch(
+        new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': guestInit } }),
+        env
+      )
+    ).json();
+    expect('visitStats' in guestOff.config).toBe(false);
+    expect('visitStats' in guestOff).toBe(false);
+
+    const adminOff = await (
+      await worker.fetch(
+        new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': adminInit } }),
+        env
+      )
+    ).json();
+    expect('visitStats' in adminOff.config).toBe(false);
+    expect(adminOff.visitStats).toEqual({ thisMonth: 43, lastMonth: 31 }); // 42 seeded + guest 74001
+
+    // 2. showVisitCounter === true -> public config exposes ONLY thisMonth (never lastMonth)
+    await savePanelConfig(env, { profile: { showVisitCounter: true } });
+
+    const guestOn = await (
+      await worker.fetch(
+        new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': guestInit } }),
+        env
+      )
+    ).json();
+    expect(guestOn.config.visitStats).toEqual({ thisMonth: 43 });
+    expect('lastMonth' in guestOn.config.visitStats).toBe(false);
+    expect('visitStats' in guestOn).toBe(false);
+
+    const adminOn = await (
+      await worker.fetch(
+        new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': adminInit } }),
+        env
+      )
+    ).json();
+    expect(adminOn.config.visitStats).toEqual({ thisMonth: 43 });
+    expect(adminOn.visitStats).toEqual({ thisMonth: 43, lastMonth: 31 });
   });
 });

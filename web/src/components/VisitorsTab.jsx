@@ -35,10 +35,16 @@ const STATUS_META = {
   pending: { label: '待验证', tone: '' },
 };
 
-export default function VisitorsTab({ initialVisitorId = '', onClearInitial, onToast }) {
+export default function VisitorsTab({
+  initialVisitorId = '',
+  initialVisitStats = null,
+  onClearInitial,
+  onToast,
+}) {
   const [visitors, setVisitors] = useState([]);
   const [stats, setStats] = useState({ total: 0, active: 0, trusted: 0, banned: 0, closed: 0 });
   const [sourceStats, setSourceStats] = useState([]);
+  const [visitStats, setVisitStats] = useState(initialVisitStats);
   const [blockedSpamCount, setBlockedSpamCount] = useState(0);
   const [filter, setFilter] = useState('all');
   const [search, setSearch] = useState('');
@@ -80,6 +86,9 @@ export default function VisitorsTab({ initialVisitorId = '', onClearInitial, onT
       setStats(res.stats || stats);
       if (Array.isArray(res.sourceStats)) {
         setSourceStats(res.sourceStats);
+      }
+      if (res.visitStats && typeof res.visitStats.thisMonth === 'number') {
+        setVisitStats(res.visitStats);
       }
       if (typeof res.blockedSpamCount === 'number') {
         setBlockedSpamCount(res.blockedSpamCount);
@@ -384,14 +393,24 @@ export default function VisitorsTab({ initialVisitorId = '', onClearInitial, onT
         </div>
       )}
 
-      {sourceStats.length > 0 && (
+      {(visitStats || sourceStats.length > 0) && (
         <div className="card visitor-insight-bar">
-          <div className="visitor-insight-line">
-            <span className="visitor-insight-label">来源统计</span>
-            <span className="visitor-insight-val">
-              {sourceStats.map((s) => `${s.label} ${s.count}`).join(' · ')}
-            </span>
-          </div>
+          {visitStats && typeof visitStats.thisMonth === 'number' && (
+            <div className="visitor-insight-line">
+              <span className="visitor-insight-label">名片访问</span>
+              <span className="visitor-insight-val">
+                本月访客 {visitStats.thisMonth} 人（上月 {visitStats.lastMonth ?? 0} 人）
+              </span>
+            </div>
+          )}
+          {sourceStats.length > 0 && (
+            <div className="visitor-insight-line">
+              <span className="visitor-insight-label">来源统计</span>
+              <span className="visitor-insight-val">
+                {sourceStats.map((s) => `${s.label} ${s.count}`).join(' · ')}
+              </span>
+            </div>
+          )}
         </div>
       )}
 

@@ -89,6 +89,7 @@ export const DEFAULT_CONFIG = {
     labelsRev: PROFILE_LABELS_REV,
     notice: '',
     tags: '',
+    showVisitCounter: false, // 是否在名片上公开显示本月访客数，默认不公开
     noteTitle: '来信礼仪',
     noteLines:
       '初次私聊请直接说明来意，不用只发「在吗」\n欢迎技术交流、友链与合作，谢绝广告推销\n看到消息后会尽快回复，请稍作等待 🌙',
@@ -357,6 +358,7 @@ export function mergeConfig(base, override) {
     cloned.profile.emblem = normalizeEmblem(cloned.profile.emblem);
     cloned.profile.splash = normalizeSplash(cloned.profile.splash);
     cloned.profile.avatarMode = resolveAvatarMode(cloned.profile.avatarMode, cloned.profile.avatarUrl);
+    cloned.profile.showVisitCounter = Boolean(cloned.profile.showVisitCounter);
     cloned.probe.visibility = cloned.probe.visibility === 'private' ? 'private' : 'public';
     cloned.probe.provider = PROBE_PROVIDER_IDS.includes(cloned.probe.provider) ? cloned.probe.provider : 'komari';
     cloned.probe.alerts = normalizeProbeAlerts(DEFAULT_PROBE_ALERTS, cloned.probe.alerts);
@@ -385,6 +387,9 @@ export function mergeConfig(base, override) {
   mergedProfile.avatarMode = resolveAvatarMode(
     explicitMode !== undefined ? explicitMode : base.profile?.avatarMode && !override.profile?.avatarUrl ? base.profile.avatarMode : undefined,
     mergedProfile.avatarUrl
+  );
+  mergedProfile.showVisitCounter = Boolean(
+    override.profile?.showVisitCounter ?? base.profile?.showVisitCounter ?? false
   );
   return {
     profile: mergedProfile,
@@ -506,6 +511,7 @@ export async function savePanelConfig(env, nextConfig) {
   merged.profile.ownerTag = String(merged.profile.ownerTag ?? '').trim().slice(0, 32);
   merged.profile.badgeTitle = String(merged.profile.badgeTitle ?? '').trim().slice(0, 32);
   merged.profile.joinedText = String(merged.profile.joinedText ?? '').trim().slice(0, 48);
+  merged.profile.showVisitCounter = Boolean(merged.profile.showVisitCounter);
 
   // Clamp numeric settings
   merged.probe.cacheTtlSeconds = Math.min(Math.max(Number(merged.probe.cacheTtlSeconds) || 15, 5), 300);
@@ -577,7 +583,7 @@ export function resolveShareUrl(config, env = {}, requestOrigin = '') {
  * CRITICAL SECURITY: Private sites (`visibility === 'private'`) and saved sticker library
  * are strictly stripped server-side for non-admin visitors.
  */
-export function sanitizePublicConfig(config, env, isAdmin = false, requestOrigin = '') {
+export function sanitizePublicConfig(config, env, isAdmin = false, requestOrigin = '', visitStats = null) {
   const visibleSites = isAdmin
     ? config.sites
     : config.sites.filter((s) => (s.visibility || 'public') !== 'private');
@@ -591,6 +597,10 @@ export function sanitizePublicConfig(config, env, isAdmin = false, requestOrigin
   };
 
   const probePrivateHidden = config.probe.visibility === 'private' && !isAdmin;
+  const publicVisitStats =
+    config.profile?.showVisitCounter === true
+      ? { thisMonth: Math.max(0, Number(visitStats?.thisMonth) || 0) }
+      : undefined;
 
   return {
     profile: {
@@ -640,6 +650,7 @@ export function sanitizePublicConfig(config, env, isAdmin = false, requestOrigin
       appShortName: env.APP_SHORT_NAME || '',
     },
     shareUrl: resolveShareUrl(config, env, requestOrigin),
+    ...(publicVisitStats ? { visitStats: publicVisitStats } : {}),
   };
 }
 
