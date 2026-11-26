@@ -2577,8 +2577,6 @@ export async function syncTelegramBotSurface(env, requestOrigin, config = null, 
  * directly to the visitor in private chat, while silently mirroring into the Forum Supergroup Topic
  * (if bound) and archiving into `history:<uid>` so Mini App and Telegram Topics stay 100% synced.
  */
-const PANEL_MIRROR_LABEL = '📱 <b>我在面板回复</b>';
-
 export async function sendAdminDirectVisitorReply(env, requestOrigin, targetUid, payload = {}) {
   const uid = String(targetUid || '').trim();
   if (!/^\d+$/.test(uid)) {
@@ -2675,8 +2673,8 @@ export async function sendAdminDirectVisitorReply(env, requestOrigin, targetUid,
       }
 
       // The mirror is posted by the bot, like the visitor's own copied messages, so Telegram groups
-      // them under the same sender. A bold label + blockquote, and a quote of the visitor message
-      // being answered, keep the owner's panel replies visually distinct from what the visitor said.
+      // them under the same sender. A blockquote, plus a quote of the visitor message being answered,
+      // keeps the owner's panel replies visually distinct from what the visitor said (no text label).
       const mirrorOnce = async (tid, quoteMsgId = null) => {
         const replyPart = quoteMsgId
           ? { reply_parameters: { message_id: quoteMsgId, allow_sending_without_reply: true } }
@@ -2687,10 +2685,9 @@ export async function sendAdminDirectVisitorReply(env, requestOrigin, targetUid,
             chat_id: supergroupId,
             message_thread_id: tid,
             photo: largestId,
-            caption: rawText
-              ? `${PANEL_MIRROR_LABEL}\n<blockquote>${escapeHtml(rawText.slice(0, 900))}</blockquote>`
-              : `${PANEL_MIRROR_LABEL}（图片）`,
-            parse_mode: 'HTML',
+            ...(rawText
+              ? { caption: `<blockquote>${escapeHtml(rawText.slice(0, 900))}</blockquote>`, parse_mode: 'HTML' }
+              : {}),
             disable_notification: true,
             ...replyPart,
           });
@@ -2698,7 +2695,7 @@ export async function sendAdminDirectVisitorReply(env, requestOrigin, targetUid,
         return tgCall(env, 'sendMessage', {
           chat_id: supergroupId,
           message_thread_id: tid,
-          text: `${PANEL_MIRROR_LABEL}\n<blockquote>${escapeHtml(rawText.slice(0, 3800))}</blockquote>`,
+          text: `<blockquote>${escapeHtml(rawText.slice(0, 3800))}</blockquote>`,
           parse_mode: 'HTML',
           disable_notification: true,
           ...replyPart,

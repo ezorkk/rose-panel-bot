@@ -2813,7 +2813,7 @@ describe('Mini App in-panel visitor chat log, direct text/photo reply & recall',
     }
   });
 
-  it('mirrors panel replies to the topic with a bold label, blockquote, and a quote of the latest visitor message', async () => {
+  it('mirrors panel replies to the topic as a blockquote quoting the latest visitor message, without a text label', async () => {
     const kv = createMemoryKV();
     const botToken = '999222:MIRROR_STYLE';
     const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777' };
@@ -2884,8 +2884,8 @@ describe('Mini App in-panel visitor chat log, direct text/photo reply & recall',
       expect((await panelReply('感动 <b>不是标签</b>')).status).toBe(200);
       const mirror = topicMirror();
       expect(mirror.body.parse_mode).toBe('HTML');
-      expect(mirror.body.text).toContain('<b>我在面板回复</b>');
-      expect(mirror.body.text).toContain('<blockquote>感动 &lt;b&gt;不是标签&lt;/b&gt;</blockquote>');
+      expect(mirror.body.text).toBe('<blockquote>感动 &lt;b&gt;不是标签&lt;/b&gt;</blockquote>');
+      expect(mirror.body.text).not.toContain('面板回复');
       expect(mirror.body.reply_parameters).toEqual({ message_id: copyId, allow_sending_without_reply: true });
       expect(mirror.body.disable_notification).toBe(true);
       // The visitor's own private chat still gets the plain text
