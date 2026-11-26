@@ -25,6 +25,11 @@ export const RECENT_RELEASES = [
         tone: 'new',
         text: '面板聊天窗口直接显示静态 / 动态 / 视频贴纸（走短时签名媒体代理，加载失败自动回退文字）',
       },
+      {
+        tag: '改进',
+        tone: 'imp',
+        text: '面板发消息、撤回与消息刷新全面提速，话题同步副本更简洁；设置页与更新弹窗新增「意见反馈」入口',
+      },
     ],
   },
   {
@@ -189,7 +194,7 @@ export function StarSupportBanner({ onDismiss = null, style = undefined }) {
 }
 
 export default function WhatsNewModal({
-  appVersion = '1.8.0',
+  appVersion = '1.9.0',
   previousVersion = '',
   mode = 'auto',
   onClose,
