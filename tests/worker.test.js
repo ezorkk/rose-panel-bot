@@ -7,7 +7,15 @@ import {
   runProbeAlerts,
   sendAlertNotification,
 } from '../src/worker/alerts.js';
-import { assessIncomingRisk, checkCasBlacklist, normalizeAntiSpamText } from '../src/worker/antispam.js';
+import {
+  assessIncomingRisk,
+  assessProbationRisk,
+  checkCasBlacklist,
+  formatProbationReasons,
+  getBlockedSpamCount,
+  isDomainAllowed,
+  normalizeAntiSpamText,
+} from '../src/worker/antispam.js';
 import {
   MEDIA_TOKEN_BUCKET_SECONDS,
   signMediaToken,
@@ -24,12 +32,15 @@ import {
   buildVisitorCardText,
   completeTurnstileVerification,
   ensureWebhookReactionSubscription,
+  formatSafeReviewPreviewHtml,
   generateInlineChallenge,
   generateStickerChallenge,
   handleTelegramUpdate,
   initiateChatFromMiniApp,
   matchKeywordReply,
   parseStickerQuizInput,
+  reviewPendingVisitor,
+  startVisitorProbation,
   syncTelegramBotSurface,
 } from '../src/worker/bot.js';
 import { getLeaderboard, getMemberTicket, performCheckin, resolveLevel } from '../src/worker/checkin.js';
@@ -72,12 +83,14 @@ import {
   computeSourceStats,
   extractLinksFromMessage,
   extractPhotoFromMessage,
+  filterFreshPendingReview,
   getVisitorDetail,
   HISTORY_CACHE_TTL_SECONDS,
   getVisitorHistory,
   getVisitorOverview,
   listVisitors,
   normalizeSourceParam,
+  PENDING_REVIEW_TTL_MS,
   recallAdminVisitorMessage,
   recordVisitorExchange,
   rememberPendingSource,
@@ -6235,6 +6248,550 @@ describe('Panel chat sticker rendering & signed media proxy (v1.9)', () => {
       expect(badRes.status).toBe(403);
     } finally {
       fetchSpy.mockRestore();
+    }
+  });
+});
+
+describe('New visitor probation & pending message review (v1.10)', () => {
+  function createTrackingKV() {
+    const base = createMemoryKV();
+    const putMeta = new Map();
+    return {
+      ...base,
+      putMeta,
+      async put(key, value, opts) {
+        putMeta.set(key, opts || {});
+        return base.put(key, value, opts);
+      },
+    };
+  }
+
+  function mockTelegramProbation() {
+    const calls = [];
+    let nextMsgId = 5000;
+    let nextTopicId = 900;
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      const method = String(url).split('/').pop();
+      const body = init?.body ? JSON.parse(init.body) : {};
+      calls.push({ method, body });
+      if (method === 'createForumTopic') {
+        nextTopicId += 1;
+        return new Response(JSON.stringify({ ok: true, result: { message_thread_id: nextTopicId } }), { status: 200 });
+      }
+      if (method === 'copyMessage' || method === 'sendMessage' || method === 'editMessageText') {
+        nextMsgId += 1;
+        return new Response(JSON.stringify({ ok: true, result: { message_id: nextMsgId } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+    });
+    return { calls, restore: () => spy.mockRestore() };
+  }
+
+  it('starts probation on inline & Turnstile verification pass, skips trusted/admin/legacy visitors, and clears probation on trust', async () => {
+    const kv = createTrackingKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:PROB_START', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100888999' };
+    const tg = mockTelegramProbation();
+
+    try {
+      // 1. Inline emoji verification pass writes probation:{uid} with expirationTtl
+      await kv.put(
+        'chal:c_inline',
+        JSON.stringify({
+          mode: 'emoji',
+          userId: '50001',
+          correctIndex: 2,
+          user: { id: 50001, first_name: 'Newbie' },
+          pending: [],
+        })
+      );
+      await handleTelegramUpdate(
+        {
+          callback_query: {
+            id: 'cq_p1',
+            from: { id: 50001, first_name: 'Newbie' },
+            data: 'v:c_inline:2',
+            message: { message_id: 10, chat: { id: 50001, type: 'private' } },
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      const prob1 = await kv.get('probation:50001', 'json');
+      expect(prob1).toBeTruthy();
+      expect(prob1.left).toBe(3);
+      expect(prob1.until).toBeGreaterThan(Date.now());
+      expect(kv.putMeta.get('probation:50001')?.expirationTtl).toBe(24 * 3600);
+
+      // 2. Turnstile verification pass writes probation:{uid}
+      await kv.put(
+        'chal:c_ts',
+        JSON.stringify({
+          mode: 'turnstile',
+          userId: '50002',
+          user: { id: 50002, first_name: 'TurnstileUser' },
+          pending: [],
+        })
+      );
+      const tsRes = await completeTurnstileVerification(env, 'https://panel.test', 'c_ts');
+      expect(tsRes.ok).toBe(true);
+      const prob2 = await kv.get('probation:50002', 'json');
+      expect(prob2?.left).toBe(3);
+      expect(kv.putMeta.get('probation:50002')?.expirationTtl).toBe(24 * 3600);
+
+      // 3. Admin and permanently trusted visitor never get probation:{uid}
+      await kv.put('verified:50003', 'trusted');
+      expect(await startVisitorProbation(env, '10001')).toBeNull();
+      expect(await kv.get('probation:10001')).toBeNull();
+      expect(await startVisitorProbation(env, '50003')).toBeNull();
+      expect(await kv.get('probation:50003')).toBeNull();
+
+      // 4. Marking a visitor permanently trusted deletes their existing probation:{uid}
+      await applyVisitorAction(env, '50001', 'trust');
+      expect(await kv.get('probation:50001')).toBeNull();
+
+      // 5. Legacy visitor (verified before v1.10, no probation:{uid} key) forwards links untouched
+      await kv.put('verified:50004', 'emoji:v1');
+      tg.calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 401,
+            from: { id: 50004, first_name: 'LegacyUser' },
+            chat: { id: 50004, type: 'private' },
+            text: '老朋友分享一个 https://example.org/post',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(tg.calls.some((c) => c.method === 'copyMessage' && c.body.message_id === 401)).toBe(true);
+      const legacyDetail = await getVisitorDetail(env, '50004');
+      expect(legacyDetail.pendingReview).toEqual([]);
+    } finally {
+      tg.restore();
+    }
+  });
+
+  it('holds suspicious messages during probation without forwarding, sends silent alert, and decrements/clears on clean messages', async () => {
+    const kv = createTrackingKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:PROB_HOLD', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100888999' };
+    const tg = mockTelegramProbation();
+
+    try {
+      await kv.put('verified:51001', 'emoji:v1');
+      await kv.put('probation:51001', JSON.stringify({ left: 2, until: Date.now() + 3600 * 1000 }));
+
+      // Suspicious cases: link, @username, phone, wechat, forwarded -> all held, ZERO copyMessage calls, left stays 2
+      const suspiciousMsgs = [
+        { message_id: 101, text: '快看 https://spam.example/deal <script>' },
+        { message_id: 102, text: '找我 @promo_agent88' },
+        { message_id: 103, text: '打电话 138-1234-5678 咨询' },
+        { message_id: 104, text: '加我微信 wx_ad888999 领福利' },
+        { message_id: 105, text: '转发一条活动', forward_origin: { type: 'channel' } },
+      ];
+
+      for (const m of suspiciousMsgs) {
+        await handleTelegramUpdate(
+          {
+            message: {
+              ...m,
+              from: { id: 51001, first_name: 'Suspect' },
+              chat: { id: 51001, type: 'private' },
+            },
+          },
+          env,
+          'https://panel.test'
+        );
+      }
+
+      // NEVER forwarded any held message
+      expect(tg.calls.filter((c) => c.method === 'copyMessage')).toHaveLength(0);
+
+      // Left count was NOT decremented by held messages
+      expect((await kv.get('probation:51001', 'json')).left).toBe(2);
+
+      // Silent notification sent ONCE within 10 minutes with inline buttons & safe <code> URL escaping
+      const reviewAlerts = tg.calls.filter(
+        (c) => c.method === 'sendMessage' && String(c.body.text || '').includes('新访客消息待审核')
+      );
+      expect(reviewAlerts).toHaveLength(1);
+      expect(reviewAlerts[0].body.disable_notification).toBe(true);
+      expect(reviewAlerts[0].body.text).toContain('<code>https://spam.example/deal</code>');
+      expect(reviewAlerts[0].body.text).toContain('&lt;script&gt;');
+      expect(reviewAlerts[0].body.reply_markup.inline_keyboard[0].map((b) => b.callback_data)).toEqual([
+        'rv:ok:51001',
+        'rv:ban:51001',
+      ]);
+
+      // All 5 held messages stored in order in user:51001.pendingReview & counted in listVisitors(filter=pending)
+      const detail = await getVisitorDetail(env, '51001');
+      expect(detail.pendingReview).toHaveLength(5);
+      expect(detail.pendingReview.map((x) => x.pmMessageId)).toEqual([101, 102, 103, 104, 105]);
+      const pendingList = await listVisitors(env, { filter: 'pending' });
+      expect(pendingList.stats.pendingReview).toBe(1);
+      expect(pendingList.items.map((v) => v.userId)).toEqual(['51001']);
+
+      // Media without suspicious caption is NOT held (counts as clean message: left 2 -> 1)
+      tg.calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 201,
+            from: { id: 51001, first_name: 'Suspect' },
+            chat: { id: 51001, type: 'private' },
+            photo: [{ file_id: 'photo_clean_1' }],
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(tg.calls.some((c) => c.method === 'copyMessage' && c.body.message_id === 201)).toBe(true);
+      expect((await kv.get('probation:51001', 'json')).left).toBe(1);
+
+      // Another clean text message decrements left 1 -> 0 and deletes probation:{uid}
+      tg.calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 202,
+            from: { id: 51001, first_name: 'Suspect' },
+            chat: { id: 51001, type: 'private' },
+            text: '你好，请问博客友链怎么申请？',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(tg.calls.some((c) => c.method === 'copyMessage' && c.body.message_id === 202)).toBe(true);
+      expect(await kv.get('probation:51001')).toBeNull();
+
+      // Expired pendingReview items (>7d) are dropped on read
+      const expired = filterFreshPendingReview([
+        { pmMessageId: 1, chatId: 1, preview: 'old', reasons: ['link'], at: Date.now() - PENDING_REVIEW_TTL_MS - 1000 },
+        { pmMessageId: 2, chatId: 1, preview: 'fresh', reasons: ['link'], at: Date.now() - 1000 },
+      ]);
+      expect(expired.map((x) => x.pmMessageId)).toEqual([2]);
+    } finally {
+      tg.restore();
+    }
+  });
+
+  it('matches allowDomains and subdomains accurately while rejecting suffix lookalikes like evilgithub.com', () => {
+    const cfg = { probation: { enabled: true, allowDomains: ['github.com', 'example.com'] } };
+
+    expect(isDomainAllowed('github.com', ['github.com'])).toBe(true);
+    expect(isDomainAllowed('gist.github.com', ['github.com'])).toBe(true);
+    expect(isDomainAllowed('evilgithub.com', ['github.com'])).toBe(false);
+    expect(isDomainAllowed('github.com.evil.net', ['github.com'])).toBe(false);
+
+    // Exact allowed domain & subdomain pass (even with 7+ digits in URL path)
+    expect(
+      assessProbationRisk({ text: '参考 https://github.com/mango0114/rose-panel-bot/issues/1234567' }, cfg).isSuspicious
+    ).toBe(false);
+    expect(
+      assessProbationRisk({ text: '文档在 https://docs.github.com/en/actions' }, cfg).isSuspicious
+    ).toBe(false);
+
+    // Lookalike domain is flagged
+    const evilRes = assessProbationRisk({ text: '看 https://evilgithub.com/phish' }, cfg);
+    expect(evilRes.isSuspicious).toBe(true);
+    expect(evilRes.reasons).toContain('link');
+
+    // Mixed allowed + disallowed link is flagged
+    const mixedRes = assessProbationRisk(
+      { text: '仓库 https://github.com/a/b 和推广 https://ad.xyz/go' },
+      cfg
+    );
+    expect(mixedRes.isSuspicious).toBe(true);
+    expect(mixedRes.reasons).toContain('link');
+
+    // Cyrillic homoglyph spoof of allowed domain is flagged
+    const spoofRes = assessProbationRisk({ text: '看 https://gіthub.com/scam' }, cfg);
+    expect(spoofRes.isSuspicious).toBe(true);
+
+    // Safe review HTML escapes tags & wraps links in <code>
+    const html = formatSafeReviewPreviewHtml('点 https://evil.com/a?x=1&y=2 <b>hi</b>');
+    expect(html).toContain('<code>https://evil.com/a?x=1&amp;y=2</code>');
+    expect(html).toContain('&lt;b&gt;hi&lt;/b&gt;');
+    expect(formatProbationReasons(['link', 'contact'])).toBe('含链接 · 含联系方式');
+  });
+
+  it('approves in exact order, bans & counts spam, blocks non-admins, and keeps callback buttons & panel API in sync', async () => {
+    const kv = createTrackingKV();
+    const botToken = '123456:PROB_REVIEW';
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001', SUPERGROUP_ID: '-100888999' };
+    const tg = mockTelegramProbation();
+
+    try {
+      // --- Case A: Approve via Telegram callback button ---
+      await kv.put('verified:52001', 'emoji:v1');
+      await kv.put('probation:52001', JSON.stringify({ left: 3, until: Date.now() + 3600 * 1000 }));
+
+      for (const [mid, text] of [
+        [301, '第一条 https://foo.test/1'],
+        [302, '第二条 https://foo.test/2'],
+        [303, '第三条 @my_handle'],
+      ]) {
+        await handleTelegramUpdate(
+          {
+            message: {
+              message_id: mid,
+              from: { id: 52001, first_name: 'ApproveMe' },
+              chat: { id: 52001, type: 'private' },
+              text,
+            },
+          },
+          env,
+          'https://panel.test'
+        );
+      }
+
+      // Non-admin clicking rv:ok:52001 is rejected and nothing is forwarded
+      tg.calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          callback_query: {
+            id: 'cq_non_admin',
+            from: { id: 99999, first_name: 'Hacker' },
+            data: 'rv:ok:52001',
+            message: { message_id: 700, chat: { id: -100888999, type: 'supergroup' } },
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(tg.calls.some((c) => c.method === 'copyMessage')).toBe(false);
+      expect(
+        tg.calls.some((c) => c.method === 'answerCallbackQuery' && c.body.show_alert === true)
+      ).toBe(true);
+      expect((await getVisitorDetail(env, '52001')).pendingReview).toHaveLength(3);
+
+      // Non-admin calling panel review API gets 403
+      const guestInit = await signInitData(
+        { auth_date: String(Math.floor(Date.now() / 1000)), user: JSON.stringify({ id: 99999, first_name: 'Hacker' }) },
+        botToken
+      );
+      const guestRes = await worker.fetch(
+        new Request('https://panel.test/api/admin/visitors/52001/review', {
+          method: 'POST',
+          headers: { 'X-Telegram-Init-Data': guestInit, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'approve' }),
+        }),
+        env
+      );
+      expect(guestRes.status).toBe(403);
+
+      // Admin approves via callback button -> replays 301, 302, 303 in exact order, clears pendingReview & probation
+      tg.calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          callback_query: {
+            id: 'cq_admin_ok',
+            from: { id: 10001, first_name: 'Owner' },
+            data: 'rv:ok:52001',
+            message: { message_id: 700, chat: { id: -100888999, type: 'supergroup' } },
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      const copiedIds = tg.calls.filter((c) => c.method === 'copyMessage').map((c) => c.body.message_id);
+      expect(copiedIds).toEqual([301, 302, 303]);
+      expect(await kv.get('probation:52001')).toBeNull();
+      expect((await getVisitorDetail(env, '52001')).pendingReview).toEqual([]);
+      const editOk = tg.calls.find((c) => c.method === 'editMessageText');
+      expect(editOk?.body?.text).toBe('✅ 已放行');
+      expect(editOk?.body?.reply_markup).toBeUndefined();
+
+      // --- Case B: Ban via Panel API, then stale Telegram button reports 「已处理」 ---
+      await kv.put('verified:52002', 'emoji:v1');
+      await kv.put('probation:52002', JSON.stringify({ left: 3, until: Date.now() + 3600 * 1000 }));
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 401,
+            from: { id: 52002, first_name: 'AdSpammer' },
+            chat: { id: 52002, type: 'private' },
+            text: '联系我 promo_wx888',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+
+      const adminInit = await signInitData(
+        { auth_date: String(Math.floor(Date.now() / 1000)), user: JSON.stringify({ id: 10001, first_name: 'Owner' }) },
+        botToken
+      );
+      const beforeBlocked = await getBlockedSpamCount(env);
+      const banApiRes = await worker.fetch(
+        new Request('https://panel.test/api/admin/visitors/52002/review', {
+          method: 'POST',
+          headers: { 'X-Telegram-Init-Data': adminInit, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'ban' }),
+        }),
+        env
+      );
+      expect(banApiRes.status).toBe(200);
+      const banJson = await banApiRes.json();
+      expect(banJson.ok).toBe(true);
+      expect(banJson.alreadyHandled).toBe(false);
+      expect(banJson.visitor.isBanned).toBe(true);
+      expect(banJson.visitor.pendingReview).toEqual([]);
+      expect(await kv.get('banned:52002')).toBe('1');
+      expect(await kv.get('probation:52002')).toBeNull();
+      expect(await getBlockedSpamCount(env)).toBe(beforeBlocked + 1);
+
+      // Clicking the stale notification button after panel already handled it replies 「已处理」
+      tg.calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          callback_query: {
+            id: 'cq_stale_btn',
+            from: { id: 10001, first_name: 'Owner' },
+            data: 'rv:ok:52002',
+            message: { message_id: 701, chat: { id: -100888999, type: 'supergroup' } },
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(tg.calls.some((c) => c.method === 'copyMessage')).toBe(false);
+      expect(tg.calls.some((c) => c.method === 'answerCallbackQuery' && c.body.text === '已处理')).toBe(true);
+
+      // --- Case C: Approve via Panel API matches callback approve behavior ---
+      await kv.put('verified:52003', 'emoji:v1');
+      await kv.put('probation:52003', JSON.stringify({ left: 3, until: Date.now() + 3600 * 1000 }));
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 501,
+            from: { id: 52003, first_name: 'PanelApprove' },
+            chat: { id: 52003, type: 'private' },
+            text: '看看 https://blog.test/1',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 502,
+            from: { id: 52003, first_name: 'PanelApprove' },
+            chat: { id: 52003, type: 'private' },
+            text: '还有 https://blog.test/2',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      tg.calls.length = 0;
+      const approveApiRes = await worker.fetch(
+        new Request('https://panel.test/api/admin/visitors/52003/review', {
+          method: 'POST',
+          headers: { 'X-Telegram-Init-Data': adminInit, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'approve' }),
+        }),
+        env
+      );
+      expect(approveApiRes.status).toBe(200);
+      const approveJson = await approveApiRes.json();
+      expect(approveJson.deliveredCount).toBe(2);
+      expect(approveJson.visitor.pendingReview).toEqual([]);
+      expect(await kv.get('probation:52003')).toBeNull();
+      expect(tg.calls.filter((c) => c.method === 'copyMessage').map((c) => c.body.message_id)).toEqual([501, 502]);
+    } finally {
+      tg.restore();
+    }
+  });
+
+  it('keeps blocked keywords higher priority than probation: matched messages are dropped silently without entering pendingReview', async () => {
+    const kv = createTrackingKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:PROB_KW', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100888999' };
+    await savePanelConfig(env, { pmBot: { blockedKeywords: '稳赚不赔, 合约喊单' } });
+    await kv.put('verified:53001', 'emoji:v1');
+    await kv.put('probation:53001', JSON.stringify({ left: 3, until: Date.now() + 3600 * 1000 }));
+
+    const tg = mockTelegramProbation();
+    try {
+      const beforeBlocked = await getBlockedSpamCount(env);
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 601,
+            from: { id: 53001, first_name: 'KwSpammer' },
+            chat: { id: 53001, type: 'private' },
+            text: '稳赚不赔 链接 https://scam.test/go 加微信 wx123456',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+
+      expect(tg.calls).toHaveLength(0);
+      expect(await getBlockedSpamCount(env)).toBe(beforeBlocked + 1);
+      expect(await kv.get('user:53001')).toBeNull();
+      expect((await getVisitorDetail(env, '53001')).pendingReview).toEqual([]);
+      expect((await kv.get('probation:53001', 'json')).left).toBe(3);
+    } finally {
+      tg.restore();
+    }
+  });
+
+  it('sends silent DM review alert and handles rv:ban callback in Bot DM mode', async () => {
+    const kv = createTrackingKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:PROB_DM', ADMIN_IDS: '10001' };
+    await kv.put('verified:54001', 'emoji:v1');
+    await kv.put('probation:54001', JSON.stringify({ left: 3, until: Date.now() + 3600 * 1000 }));
+
+    const tg = mockTelegramProbation();
+    try {
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 801,
+            from: { id: 54001, first_name: 'DmSpammer' },
+            chat: { id: 54001, type: 'private' },
+            text: 'VX: scam_acc88',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+
+      expect(tg.calls.filter((c) => c.method === 'copyMessage')).toHaveLength(0);
+      const dmAlert = tg.calls.find(
+        (c) => c.method === 'sendMessage' && c.body.chat_id === 10001 && String(c.body.text).includes('新访客消息待审核')
+      );
+      expect(dmAlert).toBeTruthy();
+      expect(dmAlert.body.disable_notification).toBe(true);
+      expect(dmAlert.body.text).toContain('含联系方式');
+
+      // Admin clicks rv:ban:54001 -> bans visitor, clears pendingReview, counts spam, edits notice
+      const beforeBlocked = await getBlockedSpamCount(env);
+      tg.calls.length = 0;
+      await handleTelegramUpdate(
+        {
+          callback_query: {
+            id: 'cq_dm_ban',
+            from: { id: 10001, first_name: 'Owner' },
+            data: 'rv:ban:54001',
+            message: { message_id: 9001, chat: { id: 10001, type: 'private' } },
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(await kv.get('banned:54001')).toBe('1');
+      expect(await kv.get('probation:54001')).toBeNull();
+      expect((await getVisitorDetail(env, '54001')).pendingReview).toEqual([]);
+      expect(await getBlockedSpamCount(env)).toBe(beforeBlocked + 1);
+      const edited = tg.calls.find((c) => c.method === 'editMessageText');
+      expect(edited?.body?.text).toBe('🚫 已拉黑');
+      expect(edited?.body?.reply_markup).toBeUndefined();
+    } finally {
+      tg.restore();
     }
   });
 });

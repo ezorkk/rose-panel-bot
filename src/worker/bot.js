@@ -7,7 +7,9 @@
 
 import {
   assessIncomingRisk,
+  assessProbationRisk,
   checkCasBlacklist,
+  formatProbationReasons,
   recordBlockedSpam,
 } from './antispam.js';
 import { isUserAdmin, parseAdminIds } from './auth.js';
@@ -41,13 +43,16 @@ import {
   tgCallForm,
 } from './telegram.js';
 import {
+  addPendingReviewMessage,
   applyVisitorAction,
+  attachTopicMirror,
+  clearPendingReviewMessages,
+  filterFreshPendingReview,
   findLatestVisitorTopicMessage,
   formatDisplayName,
   formatSourceLabel,
   getVisitorDetail,
   normalizeSourceParam,
-  attachTopicMirror,
   recallAdminVisitorMessage,
   recordVisitorExchange,
   rememberPendingSource,
@@ -60,6 +65,7 @@ export const WEBHOOK_UPDATES_REV = '1';
 export const TOPIC_MSG_MAP_PREFIX = 'tmsg:';
 export const TOPIC_MSG_MAP_TTL_SECONDS = 30 * 86400;
 export const VISITOR_REACTION_LIMIT_PER_MIN = 10;
+export const PROBATION_NOTIFY_COOLDOWN_SECONDS = 600;
 
 const LOCAL_QUESTIONS = [
   { q: '冰融化后会变成什么？', ok: '水', bad: ['石头', '木头', '火'] },
@@ -711,27 +717,284 @@ async function processVisitorMessage(env, requestOrigin, msg, config = null) {
   }
 }
 
-async function flushPendingMessages(env, requestOrigin, state, config = null) {
-  const pending = Array.isArray(state.pending) ? state.pending : [];
+const REVIEW_LINK_SPLIT_RE =
+  /((?:https?:\/\/|t\.me\/|telegram\.me\/|wa\.me\/)[^\s<>"'`\u4e00-\u9fa5，。！？；：】）)]+|\b[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.(?:com|net|org|io|co|me|cc|tv|xyz|top|vip|shop|app|dev|cn|hk|tw|jp|uk|de|ru|ai|gg|ly|to|la|info|biz|site|online|club|pro|link|click)(?:\/[^\s<>"'`\u4e00-\u9fa5，。！？；：】）)]*)?)/gi;
+
+function buildReviewPreview(msg = {}) {
+  const text = String(msg.text || msg.caption || '').trim();
+  if (text) return text.slice(0, 300);
+  if (msg.photo) return '[图片]';
+  if (msg.video) return '[视频]';
+  if (msg.voice) return '[语音]';
+  if (msg.animation) return '[动画]';
+  if (msg.sticker) return `[贴纸 ${msg.sticker.emoji || ''}]`.trim();
+  if (msg.document) return `[文件 ${msg.document.file_name || ''}]`.trim();
+  return '[消息]';
+}
+
+export function formatSafeReviewPreviewHtml(preview = '') {
+  const input = String(preview || '');
+  if (!input) return '';
+  let out = '';
+  let lastIndex = 0;
+  REVIEW_LINK_SPLIT_RE.lastIndex = 0;
+  let m;
+  while ((m = REVIEW_LINK_SPLIT_RE.exec(input)) !== null) {
+    if (m.index > lastIndex) {
+      out += escapeHtml(input.slice(lastIndex, m.index));
+    }
+    out += `<code>${escapeHtml(m[0])}</code>`;
+    lastIndex = m.index + m[0].length;
+  }
+  if (lastIndex < input.length) {
+    out += escapeHtml(input.slice(lastIndex));
+  }
+  return out;
+}
+
+/**
+ * Starts the new-visitor probation window when a visitor passes human verification.
+ * Admins, permanently trusted visitors, and disabled probation are skipped.
+ */
+export async function startVisitorProbation(env, userId, config = null, options = {}) {
+  if (!env?.TOPIC_MAP) return null;
+  const uid = String(userId || '').trim();
+  if (!/^\d+$/.test(uid)) return null;
   const cfg = config || (await loadPanelConfig(env));
+  const prob = cfg?.pmBot?.probation;
+  if (prob?.enabled === false) return null;
+  if (await isUserAdmin(env, uid, tgCall)) return null;
+  const prevVerified =
+    options.prevVerified !== undefined ? options.prevVerified : await env.TOPIC_MAP.get(`verified:${uid}`);
+  if (prevVerified === 'trusted') return null;
+
+  const maxMessages = Math.min(Math.max(Math.round(Number(prob?.maxMessages) || 3), 1), 20);
+  const hours = Math.min(Math.max(Math.round(Number(prob?.hours) || 24), 1), 168);
+  const ttlSeconds = hours * 3600;
+  const state = { left: maxMessages, until: Date.now() + ttlSeconds * 1000 };
+  await safePutJSON(env.TOPIC_MAP, `probation:${uid}`, state, { expirationTtl: ttlSeconds });
+  return state;
+}
+
+async function sendPendingReviewNotice(env, requestOrigin, tgUser, preview, reasons = []) {
+  const uid = String(tgUser?.id || '').trim();
+  if (!env?.TOPIC_MAP || !/^\d+$/.test(uid)) return { notified: false };
+
+  const cdKey = `rv_notify_cd:${uid}`;
+  const alreadyNotified = await env.TOPIC_MAP.get(cdKey);
+  if (alreadyNotified) {
+    return { notified: false, deduplicated: true };
+  }
+
+  const supergroupId = await resolveSupergroupId(env);
+  const mode = await resolveInboxMode(env, supergroupId);
+  if (mode === 'off') {
+    return { notified: false, mode: 'off' };
+  }
+
+  const displayName = formatDisplayName({ ...tgUser, userId: uid });
+  const reasonText = formatProbationReasons(reasons);
+  const lines = [
+    '🛡️ <b>新访客消息待审核</b>',
+    ...(mode === 'dm' ? [`访客：${escapeHtml(displayName)} · <code>${escapeHtml(uid)}</code>`] : []),
+    `原因：${escapeHtml(reasonText)}`,
+    `内容：${formatSafeReviewPreviewHtml(preview)}`,
+  ];
+  const replyMarkup = {
+    inline_keyboard: [
+      [
+        { text: '✅ 放行', callback_data: `rv:ok:${uid}` },
+        { text: '🚫 拉黑', callback_data: `rv:ban:${uid}` },
+      ],
+    ],
+  };
+
+  await env.TOPIC_MAP.put(cdKey, '1', { expirationTtl: PROBATION_NOTIFY_COOLDOWN_SECONDS });
+
+  if (mode === 'topic') {
+    let { threadId } = await ensureVisitorTopic(env, requestOrigin, tgUser, '');
+    const payload = {
+      chat_id: supergroupId,
+      message_thread_id: threadId,
+      text: lines.join('\n'),
+      parse_mode: 'HTML',
+      disable_notification: true,
+      link_preview_options: { is_disabled: true },
+      reply_markup: replyMarkup,
+    };
+    try {
+      await tgCall(env, 'sendMessage', payload);
+    } catch (err) {
+      if (/thread not found|topic_deleted|message thread not found/i.test(String(err.message))) {
+        const rec = (await safeGetJSON(env.TOPIC_MAP, `user:${uid}`, {})) || {};
+        delete rec.thread_id;
+        await safePutJSON(env.TOPIC_MAP, `user:${uid}`, rec);
+        await env.TOPIC_MAP.delete(`thread:${threadId}`);
+        ({ threadId } = await ensureVisitorTopic(env, requestOrigin, tgUser, ''));
+        await tgCall(env, 'sendMessage', { ...payload, message_thread_id: threadId });
+      } else {
+        throw err;
+      }
+    }
+    return { notified: true, mode: 'topic', threadId };
+  }
+
+  const ownerId = getOwnerChatId(env);
+  if (!ownerId) return { notified: false, mode: 'off' };
+  const sent = await tgCall(env, 'sendMessage', {
+    chat_id: Number(ownerId),
+    text: lines.join('\n'),
+    parse_mode: 'HTML',
+    disable_notification: true,
+    link_preview_options: { is_disabled: true },
+    reply_markup: replyMarkup,
+  });
+  if (sent?.result?.message_id) {
+    await saveDmMessageMap(env, sent.result.message_id, uid).catch(() => {});
+  }
+  return { notified: true, mode: 'dm', messageId: sent?.result?.message_id || null };
+}
+
+/**
+ * Checks whether an incoming verified visitor message falls inside active probation.
+ * Returns `true` when the message is held for admin review (caller MUST NOT forward).
+ */
+async function checkAndApplyProbation(env, requestOrigin, msg, config = null) {
+  if (!env?.TOPIC_MAP || !msg?.from?.id || msg.from.is_bot) return false;
+  const cfg = config || (await loadPanelConfig(env));
+  if (cfg?.pmBot?.probation?.enabled === false) return false;
+
+  const uid = String(msg.from.id);
+  const probKey = `probation:${uid}`;
+  const prob = await safeGetJSON(env.TOPIC_MAP, probKey, null);
+  if (!prob) return false;
+
+  const now = Date.now();
+  const left = Number(prob.left);
+  const until = Number(prob.until);
+  if (!(left > 0) || (until > 0 && now >= until)) {
+    await env.TOPIC_MAP.delete(probKey);
+    return false;
+  }
+
+  const check = assessProbationRisk(msg, cfg.pmBot);
+  if (check.isSuspicious) {
+    const preview = buildReviewPreview(msg);
+    await addPendingReviewMessage(env, msg.from, {
+      pmMessageId: msg.message_id,
+      chatId: msg.chat?.id ?? msg.from.id,
+      preview,
+      reasons: check.reasons,
+      at: now,
+    });
+    await sendPendingReviewNotice(env, requestOrigin, msg.from, preview, check.reasons).catch(() => {});
+    return true;
+  }
+
+  const nextLeft = left - 1;
+  if (nextLeft <= 0 || (until > 0 && now >= until)) {
+    await env.TOPIC_MAP.delete(probKey);
+  } else {
+    const remSec =
+      until > 0
+        ? Math.max(60, Math.ceil((until - now) / 1000))
+        : Math.max(1, Number(cfg.pmBot?.probation?.hours || 24)) * 3600;
+    await safePutJSON(env.TOPIC_MAP, probKey, { left: nextLeft, until }, { expirationTtl: remSec });
+  }
+  return false;
+}
+
+/**
+ * Shared admin review handler used by both Telegram `rv:` callback buttons and
+ * Mini App `POST /api/admin/visitors/:uid/review`.
+ */
+export async function reviewPendingVisitor(env, requestOrigin, targetUid, action, config = null) {
+  const uid = String(targetUid || '').trim();
+  if (!env?.TOPIC_MAP || !/^\d+$/.test(uid)) {
+    throw new Error('无效的访客 UID');
+  }
+  if (action !== 'approve' && action !== 'ban') {
+    throw new Error('无效的审核操作');
+  }
+
+  const cfg = config || (await loadPanelConfig(env));
+  const rec = await safeGetJSON(env.TOPIC_MAP, `user:${uid}`, null);
+  const pending = filterFreshPendingReview(rec?.pendingReview || []);
+
+  if (pending.length === 0) {
+    // Clean up any stale/expired pendingReview entries silently
+    if (Array.isArray(rec?.pendingReview) && rec.pendingReview.length > 0) {
+      await clearPendingReviewMessages(env, uid);
+    }
+    const visitor = await getVisitorDetail(env, uid);
+    return { ok: true, alreadyHandled: true, action, deliveredCount: 0, visitor };
+  }
+
+  // Clear pending queue & probation first so concurrent button taps never double-deliver
+  await clearPendingReviewMessages(env, uid);
+  await env.TOPIC_MAP.delete(`probation:${uid}`);
+  await env.TOPIC_MAP.delete(`rv_notify_cd:${uid}`);
+
+  if (action === 'ban') {
+    const visitor = await applyVisitorAction(env, uid, 'ban');
+    await recordBlockedSpam(env, cfg);
+    return { ok: true, alreadyHandled: false, action: 'ban', deliveredCount: 0, visitor };
+  }
+
+  const fromUser = {
+    id: Number(uid),
+    first_name: rec?.first_name || '',
+    last_name: rec?.last_name || '',
+    username: rec?.username || '',
+    language_code: rec?.language_code || '',
+  };
+
+  let deliveredCount = 0;
   for (const item of pending) {
-    await processVisitorMessage(
+    const delivered = await deliverVisitorMessage(
       env,
       requestOrigin,
       {
-        from: state.user,
-        chat: { id: item.chatId },
-        message_id: item.messageId,
-        text: item.text || item.preview || '',
-        keywordText: item.text || item.caption || '',
-        caption: item.caption || '',
-        entities: item.entities || [],
-        caption_entities: item.caption_entities || [],
-        photo: item.photo || null,
-        document: item.document || null,
+        from: fromUser,
+        chat: { id: Number(item.chatId || uid) },
+        message_id: Number(item.pmMessageId),
+        text: item.preview || '',
       },
-      cfg
-    ).catch(() => {});
+      { forwardToTopic: forwardMessageToTopic }
+    ).catch(() => ({ delivered: false }));
+    if (delivered?.delivered) deliveredCount += 1;
+  }
+
+  const visitor = await getVisitorDetail(env, uid);
+  return { ok: true, alreadyHandled: false, action: 'approve', deliveredCount, visitor };
+}
+
+async function flushPendingMessages(env, requestOrigin, state, config = null) {
+  const pending = Array.isArray(state.pending) ? state.pending : [];
+  const cfg = config || (await loadPanelConfig(env));
+  const uid = String(state?.user?.id || state?.userId || '');
+  const skipProbation =
+    !uid ||
+    (await isUserAdmin(env, uid, tgCall)) ||
+    (await env.TOPIC_MAP?.get(`verified:${uid}`)) === 'trusted';
+  for (const item of pending) {
+    const replayedMsg = {
+      from: state.user,
+      chat: { id: item.chatId },
+      message_id: item.messageId,
+      text: item.text || item.preview || '',
+      keywordText: item.text || item.caption || '',
+      caption: item.caption || '',
+      entities: item.entities || [],
+      caption_entities: item.caption_entities || [],
+      photo: item.photo || null,
+      document: item.document || null,
+    };
+    if (!skipProbation) {
+      const held = await checkAndApplyProbation(env, requestOrigin, replayedMsg, cfg).catch(() => false);
+      if (held) continue;
+    }
+    await processVisitorMessage(env, requestOrigin, replayedMsg, cfg).catch(() => {});
   }
 }
 
@@ -754,7 +1017,11 @@ export async function completeTurnstileVerification(env, requestOrigin, verifyId
       ? { inline_keyboard: [[buildPanelButton(env, requestOrigin, '✨ 查看个人面板', { isGroup: false })]] }
       : undefined;
 
-  await env.TOPIC_MAP.put(`verified:${state.userId}`, 'turnstile:v1', { expirationTtl: ttlDays * 86400 });
+  const prevVerified = await env.TOPIC_MAP.get(`verified:${state.userId}`);
+  if (prevVerified !== 'trusted') {
+    await env.TOPIC_MAP.put(`verified:${state.userId}`, 'turnstile:v1', { expirationTtl: ttlDays * 86400 });
+    await startVisitorProbation(env, state.userId, config, { prevVerified });
+  }
   await env.TOPIC_MAP.delete(`needs_verify:${state.userId}`);
   await env.TOPIC_MAP.delete(`chal:${verifyId}`);
   await env.TOPIC_MAP.delete(`user_challenge:${state.userId}`);
@@ -1611,9 +1878,13 @@ async function handleCallbackQuery(env, requestOrigin, cq, config) {
     }
 
     const ttlDays = Math.max(1, Number(config.pmBot.verifiedDays || 30));
-    await env.TOPIC_MAP.put(`verified:${state.userId}`, `${state.mode || 'emoji'}:v1`, {
-      expirationTtl: ttlDays * 86400,
-    });
+    const prevVerified = await env.TOPIC_MAP.get(`verified:${state.userId}`);
+    if (prevVerified !== 'trusted') {
+      await env.TOPIC_MAP.put(`verified:${state.userId}`, `${state.mode || 'emoji'}:v1`, {
+        expirationTtl: ttlDays * 86400,
+      });
+      await startVisitorProbation(env, state.userId, config, { prevVerified });
+    }
     await env.TOPIC_MAP.delete(`needs_verify:${state.userId}`);
     await env.TOPIC_MAP.delete(`chal:${verifyId}`);
     await env.TOPIC_MAP.delete(`user_challenge:${state.userId}`);
@@ -1741,6 +2012,56 @@ async function handleCallbackQuery(env, requestOrigin, cq, config) {
           reply_markup: replyMarkup,
         }).catch(() => {});
       }
+    }
+    return;
+  }
+
+  // 3b. Admin probation review buttons: rv:ok:<uid> / rv:ban:<uid>
+  if (data.startsWith('rv:')) {
+    const isAdmin = await isUserAdmin(env, cq.from.id, tgCall);
+    if (!isAdmin) {
+      await tgCall(env, 'answerCallbackQuery', {
+        callback_query_id: cq.id,
+        text: '仅管理员可执行此操作',
+        show_alert: true,
+      });
+      return;
+    }
+    const [, op, uid] = data.split(':');
+    const action = op === 'ok' ? 'approve' : op === 'ban' ? 'ban' : '';
+    if (!action || !/^\d+$/.test(uid || '')) {
+      await tgCall(env, 'answerCallbackQuery', {
+        callback_query_id: cq.id,
+        text: '参数无效',
+      }).catch(() => {});
+      return;
+    }
+    const res = await reviewPendingVisitor(env, requestOrigin, uid, action, config);
+    if (res.alreadyHandled) {
+      await tgCall(env, 'answerCallbackQuery', {
+        callback_query_id: cq.id,
+        text: '已处理',
+      }).catch(() => {});
+      if (cq.message) {
+        await tgCall(env, 'editMessageReplyMarkup', {
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          reply_markup: { inline_keyboard: [] },
+        }).catch(() => {});
+      }
+      return;
+    }
+    const doneLabel = action === 'approve' ? '✅ 已放行' : '🚫 已拉黑';
+    await tgCall(env, 'answerCallbackQuery', {
+      callback_query_id: cq.id,
+      text: doneLabel,
+    }).catch(() => {});
+    if (cq.message) {
+      await tgCall(env, 'editMessageText', {
+        chat_id: cq.message.chat.id,
+        message_id: cq.message.message_id,
+        text: doneLabel,
+      }).catch(() => {});
     }
     return;
   }
@@ -2516,6 +2837,11 @@ export async function handleTelegramUpdate(update, env, requestOrigin) {
       }
       await startVerificationChallenge(env, requestOrigin, msg, config, risk);
       return;
+    }
+
+    if (!isAdmin && !isTrusted) {
+      const held = await checkAndApplyProbation(env, requestOrigin, msg, config);
+      if (held) return;
     }
 
     await processVisitorMessage(env, requestOrigin, msg, config);

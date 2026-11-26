@@ -78,6 +78,9 @@ export default function SettingsDrawer({
 }) {
   const [section, setSection] = useState(initialSection);
   const [draft, setDraft] = useState(() => structuredClone(adminConfig));
+  const [probationDomainsText, setProbationDomainsText] = useState(() =>
+    (adminConfig?.pmBot?.probation?.allowDomains || []).join('\n')
+  );
   const [saving, setSaving] = useState(false);
   const [testingProbe, setTestingProbe] = useState(false);
   const [probeTestResult, setProbeTestResult] = useState(null);
@@ -279,6 +282,27 @@ export default function SettingsDrawer({
     setDraft((prev) => ({
       ...prev,
       [group]: { ...prev[group], [key]: value },
+    }));
+  };
+
+  const defaultProbation = {
+    enabled: true,
+    maxMessages: 3,
+    hours: 24,
+    allowDomains: [],
+  };
+
+  const updateProbation = (patch) => {
+    setDraft((prev) => ({
+      ...prev,
+      pmBot: {
+        ...prev.pmBot,
+        probation: {
+          ...defaultProbation,
+          ...(prev.pmBot?.probation || {}),
+          ...patch,
+        },
+      },
     }));
   };
 
@@ -2050,6 +2074,97 @@ export default function SettingsDrawer({
                     ))}
                   </div>
                 )}
+
+                {(() => {
+                  const prob = {
+                    ...defaultProbation,
+                    ...(draft.pmBot.probation || {}),
+                  };
+                  const probEnabled = prob.enabled !== false;
+                  return (
+                    <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+                      <div className="list-row" style={{ paddingTop: 0 }}>
+                        <div className="row-main">
+                          <div className="row-title" style={{ fontSize: 13 }}>🛡️ 新访客观察期</div>
+                          <div className="row-desc wrap">
+                            刚通过验证的访客，前几条消息如果带链接、@用户名、联系方式或是转发的，会先扣下等你审核，不会丢失。
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={probEnabled}
+                          className={`switch ${probEnabled ? 'on' : ''}`}
+                          onClick={() => updateProbation({ enabled: !probEnabled })}
+                        >
+                          <span className="switch-knob" />
+                        </button>
+                      </div>
+
+                      {probEnabled && (
+                        <div
+                          style={{
+                            background: 'var(--bg-subtle)',
+                            borderRadius: 14,
+                            padding: 10,
+                            marginTop: 8,
+                          }}
+                        >
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
+                            <div className="field" style={{ marginBottom: 0 }}>
+                              <label className="field-label">观察条数（1–20 条）</label>
+                              <input
+                                className="input"
+                                type="number"
+                                min="1"
+                                max="20"
+                                value={prob.maxMessages}
+                                onChange={(e) =>
+                                  updateProbation({
+                                    maxMessages: e.target.value === '' ? '' : Number(e.target.value),
+                                  })
+                                }
+                              />
+                            </div>
+                            <div className="field" style={{ marginBottom: 0 }}>
+                              <label className="field-label">观察时长（1–168 小时）</label>
+                              <input
+                                className="input"
+                                type="number"
+                                min="1"
+                                max="168"
+                                value={prob.hours}
+                                onChange={(e) =>
+                                  updateProbation({
+                                    hours: e.target.value === '' ? '' : Number(e.target.value),
+                                  })
+                                }
+                              />
+                            </div>
+                          </div>
+                          <div className="field" style={{ marginBottom: 0 }}>
+                            <label className="field-label">链接白名单域名（每行一个，自动匹配子域名）</label>
+                            <textarea
+                              className="textarea"
+                              rows={2}
+                              value={probationDomainsText}
+                              onChange={(e) => {
+                                const nextText = e.target.value;
+                                setProbationDomainsText(nextText);
+                                const parsed = nextText
+                                  .split(/[\r\n,，;；]+/)
+                                  .map((s) => s.trim())
+                                  .filter(Boolean);
+                                updateProbation({ allowDomains: parsed });
+                              }}
+                              placeholder={'例如：\ngithub.com\nexample.com'}
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 <div className="field" style={{ marginTop: 10 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>

@@ -10,6 +10,7 @@ import {
   ensureWebhookReactionSubscription,
   initiateChatFromMiniApp,
   resolveBotUsername,
+  reviewPendingVisitor,
   sendAdminDirectVisitorReply,
   syncTelegramBotSurface,
 } from './bot.js';
@@ -408,6 +409,22 @@ export async function handleApiRequest(request, env, url, ctx = null) {
         return json({ ok: true, mode, ...result });
       } catch (err) {
         return json({ ok: false, error: err.message }, 400);
+      }
+    }
+
+    // POST /api/admin/visitors/:userId/review — approve or ban held probation messages
+    const reviewMatch = path.match(/^\/api\/admin\/visitors\/(\d+)\/review$/);
+    if (reviewMatch && method === 'POST') {
+      const body = await readJsonBody(request);
+      const action = body?.action;
+      if (action !== 'approve' && action !== 'ban') {
+        return json({ ok: false, error: '无效的审核操作（仅支持 approve 或 ban）' }, 400);
+      }
+      try {
+        const result = await reviewPendingVisitor(env, url.origin, reviewMatch[1], action, config);
+        return json({ ok: true, ...result });
+      } catch (err) {
+        return json({ ok: false, error: err.message || '审核操作失败' }, 400);
       }
     }
 
