@@ -278,11 +278,11 @@ RosePanel Bot is 100% free & MIT open-source with zero paywalls and zero data co
 ### 🏆 Sponsors Wall
 
 <details open>
-<summary><b>View Sponsors Wall (Open for our first supporter 🌸)</b></summary>
+<summary><b>View Sponsors Wall (Thank you to every supporter 🌸)</b></summary>
 
 | # | Sponsor | Amount | Note |
 | :---: | :---: | :---: | :--- |
-| 1 | *Waiting for you* | — | Be our very first sponsor ✨ |
+| 1 | 元气少女马冬梅 | ¥6.66 | 机器人很好用，感谢 (The bot works great, thanks!) |
 
 </details>
 

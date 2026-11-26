@@ -281,11 +281,11 @@ npx wrangler dev --ip 127.0.0.1 --port 8787 --persist-to ./.wrangler/state --sho
 ### 🏆 赞助者名单
 
 <details open>
-<summary><b>展开查看完整赞助者名单（虚位以待 🌸）</b></summary>
+<summary><b>展开查看完整赞助者名单（感谢每一位支持者 🌸）</b></summary>
 
 | 序号 | 赞助者 | 金额 | 留言 |
 | :---: | :---: | :---: | :--- |
-| 1 | *虚位以待* | — | 成为第一位支持者，点亮开源赞助墙 ✨ |
+| 1 | 元气少女马冬梅 | ¥6.66 | 机器人很好用，感谢 |
 
 </details>
 
