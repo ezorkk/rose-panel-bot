@@ -40,6 +40,7 @@ import { normalizeStickerObject, parseStickerPackName } from '../src/worker/tele
 import { renderTurnstileVerifyPage } from '../src/worker/turnstile.js';
 import { checkLatestRelease, compareSemver, syncForkWithUpstream } from '../src/worker/updater.js';
 import { APP_VERSION } from '../src/worker/version.js';
+import { BRAND_NAME, BRAND_SIGNATURE } from '../web/src/lib/brand.js';
 import pkg from '../package.json' with { type: 'json' };
 import {
   applyVisitorAction,
@@ -4122,5 +4123,144 @@ describe('Probe offline & resource alerts (v1.8)', () => {
     expect(adminCfg.probe.alerts.enabled).toBe(true);
     expect(formatAlertMessage([]).text).toBe('');
     expect(evaluateProbeAlerts(null, { protocol: 'json', nodes: [] }, saved.probe.alerts, 0).events).toEqual([]);
+  });
+});
+
+describe('Share card poster & Open Graph link preview (v1.8)', () => {
+  function createHtmlAssetsEnv(kv, extra = {}) {
+    return {
+      TOPIC_MAP: kv,
+      ASSETS: {
+        async fetch() {
+          return new Response(
+            '<!DOCTYPE html><html><head><meta charset="UTF-8" /><title>RosePanel · 个人面板</title></head><body><div id="root"></div></body></html>',
+            { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+          );
+        },
+      },
+      ...extra,
+    };
+  }
+
+  it('injects OG meta tags, single <title>, and truncates og:description to 160 chars', async () => {
+    const kv = createMemoryKV();
+    const env = createHtmlAssetsEnv(kv);
+    const longTagline = '欢迎来到我的个人名片 '.repeat(25).trim();
+    await savePanelConfig(env, {
+      profile: {
+        displayName: 'Rose Garden',
+        tagline: longTagline,
+        avatarMode: 'owner',
+      },
+    });
+
+    const res = await worker.fetch(new Request('https://card.example.com/'), env);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+
+    expect(BRAND_NAME).toBe('RosePanel');
+    expect(BRAND_SIGNATURE).toBe('Made with RosePanel 🌹');
+    expect(html).toContain('<meta property="og:site_name" content="RosePanel" />');
+    expect(html).toContain('<meta property="og:type" content="profile" />');
+    expect(html).toContain('<meta property="og:title" content="Rose Garden" />');
+    expect(html).toContain('<meta name="twitter:card" content="summary" />');
+    expect(html).toContain('<title>Rose Garden · RosePanel</title>');
+
+    // Strictly one <title> tag in the rendered page
+    const titles = html.match(/<title>[\s\S]*?<\/title>/gi) || [];
+    expect(titles).toHaveLength(1);
+
+    // og:description truncated to <= 160 characters
+    const descMatch = html.match(/<meta property="og:description" content="([^"]*)" \/>/);
+    expect(descMatch).toBeTruthy();
+    expect(Array.from(descMatch[1]).length).toBeLessThanOrEqual(160);
+    expect(descMatch[1].endsWith('…')).toBe(true);
+  });
+
+  it('HTML-escapes displayName and tagline in OG tags and <title> to prevent tag injection', async () => {
+    const kv = createMemoryKV();
+    const env = createHtmlAssetsEnv(kv);
+    await savePanelConfig(env, {
+      profile: {
+        displayName: 'Alice"><script>alert(1)</script>',
+        tagline: 'Hi "friends" & <img src=x onerror=alert(2)>',
+      },
+    });
+
+    const res = await worker.fetch(new Request('https://card.example.com/'), env);
+    const html = await res.text();
+
+    expect(html).not.toContain('<script>alert(1)</script>');
+    expect(html).not.toContain('<img src=x');
+    expect(html).toContain(
+      '<meta property="og:title" content="Alice&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;" />'
+    );
+    expect(html).toContain(
+      '<meta property="og:description" content="Hi &quot;friends&quot; &amp; &lt;img src=x onerror=alert(2)&gt;" />'
+    );
+    expect(html).toContain(
+      '<title>Alice&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt; · RosePanel</title>'
+    );
+  });
+
+  it('resolves og:image accurately for bot, owner, and custom avatarMode (and omits non-https custom)', async () => {
+    const kv = createMemoryKV();
+    const env = createHtmlAssetsEnv(kv);
+
+    // 1. bot mode
+    await savePanelConfig(env, { profile: { displayName: 'BotMode', avatarMode: 'bot', avatarUrl: '' } });
+    let html = await (await worker.fetch(new Request('https://card.example.com/'), env)).text();
+    expect(html).toContain('<meta property="og:image" content="https://card.example.com/api/avatar/owner" />');
+
+    // 2. owner mode
+    await savePanelConfig(env, { profile: { displayName: 'OwnerMode', avatarMode: 'owner', avatarUrl: '' } });
+    html = await (await worker.fetch(new Request('https://card.example.com/'), env)).text();
+    expect(html).toContain('<meta property="og:image" content="https://card.example.com/api/avatar/owner" />');
+
+    // 3. custom mode with https URL
+    await savePanelConfig(env, {
+      profile: {
+        displayName: 'CustomHttps',
+        avatarMode: 'custom',
+        avatarUrl: 'https://cdn.example.com/avatar.png',
+      },
+    });
+    html = await (await worker.fetch(new Request('https://card.example.com/'), env)).text();
+    expect(html).toContain('<meta property="og:image" content="https://cdn.example.com/avatar.png" />');
+
+    // 4. custom mode with non-https URL omits og:image
+    await savePanelConfig(env, {
+      profile: {
+        displayName: 'CustomHttp',
+        avatarMode: 'custom',
+        avatarUrl: 'http://insecure.example.com/avatar.png',
+      },
+    });
+    html = await (await worker.fetch(new Request('https://card.example.com/'), env)).text();
+    expect(html).not.toContain('property="og:image"');
+  });
+
+  it('computes shareUrl using t.me direct link when BOT_USERNAME & APP_SHORT_NAME are set, else site origin', async () => {
+    const kv = createMemoryKV();
+    const config = await loadPanelConfig({ TOPIC_MAP: kv });
+
+    const withDirect = sanitizePublicConfig(
+      config,
+      { TOPIC_MAP: kv, BOT_USERNAME: '@Rose202_bot', APP_SHORT_NAME: 'panel' },
+      false,
+      'https://panel.example.com'
+    );
+    expect(withDirect.shareUrl).toBe('https://t.me/Rose202_bot/panel');
+
+    const withoutAppShort = sanitizePublicConfig(
+      config,
+      { TOPIC_MAP: kv, BOT_USERNAME: 'Rose202_bot' },
+      false,
+      'https://panel.example.com'
+    );
+    expect(withoutAppShort.shareUrl).toBe('https://panel.example.com/');
+
+    const withoutBot = sanitizePublicConfig(config, { TOPIC_MAP: kv }, false, 'https://panel.example.com');
+    expect(withoutBot.shareUrl).toBe('https://panel.example.com/');
   });
 });

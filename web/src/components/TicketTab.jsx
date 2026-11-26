@@ -4,11 +4,15 @@ import {
   Check,
   ChevronRight,
   Copy,
+  Download,
   ExternalLink,
   Flame,
   HeartHandshake,
+  Link2,
   Lock,
   MessageCircle,
+  RefreshCw,
+  Share2,
   ShieldCheck,
   Sparkles,
   Users,
@@ -20,6 +24,7 @@ import {
   closeMiniApp,
   copyText,
   getTelegramInitData,
+  getTelegramWebApp,
   haptic,
   isOpenedFromGroup,
   openExternalUrl,
@@ -85,6 +90,138 @@ export default function TicketTab({
   };
 
   const [openingPm, setOpeningPm] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
+  const [posterLoading, setPosterLoading] = useState(false);
+  const [posterError, setPosterError] = useState('');
+  const [posterData, setPosterData] = useState(null);
+
+  const resolvedShareUrl =
+    String(config.shareUrl || '').trim() ||
+    (typeof window !== 'undefined' ? `${window.location.origin}/` : '');
+  const tgPlatform = getTelegramWebApp()?.platform || '';
+  const inTelegramWebView = Boolean(getTelegramInitData() || (tgPlatform && tgPlatform !== 'unknown'));
+
+  const openShareSheet = async () => {
+    haptic('light');
+    setShareOpen(true);
+    setPosterLoading(true);
+    setPosterError('');
+    setPosterData(null);
+    try {
+      const { canSharePosterFile, generateSharePoster } = await import('../lib/sharePoster.js');
+      const generated = await generateSharePoster({
+        displayName: String(profile.displayName || '').trim() || cardTitle,
+        handle: rawHandle && rawHandle !== '@your_bot' ? rawHandle : '',
+        tagline: profile.tagline || '',
+        tags: parsedTags.slice(0, 6),
+        avatarSrc: ownerAvatarSrc,
+        shareUrl: resolvedShareUrl,
+      });
+      setPosterData({
+        ...generated,
+        canNativeShare: canSharePosterFile(generated.blob),
+      });
+    } catch (err) {
+      setPosterError(err?.message || '生成名片海报失败，请稍后重试');
+    } finally {
+      setPosterLoading(false);
+    }
+  };
+
+  const handleNativeSharePoster = async () => {
+    if (!posterData?.blob) return;
+    try {
+      haptic('medium');
+      const file = new File([posterData.blob], 'rosepanel-card.png', { type: 'image/png' });
+      await navigator.share({
+        files: [file],
+        title: String(profile.displayName || cardTitle || 'RosePanel'),
+      });
+    } catch (err) {
+      if (err?.name !== 'AbortError') {
+        onToast('当前环境不支持系统分享，可长按图片保存或复制链接');
+      }
+    }
+  };
+
+  const handleDownloadPoster = () => {
+    if (!posterData?.dataUrl) return;
+    haptic('light');
+    const a = document.createElement('a');
+    a.href = posterData.dataUrl;
+    a.download = `${(String(profile.displayName || 'rosepanel').trim() || 'rosepanel').replace(/[^\w\u4e00-\u9fa5-]+/g, '_')}-card.png`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    onToast('已开始保存名片海报');
+  };
+
+  const renderShareSheet = () =>
+    shareOpen && (
+      <div className="sheet-backdrop" onClick={() => setShareOpen(false)}>
+        <div className="sheet-panel" onClick={(e) => e.stopPropagation()}>
+          <div className="sheet-handle" />
+          <div className="sheet-header">
+            <div className="sheet-title">分享个人名片</div>
+            <button type="button" className="icon-btn" onClick={() => setShareOpen(false)}>
+              <X size={16} />
+            </button>
+          </div>
+
+          <div className="share-poster-stage">
+            {posterLoading ? (
+              <div className="share-poster-placeholder">
+                <RefreshCw size={22} className="spin" color="var(--accent)" />
+                <span>正在绘制高清名片海报…</span>
+              </div>
+            ) : posterError ? (
+              <div className="share-poster-placeholder">
+                <span style={{ color: 'var(--red)' }}>⚠️ {posterError}</span>
+                <button type="button" className="btn btn-soft btn-sm" onClick={openShareSheet}>
+                  重试
+                </button>
+              </div>
+            ) : posterData?.dataUrl ? (
+              <img
+                className="share-poster-img"
+                src={posterData.dataUrl}
+                alt={`${profile.displayName || cardTitle} 名片海报`}
+              />
+            ) : null}
+          </div>
+
+          {posterData?.dataUrl && inTelegramWebView && (
+            <div className="share-poster-tip">💡 长按上方海报图片即可保存到手机相册</div>
+          )}
+
+          <div className="share-poster-actions">
+            {posterData?.canNativeShare && (
+              <button type="button" className="btn btn-primary btn-sm" onClick={handleNativeSharePoster}>
+                <Share2 size={14} /> 系统分享
+              </button>
+            )}
+            {posterData?.dataUrl && !inTelegramWebView && (
+              <button
+                type="button"
+                className={`btn btn-sm ${posterData?.canNativeShare ? 'btn-soft' : 'btn-primary'}`}
+                onClick={handleDownloadPoster}
+              >
+                <Download size={14} /> 保存图片
+              </button>
+            )}
+            {resolvedShareUrl && (
+              <button
+                type="button"
+                className="btn btn-soft btn-sm"
+                onClick={() => handleCopy(resolvedShareUrl, '名片链接')}
+              >
+                <Link2 size={14} /> 复制名片链接
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
 
   const openBotPm = async () => {
     const rawBot = String(bot?.username || '').replace(/^@/, '').trim();
@@ -350,10 +487,17 @@ export default function TicketTab({
             <div style={{ fontSize: 14, fontWeight: 700 }}>{cardTitle}</div>
             <div className="row-desc">{profile.tagline}</div>
           </div>
-          <button className="btn btn-soft btn-sm" onClick={() => onNavigate('sites')}>
-            小站
-          </button>
+          <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+            <button type="button" className="btn btn-soft btn-sm" onClick={openShareSheet}>
+              <Share2 size={13} /> 分享
+            </button>
+            <button type="button" className="btn btn-soft btn-sm" onClick={() => onNavigate('sites')}>
+              小站
+            </button>
+          </div>
         </div>
+
+        {renderShareSheet()}
 
         {/* Levels Sheet */}
         {showLevels && (
@@ -437,6 +581,9 @@ export default function TicketTab({
                 <Copy size={13} /> 复制账号
               </button>
             )}
+            <button type="button" className="btn btn-soft btn-sm" onClick={openShareSheet}>
+              <Share2 size={13} /> 分享名片
+            </button>
           </div>
         </div>
 
@@ -679,6 +826,8 @@ export default function TicketTab({
           )}
         </div>
       )}
+
+      {renderShareSheet()}
     </>
   );
 }

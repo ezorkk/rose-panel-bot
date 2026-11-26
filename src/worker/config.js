@@ -1,5 +1,7 @@
 // Configuration defaults and KV storage helpers for RosePanel Bot
 
+import { buildMiniAppDirectLink } from './telegram.js';
+
 export const LEVELS = [
   { level: 1, title: '初遇者', minXp: 0, badge: 'petal', color: '#E38AA6' },
   { level: 2, title: '漫游者', minXp: 100, badge: 'compass', color: '#D96B90' },
@@ -558,12 +560,24 @@ export async function savePanelConfig(env, nextConfig) {
   return merged;
 }
 
+export function resolveShareUrl(config, env = {}, requestOrigin = '') {
+  const botUsername =
+    String(env?.BOT_USERNAME || '').trim().replace(/^@/, '') ||
+    String(config?.botUsername || '').trim().replace(/^@/, '');
+  const appShortName = String(env?.APP_SHORT_NAME || '').trim().replace(/^\/+|\/+$/g, '');
+  if (botUsername && appShortName) {
+    return buildMiniAppDirectLink({ BOT_USERNAME: botUsername, APP_SHORT_NAME: appShortName });
+  }
+  const cleanOrigin = String(requestOrigin || config?.siteOrigin || '').trim().replace(/\/+$/, '');
+  return cleanOrigin ? `${cleanOrigin}/` : '';
+}
+
 /**
  * Returns panel configuration tailored to caller privileges.
  * CRITICAL SECURITY: Private sites (`visibility === 'private'`) and saved sticker library
  * are strictly stripped server-side for non-admin visitors.
  */
-export function sanitizePublicConfig(config, env, isAdmin = false) {
+export function sanitizePublicConfig(config, env, isAdmin = false, requestOrigin = '') {
   const visibleSites = isAdmin
     ? config.sites
     : config.sites.filter((s) => (s.visibility || 'public') !== 'private');
@@ -625,6 +639,7 @@ export function sanitizePublicConfig(config, env, isAdmin = false) {
         })(),
       appShortName: env.APP_SHORT_NAME || '',
     },
+    shareUrl: resolveShareUrl(config, env, requestOrigin),
   };
 }
 

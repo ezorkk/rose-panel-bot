@@ -1,5 +1,6 @@
 // Main Cloudflare Worker Entrypoint for RosePanel Bot
 
+import { BRAND_NAME } from '../../web/src/lib/brand.js';
 import { runProbeAlerts } from './alerts.js';
 import { handleApiRequest } from './api.js';
 import { parseAdminIds } from './auth.js';
@@ -10,7 +11,7 @@ import {
 } from './bot.js';
 import { loadPanelConfig, resolveSupergroupId, safeGetJSON, savePanelConfig } from './config.js';
 import { serveEmbeddedAsset } from './embedded-assets.js';
-import { tgCall } from './telegram.js';
+import { escapeHtml, tgCall } from './telegram.js';
 import { renderTurnstileVerifyPage, verifyTurnstileToken } from './turnstile.js';
 
 function jsonResponse(data, status = 200) {
@@ -85,13 +86,33 @@ function serializeSafeInlineJson(obj) {
     .replace(/\u2029/g, '\\u2029');
 }
 
-async function injectSplashIntoHtml(response, env) {
+function resolveOgImageUrl(config, requestOrigin = '') {
+  const profile = config?.profile || {};
+  const avatarMode = profile.avatarMode || (profile.avatarUrl ? 'custom' : 'bot');
+  if (avatarMode === 'custom') {
+    const raw = String(profile.avatarUrl || '').trim();
+    return /^https:\/\/[^\s"'<>]+$/i.test(raw) ? raw : '';
+  }
+  const cleanOrigin = String(requestOrigin || '').trim().replace(/\/+$/, '');
+  if (!cleanOrigin) return '';
+  // Both 'owner' and 'bot' modes use the existing privacy-safe /api/avatar/owner proxy,
+  // which strictly follows server-stored config.profile.avatarMode without leaking owner UID.
+  return `${cleanOrigin}/api/avatar/owner`;
+}
+
+async function injectSplashIntoHtml(response, env, requestOrigin = '') {
   const ct = response.headers.get('content-type') || '';
   if (!ct.includes('text/html') || !response.ok) return response;
   try {
     const config = await loadPanelConfig(env);
+    const displayName = String(config.profile?.displayName || '').trim() || BRAND_NAME;
+    const rawTagline = String(config.profile?.tagline || '').replace(/\s+/g, ' ').trim();
+    const taglineChars = Array.from(rawTagline);
+    const description = taglineChars.length > 160 ? `${taglineChars.slice(0, 159).join('')}…` : rawTagline;
+    const ogImage = resolveOgImageUrl(config, requestOrigin);
+
     const splashPayload = {
-      displayName: config.profile?.displayName || 'RosePanel',
+      displayName,
       style: config.profile?.splash?.style || 'emblem',
       text: config.profile?.splash?.text || '正在打开个人面板…',
       emoji: config.profile?.splash?.emoji || '🌹',
@@ -103,9 +124,31 @@ async function injectSplashIntoHtml(response, env) {
         url: config.profile?.emblem?.url || '',
       },
     };
+
+    const titleText = displayName === BRAND_NAME ? BRAND_NAME : `${displayName} · ${BRAND_NAME}`;
+    const titleTag = `<title>${escapeHtml(titleText)}</title>`;
+    const ogTags = [
+      `<meta property="og:site_name" content="${escapeHtml(BRAND_NAME)}" />`,
+      `<meta property="og:type" content="profile" />`,
+      `<meta property="og:title" content="${escapeHtml(displayName)}" />`,
+      ...(description ? [`<meta property="og:description" content="${escapeHtml(description)}" />`] : []),
+      ...(ogImage ? [`<meta property="og:image" content="${escapeHtml(ogImage)}" />`] : []),
+      `<meta name="twitter:card" content="summary" />`,
+    ].join('\n    ');
+
     const html = await response.text();
-    const tag = `<script>window.__ROSE_SPLASH__=${serializeSafeInlineJson(splashPayload)};</script></head>`;
-    const injected = html.includes('</head>') ? html.replace('</head>', tag) : html;
+    let injected = html;
+    if (/<title>[\s\S]*?<\/title>/i.test(injected)) {
+      injected = injected.replace(/<title>[\s\S]*?<\/title>/i, () => titleTag);
+    } else if (injected.includes('</head>')) {
+      injected = injected.replace('</head>', () => `    ${titleTag}\n  </head>`);
+    }
+
+    const headBlock = `    ${ogTags}\n    <script>window.__ROSE_SPLASH__=${serializeSafeInlineJson(splashPayload)};</script>\n  </head>`;
+    if (injected.includes('</head>')) {
+      injected = injected.replace('</head>', () => headBlock);
+    }
+
     const headers = new Headers(response.headers);
     headers.set('Cache-Control', 'no-cache');
     headers.delete('content-length');
@@ -229,7 +272,7 @@ export default {
     if (env.ASSETS) {
       const assetRes = await env.ASSETS.fetch(request);
       if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
-        return injectSplashIntoHtml(assetRes, env);
+        return injectSplashIntoHtml(assetRes, env, url.origin);
       }
       return assetRes;
     }
@@ -238,7 +281,7 @@ export default {
     const embedded = serveEmbeddedAsset(url.pathname);
     if (embedded) {
       if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
-        return injectSplashIntoHtml(embedded, env);
+        return injectSplashIntoHtml(embedded, env, url.origin);
       }
       return embedded;
     }

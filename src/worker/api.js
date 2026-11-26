@@ -146,7 +146,7 @@ export async function handleApiRequest(request, env, url, ctx = null) {
       isAdmin: auth.isAdmin,
       isPreview: auth.isPreview,
       startParam: auth.startParam,
-      config: sanitizePublicConfig(config, env, auth.isAdmin),
+      config: sanitizePublicConfig(config, env, auth.isAdmin, url.origin),
       adminConfig: auth.isAdmin ? sanitizeAdminConfig(config, env, inboxStatus) : null,
       checkin,
       levels: LEVELS,
@@ -418,7 +418,7 @@ export async function handleApiRequest(request, env, url, ctx = null) {
       ]);
       return json({
         ok: true,
-        config: sanitizePublicConfig(saved, env, true),
+        config: sanitizePublicConfig(saved, env, true, url.origin),
         adminConfig: sanitizeAdminConfig(saved, env, inboxStatus),
       });
     }
@@ -506,7 +506,7 @@ export async function handleApiRequest(request, env, url, ctx = null) {
       ]);
       return json({
         ok: true,
-        config: sanitizePublicConfig(latestCfg, env, true),
+        config: sanitizePublicConfig(latestCfg, env, true, url.origin),
         adminConfig: sanitizeAdminConfig(latestCfg, env, inboxStatus),
       });
     }
