@@ -291,7 +291,7 @@ RosePanel Bot is 100% free & MIT open-source with zero paywalls and zero data co
 
 | # | Sponsor | Amount | Note |
 | :---: | :---: | :---: | :--- |
-| 1 | 元气少女马冬梅 | ¥6.66 | 机器人很好用，感谢 (The bot works great, thanks!) |
+| 1 | Anonymous | ¥6.66 | 机器人很好用，感谢 (The bot works great, thanks!) |
 
 </details>
 
