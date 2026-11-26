@@ -1,5 +1,7 @@
 // Telegram Bot API client, avatar proxy & sticker/emoji (WebP/WebM/TGS) proxy helpers
 
+export const WEBHOOK_ALLOWED_UPDATES = ['message', 'edited_message', 'callback_query', 'message_reaction'];
+
 export async function tgCall(env, method, payload = {}) {
   if (!env.BOT_TOKEN) {
     throw new Error('BOT_TOKEN is not configured');
@@ -240,9 +242,23 @@ export async function handleSignedMediaProxy(env, fileId) {
     if (!res.ok || !res.body) return new Response(null, { status: 404 });
 
     const lower = filePath.toLowerCase();
+
+    // Animated Telegram stickers (.tgs) are gzip-compressed Lottie JSON
+    if (lower.endsWith('.tgs')) {
+      const decompressed = res.body.pipeThrough(new DecompressionStream('gzip'));
+      return new Response(decompressed, {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'private, max-age=1800',
+        },
+      });
+    }
+
     let contentType = res.headers.get('Content-Type') || 'image/jpeg';
     if (lower.endsWith('.png')) contentType = 'image/png';
     else if (lower.endsWith('.webp')) contentType = 'image/webp';
+    else if (lower.endsWith('.webm')) contentType = 'video/webm';
     else if (lower.endsWith('.gif')) contentType = 'image/gif';
     else if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) contentType = 'image/jpeg';
 

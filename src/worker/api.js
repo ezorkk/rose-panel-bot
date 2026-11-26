@@ -4,7 +4,10 @@ import { sendTestProbeAlert } from './alerts.js';
 import { getBlockedSpamCount } from './antispam.js';
 import { authenticateRequest, parseAdminIds, signMediaToken, verifyMediaToken } from './auth.js';
 import {
+  WEBHOOK_UPDATES_REV,
+  WEBHOOK_UPDATES_REV_KEY,
   checkRateLimit,
+  ensureWebhookReactionSubscription,
   initiateChatFromMiniApp,
   resolveBotUsername,
   sendAdminDirectVisitorReply,
@@ -62,8 +65,16 @@ async function readJsonBody(request) {
 
 async function loadAdminInboxStatus(env) {
   const inboxMode = await resolveInboxMode(env);
-  const ownerUnreachable = inboxMode === 'dm' ? await isOwnerUnreachable(env) : false;
-  return { inboxMode, ownerUnreachable };
+  const [ownerUnreachable, webhookRev] = await Promise.all([
+    inboxMode === 'dm' ? isOwnerUnreachable(env) : Promise.resolve(false),
+    env.BOT_TOKEN && !env.WEBHOOK_SECRET && env.TOPIC_MAP
+      ? env.TOPIC_MAP.get(WEBHOOK_UPDATES_REV_KEY).catch(() => null)
+      : Promise.resolve(WEBHOOK_UPDATES_REV),
+  ]);
+  const webhookNeedsResync = Boolean(
+    env.BOT_TOKEN && !env.WEBHOOK_SECRET && webhookRev !== WEBHOOK_UPDATES_REV
+  );
+  return { inboxMode, ownerUnreachable, webhookNeedsResync };
 }
 
 export async function handleApiRequest(request, env, url, ctx = null) {
@@ -281,7 +292,14 @@ export async function handleApiRequest(request, env, url, ctx = null) {
         ),
         Promise.all(
           (history.messages || []).map(async (m) => {
-            const urls = m.photoFileId ? await signPhotoIds(m.photoFileId, m.thumbFileId) : { url: '', thumbUrl: '' };
+            const [urls, stickerSigned] = await Promise.all([
+              m.photoFileId ? signPhotoIds(m.photoFileId, m.thumbFileId) : Promise.resolve({ url: '', thumbUrl: '' }),
+              m.stickerFileId && env.BOT_TOKEN
+                ? signMediaToken(m.stickerFileId, env.BOT_TOKEN, 1800).then(
+                    (tok) => `/api/media/${encodeURIComponent(m.stickerFileId)}?exp=${tok.exp}&sig=${tok.sig}`
+                  )
+                : Promise.resolve(''),
+            ]);
             return {
               id: m.id,
               sender: m.sender || 'visitor',
@@ -291,6 +309,11 @@ export async function handleApiRequest(request, env, url, ctx = null) {
               at: m.at,
               photoUrl: urls.url,
               thumbUrl: urls.thumbUrl,
+              ...(stickerSigned
+                ? { stickerUrl: stickerSigned, stickerFormat: m.stickerFormat || 'webp' }
+                : {}),
+              ...(m.visitorReaction ? { visitorReaction: m.visitorReaction } : {}),
+              ...(m.ownerReaction ? { ownerReaction: m.ownerReaction } : {}),
             };
           })
         ),
@@ -513,15 +536,21 @@ export async function handleApiRequest(request, env, url, ctx = null) {
         bu: Boolean(env.BOT_USERNAME || saved.botUsername),
       });
 
-      // Sync Telegram description, menu button & commands only when Bot-surface fields changed (or @username uncached)
-      if (env.BOT_TOKEN && /^https:\/\//i.test(url.origin) && prevSurfaceSig !== nextSurfaceSig) {
-        const syncPromise = syncTelegramBotSurface(env, url.origin, saved, { persistUsername: false }).catch(
-          () => {}
-        );
-        if (ctx?.waitUntil) {
-          ctx.waitUntil(syncPromise);
-        } else {
-          await syncPromise;
+      // Sync Telegram description, menu button & commands when Bot-surface fields changed;
+      // otherwise still run one-time reaction Webhook upgrade if WEBHOOK_SECRET is configured.
+      if (env.BOT_TOKEN && /^https:\/\//i.test(url.origin)) {
+        const bgWork =
+          prevSurfaceSig !== nextSurfaceSig
+            ? syncTelegramBotSurface(env, url.origin, saved, { persistUsername: false }).catch(() => {})
+            : env.WEBHOOK_SECRET
+              ? ensureWebhookReactionSubscription(env).catch(() => {})
+              : null;
+        if (bgWork) {
+          if (ctx?.waitUntil) {
+            ctx.waitUntil(bgWork);
+          } else {
+            await bgWork;
+          }
         }
       }
       const [latestCfg, inboxStatus] = await Promise.all([

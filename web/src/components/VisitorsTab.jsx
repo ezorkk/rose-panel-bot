@@ -22,7 +22,7 @@ import {
 } from 'lucide-react';
 import { apiRequest, formatTimeAgo } from '../lib/api.js';
 import { confirmDialog, copyText, formatSourceLabel, haptic, openExternalUrl } from '../lib/telegram.js';
-import { Avatar } from './Emblems.jsx';
+import { Avatar, TgStickerMedia } from './Emblems.jsx';
 
 const MAX_REPLY_PHOTO_BYTES = 10 * 1024 * 1024;
 const REPLY_PHOTO_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
@@ -613,9 +613,10 @@ export default function VisitorsTab({
                       .filter((m) => !(m.sender === 'admin' && recallingIds.has(Number(m.pmMessageId))))
                       .map((m) => {
                       const isMe = m.sender === 'admin';
+                      const isStickerBubble = Boolean(m.stickerUrl && !m.text && !m.thumbUrl && !m.photoUrl);
                       return (
                         <div key={m.id} className={`chat-row ${isMe ? 'me' : 'them'}`}>
-                          <div className="chat-bubble">
+                          <div className={`chat-bubble ${isStickerBubble ? 'sticker-bubble' : ''}`}>
                             {(m.thumbUrl || m.photoUrl) && (
                               <img
                                 className="chat-photo"
@@ -631,13 +632,38 @@ export default function VisitorsTab({
                                 }
                               />
                             )}
-                            {m.text ? (
+                            {m.stickerUrl ? (
+                              <TgStickerMedia
+                                src={m.stickerUrl}
+                                format={m.stickerFormat || 'webp'}
+                                size={120}
+                                fallback={<div className="chat-sticker-fallback">{m.mediaTag || '[贴纸]'}</div>}
+                              />
+                            ) : m.text ? (
                               <div>{m.text}</div>
                             ) : m.mediaTag ? (
                               <div style={{ opacity: 0.85 }}>{m.mediaTag}</div>
                             ) : null}
                           </div>
                           <div className="chat-meta">
+                            {m.visitorReaction && (
+                              <span
+                                className="chat-reaction-pill"
+                                title="对方的回应"
+                                aria-label={`对方的回应：${m.visitorReaction}`}
+                              >
+                                {m.visitorReaction}
+                              </span>
+                            )}
+                            {m.ownerReaction && (
+                              <span
+                                className="chat-reaction-pill mine"
+                                title="我的回应"
+                                aria-label={`我的回应：${m.ownerReaction}`}
+                              >
+                                {m.ownerReaction}
+                              </span>
+                            )}
                             <span>{formatTimeAgo(m.at)}</span>
                             {isMe && m.pmMessageId && (
                               <button

@@ -25,12 +25,14 @@ import {
   clearOwnerUnreachable,
   deliverVisitorMessage,
   getOwnerChatId,
+  lookupDmMessageEntry,
   lookupDmMessageMap,
   previewTextOfMessage,
   resolveInboxMode,
   saveDmMessageMap,
 } from './inbox.js';
 import {
+  WEBHOOK_ALLOWED_UPDATES,
   buildPanelButton,
   escapeHtml,
   normalizeStickerObject,
@@ -48,8 +50,15 @@ import {
   recallAdminVisitorMessage,
   recordVisitorExchange,
   rememberPendingSource,
+  updateVisitorMessageReaction,
   upsertVisitorProfile,
 } from './visitors.js';
+
+export const WEBHOOK_UPDATES_REV_KEY = 'webhook:updates_rev';
+export const WEBHOOK_UPDATES_REV = '1';
+export const TOPIC_MSG_MAP_PREFIX = 'tmsg:';
+export const TOPIC_MSG_MAP_TTL_SECONDS = 30 * 86400;
+export const VISITOR_REACTION_LIMIT_PER_MIN = 10;
 
 const LOCAL_QUESTIONS = [
   { q: '冰融化后会变成什么？', ok: '水', bad: ['石头', '木头', '火'] },
@@ -614,7 +623,19 @@ async function forwardMessageToTopic(env, requestOrigin, msg, knownPreview = und
     }
   }
 
-  return { supergroupId, threadId, topicMsgId: copied?.result?.message_id || null };
+  const topicMsgId = copied?.result?.message_id || null;
+  const visitorPmId = Number(msg?.message_id);
+  if (topicMsgId && env.TOPIC_MAP && Number.isInteger(visitorPmId) && visitorPmId > 0) {
+    // Reverse lookup for topic reactions (`message_reaction` does not carry `message_thread_id`).
+    // Only visitor copies are written here; admin replies & panel mirrors are intentionally excluded.
+    await env.TOPIC_MAP.put(
+      `${TOPIC_MSG_MAP_PREFIX}${topicMsgId}`,
+      JSON.stringify({ g: String(supergroupId), u: uid, p: visitorPmId }),
+      { expirationTtl: TOPIC_MSG_MAP_TTL_SECONDS }
+    ).catch(() => {});
+  }
+
+  return { supergroupId, threadId, topicMsgId };
 }
 
 async function processVisitorMessage(env, requestOrigin, msg, config = null) {
@@ -1415,6 +1436,7 @@ async function handleAdminSupergroupMessage(env, requestOrigin, msg, config) {
     await recordVisitorExchange(env, targetUid, msg, {
       sender: 'admin',
       pmMessageId: copied?.result?.message_id || null,
+      topicChatId: msg.chat.id,
       incrementCount: true,
       preview: previewTextOfMessage(msg),
     }).catch(() => {});
@@ -1886,7 +1908,150 @@ async function handleBindInboxCommand(env, requestOrigin, msg) {
   });
 }
 
+function extractReactionChoice(newReaction = []) {
+  const list = Array.isArray(newReaction) ? newReaction : [];
+  let lastEmoji = '';
+  let hasNonStandard = false;
+  for (const item of list) {
+    if (item?.type === 'emoji' && typeof item.emoji === 'string' && item.emoji) {
+      lastEmoji = item.emoji;
+    } else if (item?.type === 'custom_emoji' || item?.type === 'paid') {
+      hasNonStandard = true;
+    }
+  }
+  return {
+    syncEmoji: lastEmoji,
+    panelReaction: lastEmoji || (hasNonStandard ? '✨' : ''),
+  };
+}
+
+/**
+ * Synchronizes Telegram emoji reactions bidirectionally between visitor private chat and
+ * admin inbox (Forum Topic or Bot DM push), and records them in `history:{uid}.messages`.
+ * Never guesses unknown message IDs; swallows all `setMessageReaction` errors silently.
+ */
+export async function handleMessageReaction(env, reaction) {
+  try {
+    if (!env?.TOPIC_MAP || !env?.BOT_TOKEN || !reaction?.chat?.id) return;
+    if (reaction.user?.is_bot) return;
+
+    const messageId = Number(reaction.message_id);
+    if (!Number.isInteger(messageId) || messageId <= 0) return;
+
+    const chatType = reaction.chat.type;
+    const chatIdStr = String(reaction.chat.id);
+    const { syncEmoji, panelReaction } = extractReactionChoice(reaction.new_reaction);
+    const tgReactionPayload = syncEmoji ? [{ type: 'emoji', emoji: syncEmoji }] : [];
+
+    const supergroupId = await resolveSupergroupId(env);
+    const inboxMode = await resolveInboxMode(env, supergroupId);
+    const ownerId = getOwnerChatId(env);
+
+    // Direction A & Direction B (DM mode): private chat reactions
+    if (chatType === 'private') {
+      // Direction B (DM mode): owner reacting to a copied visitor message in Bot DM
+      if (inboxMode === 'dm' && ownerId && chatIdStr === ownerId) {
+        if (reaction.user?.id && String(reaction.user.id) !== ownerId) return;
+        const dmEntry = await lookupDmMessageEntry(env, messageId);
+        // Legacy plain-uid `dmmap`, header cards, and owner replies have no `pmMessageId` -> skip safely
+        if (!dmEntry?.uid || !dmEntry.pmMessageId) return;
+
+        await tgCall(env, 'setMessageReaction', {
+          chat_id: Number(dmEntry.uid),
+          message_id: dmEntry.pmMessageId,
+          reaction: tgReactionPayload,
+        }).catch(() => {});
+        await updateVisitorMessageReaction(env, dmEntry.uid, dmEntry.pmMessageId, 'owner', panelReaction).catch(
+          () => {}
+        );
+        return;
+      }
+
+      // Direction A: visitor reacting in private chat with the bot
+      if (inboxMode === 'off') return;
+      const actorUid = reaction.user?.id ? String(reaction.user.id) : chatIdStr;
+      if (await isUserAdmin(env, actorUid, tgCall)) return;
+      if ((await env.TOPIC_MAP.get(`banned:${chatIdStr}`)) === '1') return;
+      // Each synced reaction costs a Telegram call and a history write; cap toggling so a visitor
+      // can't burn the KV free-tier write quota by flipping reactions on and off.
+      if (!(await checkRateLimit(env, `rl:react:${chatIdStr}`, VISITOR_REACTION_LIMIT_PER_MIN, 60))) return;
+
+      const history = await safeGetJSON(env.TOPIC_MAP, `history:${chatIdStr}`, null);
+      const pmList = Array.isArray(history?.pmMessageIds) ? history.pmMessageIds : [];
+      const matched = pmList.find((m) => Number(m?.id) === messageId);
+      if (!matched) return; // Never guess message mapping
+
+      let targetChatId = '';
+      let targetMsgId = 0;
+
+      // Topic message IDs only count while the group they were recorded in is still bound
+      const sameGroup = Boolean(supergroupId) && String(matched.topicChatId || '') === String(supergroupId);
+      if (matched.sender === 'admin') {
+        if (sameGroup && Number(matched.topicMsgId) > 0) {
+          targetChatId = supergroupId;
+          targetMsgId = Number(matched.topicMsgId);
+        } else if (ownerId && Number(matched.dmMsgId) > 0) {
+          targetChatId = ownerId;
+          targetMsgId = Number(matched.dmMsgId);
+        }
+      } else if (matched.sender === 'visitor') {
+        if (inboxMode === 'topic' && sameGroup && Number(matched.topicCopyId) > 0) {
+          targetChatId = supergroupId;
+          targetMsgId = Number(matched.topicCopyId);
+        } else if (inboxMode === 'dm' && ownerId && Number(matched.dmCopyId) > 0) {
+          targetChatId = ownerId;
+          targetMsgId = Number(matched.dmCopyId);
+        }
+      }
+
+      // No known counterpart on the owner's side (panel-only reply in DM mode, legacy entry, or a
+      // topic from a previously bound group): skip the mirror, but still show it in the panel.
+      if (targetChatId && Number.isInteger(targetMsgId) && targetMsgId > 0) {
+        await tgCall(env, 'setMessageReaction', {
+          chat_id: Number(targetChatId),
+          message_id: targetMsgId,
+          reaction: tgReactionPayload,
+        }).catch(() => {});
+      }
+      await updateVisitorMessageReaction(env, chatIdStr, messageId, 'visitor', panelReaction).catch(() => {});
+      return;
+    }
+
+    // Direction B (Topic mode): admin reacting to a copied visitor message in the bound supergroup
+    if (
+      (chatType === 'supergroup' || chatType === 'group') &&
+      supergroupId &&
+      chatIdStr === String(supergroupId)
+    ) {
+      if (!reaction.user?.id) return;
+      if (!(await isUserAdmin(env, reaction.user.id, tgCall))) return;
+
+      const mapping = await safeGetJSON(env.TOPIC_MAP, `${TOPIC_MSG_MAP_PREFIX}${messageId}`, null);
+      // Message IDs are per chat: a mapping written for a previously bound group must never be
+      // applied to the same ID in the current group (it would react on an unrelated visitor's message).
+      if (String(mapping?.g || '') !== String(supergroupId)) return;
+      const targetUid = String(mapping?.u || '').trim();
+      const targetPmId = Number(mapping?.p);
+      if (!/^\d+$/.test(targetUid) || !Number.isInteger(targetPmId) || targetPmId <= 0) return;
+
+      await tgCall(env, 'setMessageReaction', {
+        chat_id: Number(targetUid),
+        message_id: targetPmId,
+        reaction: tgReactionPayload,
+      }).catch(() => {});
+      await updateVisitorMessageReaction(env, targetUid, targetPmId, 'owner', panelReaction).catch(() => {});
+    }
+  } catch {
+    // Reaction sync is strictly best-effort and must never disrupt webhook handling
+  }
+}
+
 export async function handleTelegramUpdate(update, env, requestOrigin) {
+  if (update.message_reaction) {
+    await handleMessageReaction(env, update.message_reaction);
+    return;
+  }
+
   const config = await loadPanelConfig(env);
 
   if (update.callback_query) {
@@ -2460,6 +2625,43 @@ export async function resolveBotUsername(env, config = null) {
   }
 }
 
+/**
+ * Auto-upgrades existing Webhooks to subscribe to `message_reaction` without requiring
+ * existing deployments to re-run `/setup`. Strictly refuses to call `setWebhook` when
+ * `WEBHOOK_SECRET` is unset so secret_token verification is never accidentally dropped.
+ */
+export async function ensureWebhookReactionSubscription(env) {
+  if (!env?.BOT_TOKEN || !env?.TOPIC_MAP) return { skipped: true, reason: 'missing_env' };
+  const rev = await env.TOPIC_MAP.get(WEBHOOK_UPDATES_REV_KEY).catch(() => null);
+  if (rev === WEBHOOK_UPDATES_REV) {
+    return { skipped: true, reason: 'already_synced' };
+  }
+  if (!env.WEBHOOK_SECRET) {
+    return { skipped: true, reason: 'no_webhook_secret' };
+  }
+  try {
+    const info = await tgCall(env, 'getWebhookInfo', {});
+    const currentUrl = String(info?.result?.url || '').trim();
+    if (!currentUrl) {
+      return { skipped: true, reason: 'no_webhook_url' };
+    }
+    const allowed = Array.isArray(info?.result?.allowed_updates) ? info.result.allowed_updates : [];
+    if (!allowed.includes('message_reaction')) {
+      await tgCall(env, 'setWebhook', {
+        url: currentUrl,
+        allowed_updates: WEBHOOK_ALLOWED_UPDATES,
+        secret_token: env.WEBHOOK_SECRET,
+      });
+      await env.TOPIC_MAP.put(WEBHOOK_UPDATES_REV_KEY, WEBHOOK_UPDATES_REV);
+      return { ok: true, updated: true, url: currentUrl };
+    }
+    await env.TOPIC_MAP.put(WEBHOOK_UPDATES_REV_KEY, WEBHOOK_UPDATES_REV);
+    return { ok: true, updated: false, url: currentUrl };
+  } catch (err) {
+    return { ok: false, error: err?.message || 'webhook_sync_failed' };
+  }
+}
+
 export async function syncTelegramBotSurface(env, requestOrigin, config = null, options = {}) {
   if (!env.BOT_TOKEN) return { ok: false };
   const { persistUsername = true } = options;
@@ -2568,6 +2770,9 @@ export async function syncTelegramBotSurface(env, requestOrigin, config = null, 
         }
       : { type: 'default' },
   }).catch((e) => ({ error: e.message }));
+
+  // 5. Auto-upgrade legacy Webhooks to subscribe to `message_reaction` (guarded by WEBHOOK_SECRET & KV rev flag)
+  results.webhookReactions = await ensureWebhookReactionSubscription(env);
 
   return { ok: true, results };
 }
@@ -2733,6 +2938,7 @@ export async function sendAdminDirectVisitorReply(env, requestOrigin, targetUid,
   const exchanged = await recordVisitorExchange(env, uid, syntheticMsg, {
     sender: 'admin',
     pmMessageId: sentPm?.message_id || null,
+    ...(topicMsgId && supergroupId ? { topicChatId: supergroupId } : {}),
     incrementCount: true,
     preview: previewTextOfMessage(syntheticMsg),
   });

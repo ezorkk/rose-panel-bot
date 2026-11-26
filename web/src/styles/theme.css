@@ -1468,6 +1468,22 @@ select {
   border-bottom-right-radius: 5px;
 }
 
+.chat-row .chat-bubble.sticker-bubble {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 2px;
+}
+
+.chat-sticker-fallback {
+  padding: 9px 13px;
+  border-radius: 16px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
 .chat-photo {
   display: block;
   max-width: 190px;
@@ -1486,6 +1502,26 @@ select {
   color: var(--text-muted);
   margin-top: 3px;
   padding: 0 3px;
+}
+
+.chat-reaction-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+}
+
+.chat-reaction-pill.mine {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
 }
 
 .chat-row.pending .chat-bubble {

@@ -78,22 +78,43 @@ export async function clearOwnerUnreachable(env) {
   }
 }
 
-export async function saveDmMessageMap(env, ownerMsgId, visitorUid) {
+export async function saveDmMessageMap(env, ownerMsgId, visitorUid, visitorPmMsgId = null) {
   const msgId = Number(ownerMsgId);
   const uid = String(visitorUid || '').trim();
   if (!env?.TOPIC_MAP || !Number.isFinite(msgId) || msgId <= 0 || !/^\d+$/.test(uid)) return;
-  await env.TOPIC_MAP.put(`${DM_MAP_PREFIX}${msgId}`, uid, { expirationTtl: DM_MAP_TTL_SECONDS });
+  const pmId = Number(visitorPmMsgId);
+  // Store JSON `{ u, p }` only for copied visitor messages so reactions can map back to the
+  // visitor's original private-chat message; header cards & owner replies keep plain `uid`.
+  const value = Number.isInteger(pmId) && pmId > 0 ? JSON.stringify({ u: uid, p: pmId }) : uid;
+  await env.TOPIC_MAP.put(`${DM_MAP_PREFIX}${msgId}`, value, { expirationTtl: DM_MAP_TTL_SECONDS });
+}
+
+export async function lookupDmMessageEntry(env, ownerMsgId) {
+  const msgId = Number(ownerMsgId);
+  if (!env?.TOPIC_MAP || !Number.isFinite(msgId) || msgId <= 0) return null;
+  try {
+    const raw = await env.TOPIC_MAP.get(`${DM_MAP_PREFIX}${msgId}`);
+    if (!raw) return null;
+    const trimmed = String(raw).trim();
+    if (/^\d+$/.test(trimmed)) {
+      return { uid: trimmed, pmMessageId: null };
+    }
+    const parsed = JSON.parse(trimmed);
+    const uid = String(parsed?.u || '').trim();
+    if (!/^\d+$/.test(uid)) return null;
+    const pmId = Number(parsed?.p);
+    return {
+      uid,
+      pmMessageId: Number.isInteger(pmId) && pmId > 0 ? pmId : null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function lookupDmMessageMap(env, ownerMsgId) {
-  const msgId = Number(ownerMsgId);
-  if (!env?.TOPIC_MAP || !Number.isFinite(msgId) || msgId <= 0) return '';
-  try {
-    const uid = await env.TOPIC_MAP.get(`${DM_MAP_PREFIX}${msgId}`);
-    return uid && /^\d+$/.test(String(uid).trim()) ? String(uid).trim() : '';
-  } catch {
-    return '';
-  }
+  const entry = await lookupDmMessageEntry(env, ownerMsgId);
+  return entry?.uid || '';
 }
 
 /**
@@ -171,7 +192,7 @@ export async function pushToOwner(env, origin, msg, knownPreview = undefined, vi
     });
     copiedMsgId = copied?.result?.message_id || null;
     if (copiedMsgId) {
-      await saveDmMessageMap(env, copiedMsgId, uid);
+      await saveDmMessageMap(env, copiedMsgId, uid, msg.message_id);
     }
 
     await clearOwnerUnreachable(env);
@@ -236,8 +257,9 @@ export async function deliverVisitorMessage(env, origin, msg, options = {}) {
     pmMessageId: msg.message_id,
     ...(mode === 'dm' ? { topicMsgId: null } : {}),
     ...(mode === 'topic' && delivery?.topicMsgId
-      ? { topicCopyId: delivery.topicMsgId, topicThreadId: delivery.threadId }
+      ? { topicCopyId: delivery.topicMsgId, topicThreadId: delivery.threadId, topicChatId: delivery.supergroupId }
       : {}),
+    ...(mode === 'dm' && delivery?.copiedMsgId ? { dmCopyId: delivery.copiedMsgId } : {}),
     incrementCount: true,
     preview,
   }).catch(() => {});

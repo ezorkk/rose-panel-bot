@@ -11,6 +11,22 @@ export const HIDE_STAR_STRIP_STORAGE_KEY = 'rose_hide_star_strip';
 
 export const RECENT_RELEASES = [
   {
+    version: '1.9.0',
+    url: 'https://github.com/mango0114/rose-panel-bot/releases/tag/v1.9.0',
+    items: [
+      {
+        tag: '新增',
+        tone: 'new',
+        text: 'Telegram 表情回应双向同步（访客私聊 ↔ 话题群 / Bot 私聊推送，取消同步消失），并在面板气泡下方展示双方回应',
+      },
+      {
+        tag: '新增',
+        tone: 'new',
+        text: '面板聊天窗口直接显示静态 / 动态 / 视频贴纸（走短时签名媒体代理，加载失败自动回退文字）',
+      },
+    ],
+  },
+  {
     version: '1.8.0',
     url: 'https://github.com/mango0114/rose-panel-bot/releases/tag/v1.8.0',
     items: [
