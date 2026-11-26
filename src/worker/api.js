@@ -1,7 +1,7 @@
 // Mini App REST API router (/api/*)
 
 import { sendTestProbeAlert } from './alerts.js';
-import { getBlockedSpamCount } from './antispam.js';
+import { getBlockedSpamCount, getBlockedSpamToday } from './antispam.js';
 import { authenticateRequest, parseAdminIds, signMediaToken, verifyMediaToken } from './auth.js';
 import {
   WEBHOOK_UPDATES_REV,
@@ -150,18 +150,23 @@ export async function handleApiRequest(request, env, url, ctx = null) {
     let visitorSummary = null;
     let recentVisitors = [];
     let blockedSpamCount = 0;
+    let blockedToday = 0;
+    let pendingReviewCount = 0;
     let inboxStatus = null;
     let visitStats = null;
     if (auth.isAdmin) {
-      const [overview, spamCount, status, monthlyStats] = await Promise.all([
+      const [overview, spamCount, todaySpamCount, status, monthlyStats] = await Promise.all([
         getVisitorOverview(env),
         getBlockedSpamCount(env),
+        getBlockedSpamToday(env, config),
         loadAdminInboxStatus(env),
         getVisitStats(env, config),
       ]);
       visitorSummary = overview.stats;
       recentVisitors = overview.recent;
       blockedSpamCount = spamCount;
+      blockedToday = todaySpamCount;
+      pendingReviewCount = Number(overview.stats?.pendingReview || 0);
       inboxStatus = status;
       visitStats = monthlyStats;
     } else if (config.profile?.showVisitCounter === true) {
@@ -182,7 +187,7 @@ export async function handleApiRequest(request, env, url, ctx = null) {
       visitorSummary,
       recentVisitors,
       blockedSpamCount,
-      ...(auth.isAdmin ? { visitStats } : {}),
+      ...(auth.isAdmin ? { visitStats, blockedToday, pendingReviewCount } : {}),
       appVersion: auth.isAdmin ? APP_VERSION : undefined,
     });
   }
@@ -239,12 +244,13 @@ export async function handleApiRequest(request, env, url, ctx = null) {
     if (path === '/api/admin/visitors' && method === 'GET') {
       const search = url.searchParams.get('q') || '';
       const filter = url.searchParams.get('filter') || 'all';
-      const [data, blockedSpamCount, visitStats] = await Promise.all([
+      const [data, blockedSpamCount, blockedToday, visitStats] = await Promise.all([
         listVisitors(env, { search, filter, limit: 80 }),
         getBlockedSpamCount(env),
+        getBlockedSpamToday(env, config),
         getVisitStats(env, config),
       ]);
-      return json({ ok: true, ...data, blockedSpamCount, visitStats });
+      return json({ ok: true, ...data, blockedSpamCount, blockedToday, visitStats });
     }
 
     // GET /api/admin/visitors/:userId

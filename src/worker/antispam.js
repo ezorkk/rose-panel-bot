@@ -29,6 +29,17 @@ const HOMOGLYPH_MAP = {
 };
 
 const SPAM_STATS_KEY = 'stats:blocked_spam';
+export const BLOCKED_DAILY_TTL_SECONDS = 3 * 86400; // 3 days
+
+export function getBlockedDateKey(nowDate = new Date(), offsetHours = 8) {
+  const safeOffset = Number.isFinite(Number(offsetHours)) ? Number(offsetHours) : 8;
+  const date = nowDate instanceof Date ? nowDate : new Date(nowDate);
+  const shifted = new Date(date.getTime() + safeOffset * 3600 * 1000);
+  const year = shifted.getUTCFullYear();
+  const month = String(shifted.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(shifted.getUTCDate()).padStart(2, '0');
+  return `${year}${month}${day}`;
+}
 
 export const PROBATION_REASON_LABELS = {
   link: '含链接',
@@ -328,15 +339,31 @@ export function assessProbationRisk(msg = {}, pmBotConfig = {}) {
   };
 }
 
-export async function recordBlockedSpam(env) {
+export async function recordBlockedSpam(env, config = null, nowDate = new Date()) {
   if (!env.TOPIC_MAP) return 0;
-  const cur = Number((await env.TOPIC_MAP.get(SPAM_STATS_KEY)) || 0);
-  const next = cur + 1;
-  await env.TOPIC_MAP.put(SPAM_STATS_KEY, String(next));
-  return next;
+  const offsetHours = config?.community?.timezoneOffsetHours ?? 8;
+  const dailyKey = `stats:blocked:${getBlockedDateKey(nowDate, offsetHours)}`;
+  const [curTotalRaw, curDailyRaw] = await Promise.all([
+    env.TOPIC_MAP.get(SPAM_STATS_KEY),
+    env.TOPIC_MAP.get(dailyKey),
+  ]);
+  const nextTotal = Number(curTotalRaw || 0) + 1;
+  const nextDaily = Number(curDailyRaw || 0) + 1;
+  await Promise.all([
+    env.TOPIC_MAP.put(SPAM_STATS_KEY, String(nextTotal)),
+    env.TOPIC_MAP.put(dailyKey, String(nextDaily), { expirationTtl: BLOCKED_DAILY_TTL_SECONDS }),
+  ]);
+  return nextTotal;
 }
 
 export async function getBlockedSpamCount(env) {
   if (!env.TOPIC_MAP) return 0;
   return Number((await env.TOPIC_MAP.get(SPAM_STATS_KEY)) || 0);
+}
+
+export async function getBlockedSpamToday(env, config = null, nowDate = new Date()) {
+  if (!env.TOPIC_MAP) return 0;
+  const offsetHours = config?.community?.timezoneOffsetHours ?? 8;
+  const dailyKey = `stats:blocked:${getBlockedDateKey(nowDate, offsetHours)}`;
+  return Number((await env.TOPIC_MAP.get(dailyKey)) || 0);
 }

@@ -8,13 +8,17 @@ import {
   sendAlertNotification,
 } from '../src/worker/alerts.js';
 import {
+  BLOCKED_DAILY_TTL_SECONDS,
   assessIncomingRisk,
   assessProbationRisk,
   checkCasBlacklist,
   formatProbationReasons,
+  getBlockedDateKey,
   getBlockedSpamCount,
+  getBlockedSpamToday,
   isDomainAllowed,
   normalizeAntiSpamText,
+  recordBlockedSpam,
 } from '../src/worker/antispam.js';
 import {
   MEDIA_TOKEN_BUCKET_SECONDS,
@@ -6793,5 +6797,88 @@ describe('New visitor probation & pending message review (v1.10)', () => {
     } finally {
       tg.restore();
     }
+  });
+});
+
+describe('Daily blocked spam counter & admin bootstrap status fields (v1.10)', () => {
+  it('rolls over daily blocked counts by owner timezone, sets 3-day expirationTtl, and keeps cumulative total accurate', async () => {
+    const base = createMemoryKV();
+    const putMeta = new Map();
+    const kv = {
+      ...base,
+      async put(key, value, opts) {
+        putMeta.set(key, opts || {});
+        return base.put(key, value, opts);
+      },
+    };
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123456:DAILY_SPAM', ADMIN_IDS: '10001' };
+    const cfgUtc8 = { community: { timezoneOffsetHours: 8 } };
+    const cfgUtcMinus5 = { community: { timezoneOffsetHours: -5 } };
+
+    // 2025-05-10T15:59:00Z is 2025-05-10 23:59 in UTC+8
+    const beforeMidnightUtc8 = new Date('2025-05-10T15:59:00Z');
+    // 2025-05-10T16:01:00Z is 2025-05-11 00:01 in UTC+8
+    const afterMidnightUtc8 = new Date('2025-05-10T16:01:00Z');
+
+    expect(getBlockedDateKey(beforeMidnightUtc8, 8)).toBe('20250510');
+    expect(getBlockedDateKey(afterMidnightUtc8, 8)).toBe('20250511');
+    expect(getBlockedDateKey(afterMidnightUtc8, -5)).toBe('20250510');
+
+    await recordBlockedSpam(env, cfgUtc8, beforeMidnightUtc8);
+    await recordBlockedSpam(env, cfgUtc8, beforeMidnightUtc8);
+    await recordBlockedSpam(env, cfgUtc8, afterMidnightUtc8);
+
+    // Cumulative total increased to 3
+    expect(await getBlockedSpamCount(env)).toBe(3);
+    // Daily buckets rolled over cleanly at UTC+8 midnight
+    expect(await getBlockedSpamToday(env, cfgUtc8, beforeMidnightUtc8)).toBe(2);
+    expect(await getBlockedSpamToday(env, cfgUtc8, afterMidnightUtc8)).toBe(1);
+    // Same UTC timestamp in UTC-5 is still 20250510 -> reads 20250510 bucket (2)
+    expect(await getBlockedSpamToday(env, cfgUtcMinus5, afterMidnightUtc8)).toBe(2);
+
+    // 3-day expirationTtl attached to daily keys
+    expect(putMeta.get('stats:blocked:20250510')?.expirationTtl).toBe(BLOCKED_DAILY_TTL_SECONDS);
+    expect(putMeta.get('stats:blocked:20250511')?.expirationTtl).toBe(BLOCKED_DAILY_TTL_SECONDS);
+    expect(BLOCKED_DAILY_TTL_SECONDS).toBe(3 * 86400);
+
+    // Bootstrap exposes blockedToday & pendingReviewCount to admins only
+    await recordBlockedSpam(env, cfgUtc8);
+    await kv.put(
+      'user:55001',
+      JSON.stringify({
+        userId: '55001',
+        first_name: 'PendingOne',
+        pendingReview: [{ pmMessageId: 91, chatId: 55001, preview: 'https://ad.test', reasons: ['link'], at: Date.now() }],
+      })
+    );
+    await kv.put('visitors:index', JSON.stringify(['55001']));
+
+    const adminInit = await signInitData(
+      { auth_date: String(Math.floor(Date.now() / 1000)), user: JSON.stringify({ id: 10001, first_name: 'Owner' }) },
+      env.BOT_TOKEN
+    );
+    const guestInit = await signInitData(
+      { auth_date: String(Math.floor(Date.now() / 1000)), user: JSON.stringify({ id: 55002, first_name: 'Guest' }) },
+      env.BOT_TOKEN
+    );
+
+    const adminBoot = await (
+      await worker.fetch(
+        new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': adminInit } }),
+        env
+      )
+    ).json();
+    expect(adminBoot.blockedToday).toBe(1);
+    expect(adminBoot.blockedSpamCount).toBe(4);
+    expect(adminBoot.pendingReviewCount).toBe(1);
+
+    const guestBoot = await (
+      await worker.fetch(
+        new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': guestInit } }),
+        env
+      )
+    ).json();
+    expect(guestBoot.blockedToday).toBeUndefined();
+    expect(guestBoot.pendingReviewCount).toBeUndefined();
   });
 });

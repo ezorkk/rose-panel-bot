@@ -1744,7 +1744,7 @@ async function handleCallbackQuery(env, requestOrigin, cq, config) {
       const cooldownMins = Math.max(1, Number(config.pmBot.cooldownMinutes || 10));
       await env.TOPIC_MAP.delete(`chal:${verifyId}`);
       await env.TOPIC_MAP.delete(`user_challenge:${state.userId}`);
-      await recordBlockedSpam(env);
+      await recordBlockedSpam(env, config);
       if (state.stickerMessageId && cq.message?.chat?.id) {
         await tgCall(env, 'deleteMessage', {
           chat_id: cq.message.chat.id,
@@ -1798,7 +1798,7 @@ async function handleCallbackQuery(env, requestOrigin, cq, config) {
         await env.TOPIC_MAP.delete(`verify_cool_hint:${state.userId}`);
         await env.TOPIC_MAP.delete(`chal:${verifyId}`);
         await env.TOPIC_MAP.delete(`user_challenge:${state.userId}`);
-        await recordBlockedSpam(env);
+        await recordBlockedSpam(env, config);
         if (state.stickerMessageId && cq.message?.chat?.id) {
           await tgCall(env, 'deleteMessage', {
             chat_id: cq.message.chat.id,
@@ -2392,7 +2392,7 @@ export async function handleTelegramUpdate(update, env, requestOrigin) {
     if (!isAdmin && !isBanned && verified !== 'trusted') {
       const risk = assessIncomingRisk(edited, config.pmBot);
       if (risk.isBlockedKeyword || risk.hasLink || risk.reasons.includes('zero_width_obfuscation')) {
-        await recordBlockedSpam(env);
+        await recordBlockedSpam(env, config);
         const activeGroupId = await resolveSupergroupId(env);
         const detail = await getVisitorDetail(env, uid, activeGroupId);
         if (detail?.thread_id && activeGroupId) {
@@ -2729,7 +2729,7 @@ export async function handleTelegramUpdate(update, env, requestOrigin) {
                 incrementMsg: false,
                 lastPreview: '[命中 CAS 黑名单 · 已自动拦截]',
               }).catch(() => {});
-              await recordBlockedSpam(env);
+              await recordBlockedSpam(env, config);
               return;
             }
           }
@@ -2802,7 +2802,7 @@ export async function handleTelegramUpdate(update, env, requestOrigin) {
     // Layer 2 & 4: Evaluate de-obfuscated keyword blocklist & risk signals (<1ms local CPU)
     const risk = !isAdmin && !isTrusted ? assessIncomingRisk(msg, config.pmBot) : null;
     if (risk?.isBlockedKeyword) {
-      await recordBlockedSpam(env);
+      await recordBlockedSpam(env, config);
       return;
     }
 
@@ -2831,7 +2831,7 @@ export async function handleTelegramUpdate(update, env, requestOrigin) {
             incrementMsg: false,
             lastPreview: '[命中 CAS 黑名单 · 已自动拦截]',
           }).catch(() => {});
-          await recordBlockedSpam(env);
+          await recordBlockedSpam(env, config);
           return;
         }
       }

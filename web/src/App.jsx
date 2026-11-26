@@ -160,6 +160,7 @@ export default function App() {
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState('profile');
   const [deepVisitorId, setDeepVisitorId] = useState('');
+  const [visitorFilterPreset, setVisitorFilterPreset] = useState('');
   const [settingsSection, setSettingsSection] = useState(null);
   const [checkinLoading, setCheckinLoading] = useState(false);
   const [toast, setToast] = useState('');
@@ -348,12 +349,17 @@ export default function App() {
     navItems.push({ id: 'probe', label: '探针', icon: Server });
   }
 
+  const pendingReviewCount = Number(
+    bootstrap?.pendingReviewCount ?? bootstrap?.visitorSummary?.pendingReview ?? 0
+  );
+
   if (isAdmin) {
     navItems.push({
       id: 'visitors',
       label: '访客',
       icon: Users,
-      badge: bootstrap?.visitorSummary?.active || 0,
+      badge: pendingReviewCount,
+      badgeAlert: pendingReviewCount > 0,
     });
   } else if (enableCheckin) {
     navItems.push({ id: 'leaderboard', label: '榜单', icon: Trophy });
@@ -407,20 +413,15 @@ export default function App() {
         {effectiveTab === 'profile' && (
           <TicketTab
             data={bootstrap}
-            onNavigate={(tab) => {
+            onNavigate={(tab, opts = {}) => {
               haptic('light');
+              if (tab === 'visitors' && opts?.filter) {
+                setVisitorFilterPreset(opts.filter);
+              }
               setActiveTab(tab);
-            }}
-            onOpenVisitor={(visitorId) => {
-              haptic('light');
-              setDeepVisitorId(String(visitorId || ''));
-              setActiveTab('visitors');
             }}
             onCheckin={handleCheckin}
             checkinLoading={checkinLoading}
-            onOpenWhatsNew={() =>
-              setWhatsNewState({ open: true, mode: 'manual', previousVersion: '' })
-            }
             onToast={showToast}
           />
         )}
@@ -457,8 +458,31 @@ export default function App() {
         {effectiveTab === 'visitors' && isAdmin && (
           <VisitorsTab
             initialVisitorId={deepVisitorId}
+            initialFilter={visitorFilterPreset}
             initialVisitStats={bootstrap?.visitStats || null}
+            initialBlockedSpamCount={bootstrap?.blockedSpamCount || 0}
+            initialBlockedToday={bootstrap?.blockedToday || 0}
             onClearInitial={() => setDeepVisitorId('')}
+            onClearInitialFilter={() => setVisitorFilterPreset('')}
+            onStatsSync={(patch) => {
+              setBootstrap((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      ...(patch.visitorSummary ? { visitorSummary: patch.visitorSummary } : {}),
+                      ...(typeof patch.pendingReviewCount === 'number'
+                        ? { pendingReviewCount: patch.pendingReviewCount }
+                        : {}),
+                      ...(typeof patch.blockedSpamCount === 'number'
+                        ? { blockedSpamCount: patch.blockedSpamCount }
+                        : {}),
+                      ...(typeof patch.blockedToday === 'number'
+                        ? { blockedToday: patch.blockedToday }
+                        : {}),
+                    }
+                  : prev
+              );
+            }}
             onToast={showToast}
           />
         )}
@@ -490,7 +514,11 @@ export default function App() {
                 >
                   <Icon size={20} strokeWidth={active ? 2.2 : 1.9} />
                   <span>{item.label}</span>
-                  {item.badge > 0 && <span className="dock-badge">{item.badge > 99 ? '99+' : item.badge}</span>}
+                  {item.badge > 0 && (
+                    <span className={`dock-badge ${item.badgeAlert ? 'alert' : ''}`}>
+                      {item.badge > 99 ? '99+' : item.badge}
+                    </span>
+                  )}
                 </button>
               );
             })}
