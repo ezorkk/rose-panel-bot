@@ -3,14 +3,35 @@ import { ExternalLink, Sparkles, Star, X } from 'lucide-react';
 import { haptic, openExternalUrl } from '../lib/telegram.js';
 
 export const REPO_URL = 'https://github.com/mango0114/rose-panel-bot';
-// Verified against live GitHub README heading anchor: 🚀 极简部署（5 分钟免费上线）
-export const DEPLOY_GUIDE_URL = `${REPO_URL}#${encodeURIComponent('-极简部署5-分钟免费上线')}`;
+// Verified against live GitHub README heading anchor: 🚀 极简部署（免费上线）
+export const DEPLOY_GUIDE_URL = `${REPO_URL}#${encodeURIComponent('-极简部署免费上线')}`;
 export const FEEDBACK_URL = `${REPO_URL}/issues/new/choose`;
 export const CHANGELOG_URL = 'https://github.com/mango0114/rose-panel-bot/blob/main/CHANGELOG.md';
 export const SEEN_VERSION_STORAGE_KEY = 'rose_seen_version';
 export const HIDE_STAR_STRIP_STORAGE_KEY = 'rose_hide_star_strip';
 
 export const RECENT_RELEASES = [
+  {
+    version: '2.0.0',
+    url: 'https://github.com/mango0114/rose-panel-bot/releases/tag/v2.0.0',
+    items: [
+      {
+        tag: '新增',
+        tone: 'new',
+        text: 'Cloudflare D1 存储层升级：绑定 D1（变量名 DB，Wrangler v4 自动建库）后聊天记录、照片/链接归档与消息映射改存 D1，突破 60 条上限并大幅省下每日 KV 写入额度；未绑定 D1 时 100% 自动回退 KV',
+      },
+      {
+        tag: '新增',
+        tone: 'new',
+        text: '老访客聊天记录无感自动迁移 & 站内分批一键迁移：在「设置 → 版本更新 → 数据存储」可查看进度并一键搬迁，所有 KV 旧数据原样保留作备份绝不删除',
+      },
+      {
+        tag: '改进',
+        tone: 'imp',
+        text: '升级瞬间旧消息引用回复与表情回应自动回退查 KV 无缝衔接，并复用定时任务每日自动清理过期映射；文档补充「动手前 1 分钟备齐 4 样」极简上手清单',
+      },
+    ],
+  },
   {
     version: '1.11.0',
     url: 'https://github.com/mango0114/rose-panel-bot/releases/tag/v1.11.0',
@@ -225,7 +246,7 @@ export function StarSupportBanner({ onDismiss = null, style = undefined }) {
 }
 
 export default function WhatsNewModal({
-  appVersion = '1.11.0',
+  appVersion = '2.0.0',
   previousVersion = '',
   mode = 'auto',
   onClose,
