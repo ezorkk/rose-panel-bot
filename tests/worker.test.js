@@ -1,8 +1,17 @@
 import { describe, expect, it, vi } from 'vitest';
+import {
+  ALERT_STATE_KEY,
+  ALERT_TOPIC_ID_KEY,
+  evaluateProbeAlerts,
+  formatAlertMessage,
+  runProbeAlerts,
+  sendAlertNotification,
+} from '../src/worker/alerts.js';
 import { assessIncomingRisk, checkCasBlacklist, normalizeAntiSpamText } from '../src/worker/antispam.js';
 import { signMediaToken, verifyMediaToken, verifyTelegramInitData } from '../src/worker/auth.js';
 import {
   buildVisitorCardCaption,
+  buildVisitorCardText,
   completeTurnstileVerification,
   generateInlineChallenge,
   generateStickerChallenge,
@@ -16,6 +25,8 @@ import {
   DEFAULT_CONFIG,
   loadPanelConfig,
   resolveSupergroupId,
+  sanitizeAdminConfig,
+  sanitizePublicConfig,
   savePanelConfig,
 } from '../src/worker/config.js';
 import {
@@ -31,19 +42,35 @@ import { normalizeStickerObject, parseStickerPackName } from '../src/worker/tele
 import { renderTurnstileVerifyPage } from '../src/worker/turnstile.js';
 import { checkLatestRelease, compareSemver, syncForkWithUpstream } from '../src/worker/updater.js';
 import { APP_VERSION } from '../src/worker/version.js';
+import {
+  VISIT_COUNT_TTL_SECONDS,
+  VISIT_SEEN_TTL_SECONDS,
+  getMonthKeys,
+  getVisitStats,
+  recordMonthlyVisit,
+} from '../src/worker/visitStats.js';
+import { BRAND_NAME, BRAND_SIGNATURE } from '../web/src/lib/brand.js';
 import pkg from '../package.json' with { type: 'json' };
 import {
   applyVisitorAction,
+  buildSourceLink,
   clearVisitorHistory,
+  computeSourceStats,
   extractLinksFromMessage,
   extractPhotoFromMessage,
   getVisitorDetail,
   getVisitorHistory,
   getVisitorOverview,
   listVisitors,
+  normalizeSourceParam,
   recordVisitorExchange,
+  rememberPendingSource,
   upsertVisitorProfile,
 } from '../src/worker/visitors.js';
+import {
+  buildSourceLink as buildClientSourceLink,
+  normalizeSourceParam as normalizeClientSourceParam,
+} from '../web/src/lib/telegram.js';
 
 // Minimal in-memory Cloudflare KV mock
 function createMemoryKV() {
@@ -2784,6 +2811,90 @@ describe('Mini App in-panel visitor chat log, direct text/photo reply & recall',
       globalThis.fetch = origFetch;
     }
   });
+
+  it('mirrors panel replies to the topic with a bold label, blockquote, and a quote of the latest visitor message', async () => {
+    const kv = createMemoryKV();
+    const botToken = '999222:MIRROR_STYLE';
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001', SUPERGROUP_ID: '-100777' };
+    await upsertVisitorProfile(env, { id: 91919, first_name: 'Momo' }, { threadId: 55, incrementMsg: false });
+    await kv.put('thread:55', '91919');
+    await kv.put('verified:91919', 'emoji:v1');
+    // Legacy entry recorded before topicCopyId existed: its topicMsgId is the visitor's PM ID and must never be quoted
+    await recordVisitorExchange(env, '91919', { message_id: 3, text: 'old' }, { sender: 'visitor', pmMessageId: 3 });
+
+    const tgCalls = [];
+    let nextId = 640;
+    let lastCopyId = null;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url, init) => {
+      const method = String(url).split('/').pop();
+      const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
+      tgCalls.push({ method, body });
+      if (method === 'copyMessage' || method === 'sendMessage') {
+        nextId += 1;
+        if (method === 'copyMessage') lastCopyId = nextId;
+        return new Response(JSON.stringify({ ok: true, result: { message_id: nextId } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+    });
+
+    const adminInit = await signInitData(
+      { auth_date: String(Math.floor(Date.now() / 1000)), user: JSON.stringify({ id: 10001, first_name: 'Owner' }) },
+      botToken
+    );
+    const panelReply = (text) =>
+      worker.fetch(
+        new Request('https://panel.example.com/api/admin/visitors/91919/reply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': adminInit },
+          body: JSON.stringify({ text }),
+        }),
+        env
+      );
+    const topicMirror = () =>
+      tgCalls.find((c) => c.method === 'sendMessage' && c.body.chat_id === '-100777' && c.body.message_thread_id === 55);
+
+    try {
+      // 1. Only a legacy entry exists -> mirror is styled but quotes nothing
+      expect((await panelReply('hello')).status).toBe(200);
+      expect(topicMirror().body.reply_parameters).toBeUndefined();
+
+      // 2. Visitor message copied into topic 55 (copy gets ID 642 there) -> recorded as topicCopyId
+      tgCalls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 500,
+            from: { id: 91919, first_name: 'Momo' },
+            chat: { id: 91919, type: 'private' },
+            text: '机器人很好用，感谢',
+          },
+        },
+        env,
+        'https://panel.example.com'
+      );
+      const copy = tgCalls.find((c) => c.method === 'copyMessage');
+      expect(copy.body.message_thread_id).toBe(55);
+      const copyId = lastCopyId;
+      expect(copyId).toBeGreaterThan(0);
+
+      // 3. Panel reply -> labelled blockquote, HTML-escaped, quoting the visitor's copied message in the same topic
+      tgCalls.length = 0;
+      expect((await panelReply('感动 <b>不是标签</b>')).status).toBe(200);
+      const mirror = topicMirror();
+      expect(mirror.body.parse_mode).toBe('HTML');
+      expect(mirror.body.text).toContain('<b>我在面板回复</b>');
+      expect(mirror.body.text).toContain('<blockquote>感动 &lt;b&gt;不是标签&lt;/b&gt;</blockquote>');
+      expect(mirror.body.reply_parameters).toEqual({ message_id: copyId, allow_sending_without_reply: true });
+      expect(mirror.body.disable_notification).toBe(true);
+      // The visitor's own private chat still gets the plain text
+      const toVisitor = tgCalls.find((c) => c.method === 'sendMessage' && Number(c.body.chat_id) === 91919);
+      expect(toVisitor.body.text).toBe('感动 <b>不是标签</b>');
+      expect(toVisitor.body.parse_mode).toBeUndefined();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
 });
 
 describe('Bot DM direct push inbox (dm-inbox)', () => {
@@ -3617,5 +3728,1373 @@ describe('Bot DM direct push inbox (dm-inbox)', () => {
       expect(sent[0].body.text).toContain('暂未开启私信功能');
       expect(sent[0].body.text).not.toContain('直接在下方输入框打字');
     });
+  });
+});
+
+describe('Probe offline & resource alerts (v1.8)', () => {
+  function setupMockNet({ probeResponder, tgOverrides = {} } = {}) {
+    const tgCalls = [];
+    const probeCalls = [];
+    let topicSeq = 900;
+    const fetchMock = vi.fn(async (url, init) => {
+      const u = String(url);
+      if (u.startsWith('https://api.telegram.org/')) {
+        const method = u.split('/').pop();
+        const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
+        tgCalls.push({ method, body });
+        if (tgOverrides[method]) return tgOverrides[method](body, tgCalls);
+        if (method === 'createForumTopic') {
+          topicSeq += 1;
+          return new Response(JSON.stringify({ ok: true, result: { message_thread_id: topicSeq } }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 100 } }), { status: 200 });
+      }
+      probeCalls.push({ url: u, init });
+      if (probeResponder) return probeResponder(u, init);
+      return new Response(JSON.stringify({ servers: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    return { tgCalls, probeCalls, fetchMock };
+  }
+
+  async function withFetch(fetchMock, fn) {
+    const orig = globalThis.fetch;
+    globalThis.fetch = fetchMock;
+    try {
+      await fn();
+    } finally {
+      globalThis.fetch = orig;
+    }
+  }
+
+  const jsonNodesRes = (nodes) =>
+    new Response(JSON.stringify({ servers: nodes }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+  it('skips probe fetch and performs zero KV writes when disabled, unconfigured, or in demoMode', async () => {
+    const kv = createMemoryKV();
+    const putSpy = vi.spyOn(kv, 'put');
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:ALERT', ADMIN_IDS: '10001' };
+    const { tgCalls, probeCalls, fetchMock } = setupMockNet();
+    const tick = Date.parse('2026-11-26T10:00:00Z');
+
+    await withFetch(fetchMock, async () => {
+      // 1. Default config (alerts.enabled === false) -> 0 probe fetches, 0 KV writes
+      const r1 = await runProbeAlerts(env, tick);
+      expect(r1.skipped).toBe(true);
+      expect(r1.reason).toBe('disabled');
+      expect(probeCalls).toHaveLength(0);
+      expect(putSpy).toHaveBeenCalledTimes(0);
+
+      // 2. Enabled but no probe URL -> 0 fetches, 0 KV writes
+      await savePanelConfig(env, { probe: { url: '', demoMode: false, alerts: { enabled: true } } });
+      putSpy.mockClear();
+      const r2 = await runProbeAlerts(env, tick);
+      expect(r2.skipped).toBe(true);
+      expect(r2.reason).toBe('unconfigured_or_demo');
+      expect(probeCalls).toHaveLength(0);
+      expect(putSpy).toHaveBeenCalledTimes(0);
+
+      // 3. Enabled with demoMode: true (even if URL is filled) -> 0 fetches, 0 KV writes
+      await savePanelConfig(env, {
+        probe: { provider: 'json', url: 'https://probe.test/stats.json', demoMode: true, alerts: { enabled: true } },
+      });
+      putSpy.mockClear();
+      const r3 = await runProbeAlerts(env, tick);
+      expect(r3.skipped).toBe(true);
+      expect(r3.reason).toBe('unconfigured_or_demo');
+      expect(probeCalls).toHaveLength(0);
+      expect(tgCalls).toHaveLength(0);
+      expect(putSpy).toHaveBeenCalledTimes(0);
+    });
+  });
+
+  it('requires confirmChecks consecutive misses before offline alert, avoids duplicates, and sends silent recovery with duration', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:ALERT_OFF', ADMIN_IDS: '10001' };
+    await savePanelConfig(env, {
+      siteOrigin: 'https://panel.test',
+      probe: {
+        provider: 'json',
+        url: 'https://probe.test/stats.json',
+        alerts: { enabled: true, intervalMinutes: 5, confirmChecks: 2, notifyRecovery: true },
+      },
+    });
+
+    let nodeOnline = true;
+    const { tgCalls, fetchMock } = setupMockNet({
+      probeResponder: () =>
+        jsonNodesRes([{ id: 'n1', name: '东京 01', online: nodeOnline, cpu: 12, memory: 30, disk: 40 }]),
+    });
+
+    const t0 = Date.parse('2026-11-26T10:00:00Z');
+
+    await withFetch(fetchMock, async () => {
+      // Baseline check (online) -> records node, no alert
+      await runProbeAlerts(env, t0);
+      expect(tgCalls).toHaveLength(0);
+
+      // Miss #1 -> not confirmed yet, no alert
+      nodeOnline = false;
+      await runProbeAlerts(env, t0 + 5 * 60000);
+      expect(tgCalls).toHaveLength(0);
+
+      // Miss #2 -> confirmed! Sends non-silent offline alert
+      await runProbeAlerts(env, t0 + 10 * 60000);
+      expect(tgCalls).toHaveLength(1);
+      expect(tgCalls[0].method).toBe('sendMessage');
+      expect(tgCalls[0].body.chat_id).toBe(10001);
+      expect(tgCalls[0].body.disable_notification).toBe(false);
+      expect(tgCalls[0].body.text).toContain('节点掉线：东京 01');
+      expect(tgCalls[0].body.text).toContain('分钟');
+
+      // Miss #3 -> still offline, NO duplicate alert and ZERO KV writes!
+      const putSpy = vi.spyOn(kv, 'put');
+      tgCalls.length = 0;
+      await runProbeAlerts(env, t0 + 15 * 60000);
+      expect(tgCalls).toHaveLength(0);
+      expect(putSpy).toHaveBeenCalledTimes(0);
+
+      // Recovery after 35 minutes offline -> sends silent recovery notice with duration
+      nodeOnline = true;
+      await runProbeAlerts(env, t0 + 40 * 60000);
+      expect(tgCalls).toHaveLength(1);
+      expect(tgCalls[0].body.disable_notification).toBe(true);
+      expect(tgCalls[0].body.text).toContain('节点恢复：东京 01');
+      expect(tgCalls[0].body.text).toContain('35 分钟');
+
+      // When notifyRecovery is disabled, recovery stays silent (0 messages)
+      await savePanelConfig(env, { probe: { alerts: { notifyRecovery: false } } });
+      nodeOnline = false;
+      await runProbeAlerts(env, t0 + 45 * 60000);
+      await runProbeAlerts(env, t0 + 50 * 60000);
+      tgCalls.length = 0;
+      nodeOnline = true;
+      await runProbeAlerts(env, t0 + 55 * 60000);
+      expect(tgCalls).toHaveLength(0);
+    });
+  });
+
+  it('sends only one probe-down alert when probe endpoint fails without flagging nodes offline, then sends recovery', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:PROBE_DOWN', ADMIN_IDS: '10001' };
+    await savePanelConfig(env, {
+      probe: {
+        provider: 'json',
+        url: 'https://probe.test/stats.json',
+        alerts: { enabled: true, intervalMinutes: 5, confirmChecks: 2 },
+      },
+    });
+
+    let probeUp = true;
+    const { tgCalls, fetchMock } = setupMockNet({
+      probeResponder: () => {
+        if (!probeUp) return new Response('Bad Gateway', { status: 502 });
+        return jsonNodesRes([
+          { id: 'n1', name: 'Tokyo', online: true, cpu: 10 },
+          { id: 'n2', name: 'HK', online: true, cpu: 15 },
+        ]);
+      },
+    });
+    const t0 = Date.parse('2026-11-26T10:00:00Z');
+
+    await withFetch(fetchMock, async () => {
+      await runProbeAlerts(env, t0);
+      expect(tgCalls).toHaveLength(0);
+
+      // Probe fails twice -> emits ONLY "探针连接失败", zero node offline alerts
+      probeUp = false;
+      await runProbeAlerts(env, t0 + 5 * 60000);
+      expect(tgCalls).toHaveLength(0);
+
+      await runProbeAlerts(env, t0 + 10 * 60000);
+      expect(tgCalls).toHaveLength(1);
+      expect(tgCalls[0].body.text).toContain('探针连接失败');
+      expect(tgCalls[0].body.text).not.toContain('节点掉线');
+      expect(tgCalls[0].body.disable_notification).toBe(false);
+
+      // Probe stays down on 3rd tick -> no duplicate alert
+      tgCalls.length = 0;
+      await runProbeAlerts(env, t0 + 15 * 60000);
+      expect(tgCalls).toHaveLength(0);
+
+      // Probe recovers -> sends silent "探针已恢复连接", nodes still online -> no spurious node recovery
+      probeUp = true;
+      await runProbeAlerts(env, t0 + 20 * 60000);
+      expect(tgCalls).toHaveLength(1);
+      expect(tgCalls[0].body.text).toContain('探针已恢复连接');
+      expect(tgCalls[0].body.disable_notification).toBe(true);
+    });
+  });
+
+  it('never alerts on first-seen offline nodes, skips muted nodes, and treats vanished nodes as offline until pruned', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:FIRST_MUTE', ADMIN_IDS: '10001' };
+    await savePanelConfig(env, {
+      probe: {
+        provider: 'json',
+        url: 'https://probe.test/stats.json',
+        alerts: { enabled: true, intervalMinutes: 5, confirmChecks: 1, mutedNodes: ['n-muted'] },
+      },
+    });
+
+    let nodes = [
+      { id: 'n-already-off', name: 'OldDead', online: false },
+      { id: 'n-muted', name: 'MutedBox', online: true },
+      { id: 'n-temp', name: 'TempBox', online: true },
+    ];
+    const { tgCalls, fetchMock } = setupMockNet({ probeResponder: () => jsonNodesRes(nodes) });
+    const t0 = Date.parse('2026-11-26T10:00:00Z');
+
+    await withFetch(fetchMock, async () => {
+      // Round 1: already-offline node must NOT notify even with confirmChecks: 1
+      await runProbeAlerts(env, t0);
+      expect(tgCalls).toHaveLength(0);
+
+      // Round 2: already-offline stays offline (still no alert), muted node goes offline (skipped!),
+      // TempBox vanishes from the probe list -> counted as offline (some probes drop offline nodes)
+      nodes = [
+        { id: 'n-already-off', name: 'OldDead', online: false },
+        { id: 'n-muted', name: 'MutedBox', online: false },
+      ];
+      await runProbeAlerts(env, t0 + 5 * 60000);
+      expect(tgCalls).toHaveLength(1);
+      expect(tgCalls[0].body.text).toContain('TempBox');
+      expect(tgCalls[0].body.text).toContain('已不再返回');
+
+      const saved = await kv.get(ALERT_STATE_KEY, { type: 'json' });
+      expect(saved.nodes['n-muted']).toBeUndefined();
+      expect(saved.nodes['n-temp'].online).toBe(false);
+      expect(saved.nodes['n-temp'].absentSince).toBe(t0 + 5 * 60000);
+      expect(saved.nodes['n-already-off'].online).toBe(false);
+
+      // Round 3: OldDead comes online for the first time -> NO spurious recovery notice;
+      // TempBox still absent -> already notified, no duplicate
+      tgCalls.length = 0;
+      nodes = [{ id: 'n-already-off', name: 'OldDead', online: true }];
+      await runProbeAlerts(env, t0 + 10 * 60000);
+      expect(tgCalls).toHaveLength(0);
+
+      // A steady absent node writes nothing; after 24h absent it is pruned silently
+      const putSpy = vi.spyOn(kv, 'put');
+      await runProbeAlerts(env, t0 + 15 * 60000);
+      expect(putSpy.mock.calls.filter((c) => c[0] === ALERT_STATE_KEY)).toHaveLength(0);
+      putSpy.mockRestore();
+
+      await runProbeAlerts(env, t0 + 5 * 60000 + 24 * 60 * 60000);
+      expect(tgCalls).toHaveLength(0);
+      const pruned = await kv.get(ALERT_STATE_KEY, { type: 'json' });
+      expect(pruned.nodes['n-temp']).toBeUndefined();
+    });
+  });
+
+  it('triggers resource breach alert only after sustainChecks consecutive ticks, once per breach, and clears silently on drop', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:RES', ADMIN_IDS: '10001' };
+    await savePanelConfig(env, {
+      probe: {
+        provider: 'json',
+        url: 'https://probe.test/stats.json',
+        alerts: {
+          enabled: true,
+          intervalMinutes: 5,
+          resource: { enabled: true, cpu: 90, ram: 90, disk: 0, sustainChecks: 3 },
+        },
+      },
+    });
+
+    let cpu = 20;
+    let disk = 99; // disk threshold is 0 -> disabled!
+    const { tgCalls, fetchMock } = setupMockNet({
+      probeResponder: () =>
+        jsonNodesRes([{ id: 'n1', name: '东京 01', online: true, cpu, memory: 50, disk }]),
+    });
+    const t0 = Date.parse('2026-11-26T10:00:00Z');
+
+    await withFetch(fetchMock, async () => {
+      // Baseline
+      await runProbeAlerts(env, t0);
+      expect(tgCalls).toHaveLength(0);
+
+      // Breach tick 1 & 2 -> not sustained yet
+      cpu = 96;
+      await runProbeAlerts(env, t0 + 5 * 60000);
+      await runProbeAlerts(env, t0 + 10 * 60000);
+      expect(tgCalls).toHaveLength(0);
+
+      // Breach tick 3 -> triggers ONCE; disk=99% ignored because threshold=0
+      await runProbeAlerts(env, t0 + 15 * 60000);
+      expect(tgCalls).toHaveLength(1);
+      expect(tgCalls[0].body.text).toContain('东京 01 CPU 持续 ≥ 90%');
+      expect(tgCalls[0].body.text).toContain('96%');
+      expect(tgCalls[0].body.text).not.toContain('磁盘');
+
+      // Breach tick 4 -> already notified, no duplicate
+      tgCalls.length = 0;
+      await runProbeAlerts(env, t0 + 20 * 60000);
+      expect(tgCalls).toHaveLength(0);
+
+      // Drops below threshold -> clears state, NO recovery notification
+      cpu = 40;
+      await runProbeAlerts(env, t0 + 25 * 60000);
+      expect(tgCalls).toHaveLength(0);
+      const state = await kv.get(ALERT_STATE_KEY, { type: 'json' });
+      expect(state.nodes.n1.breach.cpu).toBe(0);
+      expect(state.nodes.n1.notifiedBreach.cpu).toBe(false);
+    });
+  });
+
+  it('respects intervalMinutes gating, performs zero KV writes when steady-state healthy, and honors skipCacheWrite', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:ZERO_WRITE', ADMIN_IDS: '10001' };
+    await savePanelConfig(env, {
+      probe: {
+        provider: 'json',
+        url: 'https://probe.test/stats.json',
+        alerts: { enabled: true, intervalMinutes: 10 },
+      },
+    });
+
+    const { probeCalls, fetchMock } = setupMockNet({
+      probeResponder: () => jsonNodesRes([{ id: 'n1', name: 'SG-01', online: true, cpu: 25, memory: 40, disk: 50 }]),
+    });
+
+    await withFetch(fetchMock, async () => {
+      // 10:05 is NOT divisible by 10 -> skipped!
+      const skipped = await runProbeAlerts(env, Date.parse('2026-11-26T10:05:00Z'));
+      expect(skipped.skipped).toBe(true);
+      expect(skipped.reason).toBe('interval');
+      expect(probeCalls).toHaveLength(0);
+
+      // 10:10 IS divisible by 10 -> runs baseline (writes alert:state once, does NOT write cache:komari_probe!)
+      const first = await runProbeAlerts(env, Date.parse('2026-11-26T10:10:00Z'));
+      expect(first.skipped).toBe(false);
+      expect(first.stateWritten).toBe(true);
+      expect(await kv.get('cache:komari_probe')).toBeNull();
+
+      // 10:20 steady-state healthy -> ZERO KV writes (neither alert:state nor cache:komari_probe)!
+      const putSpy = vi.spyOn(kv, 'put');
+      const steady = await runProbeAlerts(env, Date.parse('2026-11-26T10:20:00Z'));
+      expect(steady.skipped).toBe(false);
+      expect(steady.stateWritten).toBe(false);
+      expect(putSpy).toHaveBeenCalledTimes(0);
+      expect(await kv.get('cache:komari_probe')).toBeNull();
+    });
+  });
+
+  it('routes alerts to dedicated Forum Topic (reusing & recreating if deleted), merges >10 alerts, and supports alert-test API with rate limit', async () => {
+    const kv = createMemoryKV();
+    const botToken = '123:ALERT_ROUTE';
+    const env = {
+      TOPIC_MAP: kv,
+      BOT_TOKEN: botToken,
+      ADMIN_IDS: '10001',
+      SUPERGROUP_ID: '-100555999',
+      BOT_USERNAME: 'RoseTest_bot',
+      APP_SHORT_NAME: 'panel',
+    };
+    await savePanelConfig(env, {
+      probe: {
+        provider: 'json',
+        url: 'https://probe.test/stats.json',
+        alerts: { enabled: true, intervalMinutes: 5, confirmChecks: 1 },
+      },
+    });
+
+    // 12 nodes all online -> all 12 drop offline in same tick -> merged into ONE message listing 10 + "另有 2 个"
+    let allOnline = true;
+    const twelveNodes = () =>
+      Array.from({ length: 12 }, (_, i) => ({
+        id: `n-${i + 1}`,
+        name: `Node-${String(i + 1).padStart(2, '0')}`,
+        online: allOnline,
+      }));
+
+    let failFirstTopicSend = false;
+    const { tgCalls, fetchMock } = setupMockNet({
+      probeResponder: () => jsonNodesRes(twelveNodes()),
+      tgOverrides: {
+        sendMessage: (body) => {
+          if (failFirstTopicSend) {
+            failFirstTopicSend = false;
+            return new Response(
+              JSON.stringify({ ok: false, error_code: 400, description: 'Bad Request: message thread not found' }),
+              { status: 400 }
+            );
+          }
+          return new Response(JSON.stringify({ ok: true, result: { message_id: 200, chat: { id: body.chat_id } } }), {
+            status: 200,
+          });
+        },
+      },
+    });
+
+    const t0 = Date.parse('2026-11-26T10:00:00Z');
+    await withFetch(fetchMock, async () => {
+      // Via worker.scheduled entrypoint
+      const waitPromises = [];
+      await worker.scheduled({ scheduledTime: t0 }, env, { waitUntil: (p) => waitPromises.push(p) });
+      await Promise.all(waitPromises);
+      expect(tgCalls).toHaveLength(0);
+
+      // All 12 drop offline -> creates dedicated alert topic (901), sends ONE merged message with 10 items + overflow note
+      allOnline = false;
+      await runProbeAlerts(env, t0 + 5 * 60000);
+      expect(tgCalls.filter((c) => c.method === 'createForumTopic')).toHaveLength(1);
+      expect(await kv.get(ALERT_TOPIC_ID_KEY, { type: 'json' })).toEqual({ chatId: '-100555999', threadId: 901 });
+      const sentAlerts = tgCalls.filter((c) => c.method === 'sendMessage');
+      expect(sentAlerts).toHaveLength(1);
+      expect(sentAlerts[0].body.message_thread_id).toBe(901);
+      expect(sentAlerts[0].body.text).toContain('另有 2 个');
+      expect(sentAlerts[0].body.reply_markup.inline_keyboard[0][0].url).toBe(
+        'https://t.me/RoseTest_bot/panel?startapp=probe'
+      );
+
+      // All 12 recover, and simulate deleted alert topic -> recreates topic (902) and resends cleanly
+      tgCalls.length = 0;
+      failFirstTopicSend = true;
+      allOnline = true;
+      await runProbeAlerts(env, t0 + 10 * 60000);
+      expect(tgCalls.filter((c) => c.method === 'createForumTopic')).toHaveLength(1);
+      expect(await kv.get(ALERT_TOPIC_ID_KEY, { type: 'json' })).toEqual({ chatId: '-100555999', threadId: 902 });
+
+      // POST /api/admin/probe/alert-test: blocks guest (403), allows admin up to 3/min then 429
+      const now = Math.floor(Date.now() / 1000);
+      const guestInit = await signInitData(
+        { auth_date: String(now), user: JSON.stringify({ id: 20002, first_name: 'Guest' }) },
+        botToken
+      );
+      const adminInit = await signInitData(
+        { auth_date: String(now), user: JSON.stringify({ id: 10001, first_name: 'Owner' }) },
+        botToken
+      );
+      const guestRes = await worker.fetch(
+        new Request('https://panel.test/api/admin/probe/alert-test', {
+          method: 'POST',
+          headers: { 'X-Telegram-Init-Data': guestInit },
+        }),
+        env
+      );
+      expect(guestRes.status).toBe(403);
+
+      for (let i = 0; i < 3; i += 1) {
+        const okRes = await worker.fetch(
+          new Request('https://panel.test/api/admin/probe/alert-test', {
+            method: 'POST',
+            headers: { 'X-Telegram-Init-Data': adminInit },
+          }),
+          env
+        );
+        expect(okRes.status).toBe(200);
+        const body = await okRes.json();
+        expect(body.ok).toBe(true);
+        expect(body.mode).toBe('topic');
+      }
+      const limitedRes = await worker.fetch(
+        new Request('https://panel.test/api/admin/probe/alert-test', {
+          method: 'POST',
+          headers: { 'X-Telegram-Init-Data': adminInit },
+        }),
+        env
+      );
+      expect(limitedRes.status).toBe(429);
+    });
+  });
+
+  it('strips probe.alerts from sanitizePublicConfig while keeping it clamped in sanitizeAdminConfig', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, ADMIN_IDS: '10001' };
+    const saved = await savePanelConfig(env, {
+      probe: {
+        url: 'https://probe.test',
+        alerts: {
+          enabled: true,
+          intervalMinutes: 7, // invalid -> falls back to 5
+          confirmChecks: 99, // clamped to 5
+          mutedNodes: ['a', 'a', '  b  ', ''],
+          resource: { enabled: true, cpu: 20, ram: 120, disk: 0, sustainChecks: 0 },
+        },
+      },
+    });
+
+    expect(saved.probe.alerts.intervalMinutes).toBe(5);
+    expect(saved.probe.alerts.confirmChecks).toBe(5);
+    expect(saved.probe.alerts.mutedNodes).toEqual(['a', 'b']);
+    expect(saved.probe.alerts.resource).toEqual({
+      enabled: true,
+      cpu: 50,
+      ram: 100,
+      disk: 0,
+      sustainChecks: 1,
+    });
+
+    const pubGuest = sanitizePublicConfig(saved, env, false);
+    const pubAdmin = sanitizePublicConfig(saved, env, true);
+    expect('alerts' in pubGuest.probe).toBe(false);
+    expect('alerts' in pubAdmin.probe).toBe(false);
+
+    const adminCfg = sanitizeAdminConfig(saved, env, { inboxMode: 'dm', ownerUnreachable: false });
+    expect(adminCfg.probe.alerts.enabled).toBe(true);
+    expect(formatAlertMessage([]).text).toBe('');
+    expect(evaluateProbeAlerts(null, { protocol: 'json', nodes: [] }, saved.probe.alerts, 0).events).toEqual([]);
+  });
+
+  it('does not reuse a cached alert topic after rebinding to a different group', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:REBIND', ADMIN_IDS: '10001', SUPERGROUP_ID: '-100111' };
+    // Group A's alert topic was thread 57; the owner then rebinds to group B (where 57 is a visitor topic)
+    await kv.put(ALERT_TOPIC_ID_KEY, JSON.stringify({ chatId: '-100111', threadId: 57 }));
+    await kv.put('config:supergroup_id', '-100222');
+
+    const { tgCalls, fetchMock } = setupMockNet();
+    await withFetch(fetchMock, async () => {
+      const res = await sendAlertNotification(env, 'test');
+      expect(res.ok).toBe(true);
+      expect(tgCalls.filter((c) => c.method === 'createForumTopic')).toHaveLength(1);
+      expect(tgCalls.find((c) => c.method === 'createForumTopic').body.chat_id).toBe('-100222');
+      const sent = tgCalls.find((c) => c.method === 'sendMessage');
+      expect(sent.body.chat_id).toBe('-100222');
+      expect(sent.body.message_thread_id).toBe(901);
+      expect(await kv.get(ALERT_TOPIC_ID_KEY, { type: 'json' })).toEqual({ chatId: '-100222', threadId: 901 });
+
+      // Same group again -> cached topic reused, no new topic
+      tgCalls.length = 0;
+      await sendAlertNotification(env, 'again');
+      expect(tgCalls.filter((c) => c.method === 'createForumTopic')).toHaveLength(0);
+      expect(tgCalls.find((c) => c.method === 'sendMessage').body.message_thread_id).toBe(901);
+    });
+  });
+
+  it('treats a sudden empty node list as a probe failure instead of mass offline alerts', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: '123:EMPTY', ADMIN_IDS: '10001' };
+    await savePanelConfig(env, {
+      probe: {
+        provider: 'json',
+        url: 'https://probe.test/stats.json',
+        alerts: { enabled: true, intervalMinutes: 5, confirmChecks: 1 },
+      },
+    });
+
+    let nodes = [
+      { id: 'a', name: 'A', online: true },
+      { id: 'b', name: 'B', online: true },
+    ];
+    const { tgCalls, fetchMock } = setupMockNet({ probeResponder: () => jsonNodesRes(nodes) });
+    const t0 = Date.parse('2026-11-26T10:00:00Z');
+    await withFetch(fetchMock, async () => {
+      await runProbeAlerts(env, t0);
+      nodes = [];
+      await runProbeAlerts(env, t0 + 5 * 60000);
+      const sent = tgCalls.filter((c) => c.method === 'sendMessage');
+      expect(sent).toHaveLength(1);
+      expect(sent[0].body.text).toContain('探针未返回任何节点');
+      expect(sent[0].body.text).not.toContain('节点掉线');
+
+      // Nodes come back -> probe recovery notice, node state was preserved (no spurious per-node alerts)
+      tgCalls.length = 0;
+      nodes = [
+        { id: 'a', name: 'A', online: true },
+        { id: 'b', name: 'B', online: true },
+      ];
+      await runProbeAlerts(env, t0 + 10 * 60000);
+      const recovered = tgCalls.filter((c) => c.method === 'sendMessage');
+      expect(recovered).toHaveLength(1);
+      expect(recovered[0].body.text).toContain('探针已恢复连接');
+    });
+  });
+
+  it('keeps the existing siteOrigin when settings are saved from another origin (e.g. a preview URL)', async () => {
+    const kv = createMemoryKV();
+    const botToken = '123:ORIGIN';
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001', BOT_USERNAME: 'RoseTest_bot' };
+    const now = Math.floor(Date.now() / 1000);
+    const adminInit = await signInitData(
+      { auth_date: String(now), user: JSON.stringify({ id: 10001, first_name: 'Owner' }) },
+      botToken
+    );
+    const { fetchMock } = setupMockNet();
+    const save = (origin) =>
+      worker.fetch(
+        new Request(`${origin}/api/admin/config`, {
+          method: 'PUT',
+          headers: { 'X-Telegram-Init-Data': adminInit, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ profile: { tagline: `saved from ${origin}` } }),
+        }),
+        env
+      );
+
+    await withFetch(fetchMock, async () => {
+      // Unknown siteOrigin -> filled from the first HTTPS origin
+      expect((await save('https://panel.example.com')).status).toBe(200);
+      expect((await loadPanelConfig(env)).siteOrigin).toBe('https://panel.example.com');
+
+      // Saving from a preview deployment must not overwrite it
+      expect((await save('https://feat-x-rose.example.workers.dev')).status).toBe(200);
+      const cfg = await loadPanelConfig(env);
+      expect(cfg.profile.tagline).toBe('saved from https://feat-x-rose.example.workers.dev');
+      expect(cfg.siteOrigin).toBe('https://panel.example.com');
+    });
+  });
+});
+
+describe('Share card poster & Open Graph link preview (v1.8)', () => {
+  function createHtmlAssetsEnv(kv, extra = {}) {
+    return {
+      TOPIC_MAP: kv,
+      ASSETS: {
+        async fetch() {
+          return new Response(
+            '<!DOCTYPE html><html><head><meta charset="UTF-8" /><title>RosePanel · 个人面板</title></head><body><div id="root"></div></body></html>',
+            { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+          );
+        },
+      },
+      ...extra,
+    };
+  }
+
+  it('injects OG meta tags, single <title>, and truncates og:description to 160 chars', async () => {
+    const kv = createMemoryKV();
+    const env = createHtmlAssetsEnv(kv);
+    const longTagline = '欢迎来到我的个人名片 '.repeat(25).trim();
+    await savePanelConfig(env, {
+      profile: {
+        displayName: 'Rose Garden',
+        tagline: longTagline,
+        avatarMode: 'owner',
+      },
+    });
+
+    const res = await worker.fetch(new Request('https://card.example.com/'), env);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+
+    expect(BRAND_NAME).toBe('RosePanel');
+    expect(BRAND_SIGNATURE).toBe('Made with RosePanel 🌹');
+    expect(html).toContain('<meta property="og:site_name" content="RosePanel" />');
+    expect(html).toContain('<meta property="og:type" content="profile" />');
+    expect(html).toContain('<meta property="og:title" content="Rose Garden" />');
+    expect(html).toContain('<meta name="twitter:card" content="summary" />');
+    expect(html).toContain('<title>Rose Garden · RosePanel</title>');
+
+    // Strictly one <title> tag in the rendered page
+    const titles = html.match(/<title>[\s\S]*?<\/title>/gi) || [];
+    expect(titles).toHaveLength(1);
+
+    // og:description truncated to <= 160 characters
+    const descMatch = html.match(/<meta property="og:description" content="([^"]*)" \/>/);
+    expect(descMatch).toBeTruthy();
+    expect(Array.from(descMatch[1]).length).toBeLessThanOrEqual(160);
+    expect(descMatch[1].endsWith('…')).toBe(true);
+  });
+
+  it('HTML-escapes displayName and tagline in OG tags and <title> to prevent tag injection', async () => {
+    const kv = createMemoryKV();
+    const env = createHtmlAssetsEnv(kv);
+    await savePanelConfig(env, {
+      profile: {
+        displayName: 'Alice"><script>alert(1)</script>',
+        tagline: 'Hi "friends" & <img src=x onerror=alert(2)>',
+      },
+    });
+
+    const res = await worker.fetch(new Request('https://card.example.com/'), env);
+    const html = await res.text();
+
+    expect(html).not.toContain('<script>alert(1)</script>');
+    expect(html).not.toContain('<img src=x');
+    expect(html).toContain(
+      '<meta property="og:title" content="Alice&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;" />'
+    );
+    expect(html).toContain(
+      '<meta property="og:description" content="Hi &quot;friends&quot; &amp; &lt;img src=x onerror=alert(2)&gt;" />'
+    );
+    expect(html).toContain(
+      '<title>Alice&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt; · RosePanel</title>'
+    );
+  });
+
+  it('resolves og:image accurately for bot, owner, and custom avatarMode (and omits non-https custom)', async () => {
+    const kv = createMemoryKV();
+    const env = createHtmlAssetsEnv(kv);
+
+    // 1. bot mode
+    await savePanelConfig(env, { profile: { displayName: 'BotMode', avatarMode: 'bot', avatarUrl: '' } });
+    let html = await (await worker.fetch(new Request('https://card.example.com/'), env)).text();
+    expect(html).toContain('<meta property="og:image" content="https://card.example.com/api/avatar/owner" />');
+
+    // 2. owner mode
+    await savePanelConfig(env, { profile: { displayName: 'OwnerMode', avatarMode: 'owner', avatarUrl: '' } });
+    html = await (await worker.fetch(new Request('https://card.example.com/'), env)).text();
+    expect(html).toContain('<meta property="og:image" content="https://card.example.com/api/avatar/owner" />');
+
+    // 3. custom mode with https URL
+    await savePanelConfig(env, {
+      profile: {
+        displayName: 'CustomHttps',
+        avatarMode: 'custom',
+        avatarUrl: 'https://cdn.example.com/avatar.png',
+      },
+    });
+    html = await (await worker.fetch(new Request('https://card.example.com/'), env)).text();
+    expect(html).toContain('<meta property="og:image" content="https://cdn.example.com/avatar.png" />');
+
+    // 4. custom mode with non-https URL omits og:image
+    await savePanelConfig(env, {
+      profile: {
+        displayName: 'CustomHttp',
+        avatarMode: 'custom',
+        avatarUrl: 'http://insecure.example.com/avatar.png',
+      },
+    });
+    html = await (await worker.fetch(new Request('https://card.example.com/'), env)).text();
+    expect(html).not.toContain('property="og:image"');
+  });
+
+  it('computes shareUrl using t.me direct link when BOT_USERNAME & APP_SHORT_NAME are set, else site origin', async () => {
+    const kv = createMemoryKV();
+    const config = await loadPanelConfig({ TOPIC_MAP: kv });
+
+    const withDirect = sanitizePublicConfig(
+      config,
+      { TOPIC_MAP: kv, BOT_USERNAME: '@Rose202_bot', APP_SHORT_NAME: 'panel' },
+      false,
+      'https://panel.example.com'
+    );
+    expect(withDirect.shareUrl).toBe('https://t.me/Rose202_bot/panel');
+
+    const withoutAppShort = sanitizePublicConfig(
+      config,
+      { TOPIC_MAP: kv, BOT_USERNAME: 'Rose202_bot' },
+      false,
+      'https://panel.example.com'
+    );
+    expect(withoutAppShort.shareUrl).toBe('https://panel.example.com/');
+
+    const withoutBot = sanitizePublicConfig(config, { TOPIC_MAP: kv }, false, 'https://panel.example.com');
+    expect(withoutBot.shareUrl).toBe('https://panel.example.com/');
+  });
+});
+
+describe('Visitor source parameter attribution & promo links (v1.8)', () => {
+  it('normalizes valid source params and rejects empty, uppercase, spaces, special chars, and >24 chars', () => {
+    for (const fn of [normalizeSourceParam, normalizeClientSourceParam]) {
+      expect(fn('src_site')).toBe('site');
+      expect(fn('site')).toBe('site');
+      expect(fn('src_nodeseek_2026')).toBe('nodeseek_2026');
+      expect(fn('a'.repeat(24))).toBe('a'.repeat(24));
+      expect(fn(`src_${'a'.repeat(24)}`)).toBe('a'.repeat(24));
+
+      expect(fn('')).toBe('');
+      expect(fn('src_')).toBe('');
+      expect(fn('Site')).toBe('');
+      expect(fn('src_Site')).toBe('');
+      expect(fn('my site')).toBe('');
+      expect(fn('src_my site')).toBe('');
+      expect(fn('src_<script>')).toBe('');
+      expect(fn('foo-bar')).toBe('');
+      expect(fn('a'.repeat(25))).toBe('');
+      expect(fn(`src_${'a'.repeat(25)}`)).toBe('');
+      expect(fn(null)).toBe('');
+      expect(fn(123)).toBe('');
+    }
+  });
+
+  it('records src:{uid} during /start before verification, persists onto profile on first message, and deletes src:{uid}', async () => {
+    const kv = createMemoryKV();
+    const env = {
+      TOPIC_MAP: kv,
+      BOT_TOKEN: '123456:TEST_TOKEN',
+      ADMIN_IDS: '999001',
+    };
+    await savePanelConfig(env, {
+      pmBot: { enableVerification: true, verificationMode: 'emoji', enableCasCheck: false },
+    });
+
+    const tgCalls = [];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, opts) => {
+      const method = String(url).split('/').pop();
+      const body = opts?.body ? JSON.parse(opts.body) : {};
+      tgCalls.push({ method, body });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 400 + tgCalls.length } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    try {
+      const visitor = { id: 50101, first_name: 'Newcomer', username: 'newcomer' };
+      const putSpy = vi.spyOn(kv, 'put');
+
+      // 1. Visitor taps /start src_site while still unverified
+      await handleTelegramUpdate(
+        {
+          update_id: 1,
+          message: {
+            message_id: 10,
+            from: visitor,
+            chat: { id: 50101, type: 'private' },
+            text: '/start src_site',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+
+      // Pending source written with 7d TTL; visitor is NOT yet in visitor list
+      expect(await kv.get('src:50101')).toBe('site');
+      const srcPut = putSpy.mock.calls.find(([k]) => k === 'src:50101');
+      expect(srcPut?.[2]).toEqual({ expirationTtl: 7 * 86400 });
+      expect(await kv.get('user:50101')).toBeNull();
+
+      // 2. Visitor passes verification and sends first message
+      await kv.put('verified:50101', 'emoji:v1');
+      await handleTelegramUpdate(
+        {
+          update_id: 2,
+          message: {
+            message_id: 11,
+            from: visitor,
+            chat: { id: 50101, type: 'private' },
+            text: '你好，从小站过来的！',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+
+      const detail = await getVisitorDetail(env, '50101');
+      expect(detail.source).toBe('site');
+      expect(detail.source_at).toBeTruthy();
+      expect(await kv.get('src:50101')).toBeNull();
+
+      // DM push header card also displays the source
+      const headerPush = tgCalls.find(
+        (c) => c.method === 'sendMessage' && String(c.body.chat_id) === '999001' && String(c.body.text || '').includes('50101')
+      );
+      expect(headerPush?.body?.text).toContain('• 来源：个人小站');
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('keeps first-touch source only: never overwrites pending src:{uid} or existing visitor source', async () => {
+    const kv = createMemoryKV();
+    const env = {
+      TOPIC_MAP: kv,
+      BOT_TOKEN: '123456:TEST_TOKEN',
+      ADMIN_IDS: '999001',
+    };
+    await savePanelConfig(env, {
+      pmBot: { enableVerification: false, verificationMode: 'off', enableCasCheck: false },
+    });
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ ok: true, result: { message_id: 501 } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+    );
+
+    try {
+      const visitor = { id: 50202, first_name: 'FirstTouch' };
+      await handleTelegramUpdate(
+        {
+          update_id: 10,
+          message: { message_id: 20, from: visitor, chat: { id: 50202, type: 'private' }, text: '/start src_site' },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(await kv.get('src:50202')).toBe('site');
+
+      // Second /start with different channel must NOT overwrite
+      const putSpy = vi.spyOn(kv, 'put');
+      await handleTelegramUpdate(
+        {
+          update_id: 11,
+          message: { message_id: 21, from: visitor, chat: { id: 50202, type: 'private' }, text: '/start src_channel' },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(await kv.get('src:50202')).toBe('site');
+      expect(putSpy.mock.calls.filter(([k]) => k === 'src:50202')).toHaveLength(0);
+
+      // Persist onto profile via first message
+      await upsertVisitorProfile(env, visitor, { incrementMsg: true, lastPreview: 'hi' });
+      expect((await getVisitorDetail(env, '50202')).source).toBe('site');
+      expect(await kv.get('src:50202')).toBeNull();
+
+      // Returning visitor with existing source arriving via another link does not overwrite or write src:{uid}
+      putSpy.mockClear();
+      const wrote = await rememberPendingSource(env, '50202', 'poster');
+      expect(wrote).toBe(false);
+      expect(await kv.get('src:50202')).toBeNull();
+      expect(putSpy).not.toHaveBeenCalled();
+      expect((await getVisitorDetail(env, '50202')).source).toBe('site');
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('ignores /start panel, bare /start, invalid /start src_<script>, and admin /start src_site', async () => {
+    const kv = createMemoryKV();
+    const env = {
+      TOPIC_MAP: kv,
+      BOT_TOKEN: '123456:TEST_TOKEN',
+      ADMIN_IDS: '999001',
+    };
+    await savePanelConfig(env, {
+      pmBot: { enableVerification: true, verificationMode: 'emoji', enableCasCheck: false },
+    });
+
+    const tgCalls = [];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, opts) => {
+      tgCalls.push({ method: String(url).split('/').pop(), body: opts?.body ? JSON.parse(opts.body) : {} });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 600 + tgCalls.length } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    try {
+      // Non-src /start variants do not write src:* and still trigger normal verification
+      for (const [uid, text] of [
+        [50301, '/start panel'],
+        [50302, '/start'],
+        [50303, '/start src_<script>'],
+      ]) {
+        await handleTelegramUpdate(
+          {
+            update_id: uid,
+            message: { message_id: 30, from: { id: uid, first_name: 'Guest' }, chat: { id: uid, type: 'private' }, text },
+          },
+          env,
+          'https://panel.test'
+        );
+        expect(await kv.get(`src:${uid}`)).toBeNull();
+        // Normal verification flow still triggered
+        expect(tgCalls.some((c) => c.method === 'sendMessage' && Number(c.body.chat_id) === uid)).toBe(true);
+      }
+
+      // Admin /start src_site never records source
+      await handleTelegramUpdate(
+        {
+          update_id: 999,
+          message: {
+            message_id: 31,
+            from: { id: 999001, first_name: 'Owner' },
+            chat: { id: 999001, type: 'private' },
+            text: '/start src_site',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(await kv.get('src:999001')).toBeNull();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('records valid source from POST /api/chat/start and ignores invalid source', async () => {
+    const kv = createMemoryKV();
+    const botToken = '123456:CHAT_SRC_SECRET';
+    const env = {
+      TOPIC_MAP: kv,
+      BOT_TOKEN: botToken,
+      ADMIN_IDS: '999001',
+    };
+    await savePanelConfig(env, {
+      pmBot: { enableVerification: true, verificationMode: 'emoji', enableCasCheck: false },
+    });
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ ok: true, result: { message_id: 701 } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+    );
+
+    try {
+      const guest1Init = await signInitData(
+        { user: JSON.stringify({ id: 50401, first_name: 'PosterUser' }), auth_date: Math.floor(Date.now() / 1000) },
+        botToken
+      );
+      const res1 = await worker.fetch(
+        new Request('https://panel.test/api/chat/start', {
+          method: 'POST',
+          headers: { 'X-Telegram-Init-Data': guest1Init, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ source: 'poster' }),
+        }),
+        env
+      );
+      expect(res1.status).toBe(200);
+      expect(await kv.get('src:50401')).toBe('poster');
+
+      const guest2Init = await signInitData(
+        { user: JSON.stringify({ id: 50402, first_name: 'BadSrcUser' }), auth_date: Math.floor(Date.now() / 1000) },
+        botToken
+      );
+      const res2 = await worker.fetch(
+        new Request('https://panel.test/api/chat/start', {
+          method: 'POST',
+          headers: { 'X-Telegram-Init-Data': guest2Init, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ source: 'BAD <SCRIPT>' }),
+        }),
+        env
+      );
+      expect(res2.status).toBe(200);
+      expect(await kv.get('src:50402')).toBeNull();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('renders visitor card source with built-in label or HTML-escaped custom channel name', () => {
+    const baseDetail = {
+      userId: '50501',
+      displayName: 'Carol',
+      username: 'carol',
+      status: 'verified',
+      msg_count: 1,
+      visitor_msg_count: 1,
+      admin_msg_count: 0,
+      photo_count: 0,
+      link_count: 0,
+    };
+
+    const posterCard = buildVisitorCardText({ ...baseDetail, source: 'poster' });
+    expect(posterCard).toContain('• 来源：分享海报');
+
+    const customCard = buildVisitorCardText({ ...baseDetail, source: 'nodeseek' });
+    expect(customCard).toContain('• 来源：nodeseek');
+
+    const xssCard = buildVisitorCardText({ ...baseDetail, source: 'a<script>"x"</script>' });
+    expect(xssCard).not.toContain('<script>');
+    expect(xssCard).toContain('• 来源：a&lt;script&gt;&quot;x&quot;&lt;/script&gt;');
+
+    const noSourceCard = buildVisitorCardText({ ...baseDetail, source: '' });
+    expect(noSourceCard).not.toContain('• 来源：');
+  });
+
+  it('computes source stats on the fly with legacy visitors grouped under 未知 and zero KV writes on read', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv, ADMIN_IDS: '999001' };
+
+    await rememberPendingSource(env, '60101', 'poster');
+    await upsertVisitorProfile(env, { id: 60101, first_name: 'U1' }, { incrementMsg: true });
+    await rememberPendingSource(env, '60102', 'poster');
+    await upsertVisitorProfile(env, { id: 60102, first_name: 'U2' }, { incrementMsg: true });
+    await rememberPendingSource(env, '60103', 'nodeseek');
+    await upsertVisitorProfile(env, { id: 60103, first_name: 'U3' }, { incrementMsg: true });
+    // Legacy visitor without any source
+    await upsertVisitorProfile(env, { id: 60104, first_name: 'Legacy' }, { incrementMsg: true });
+
+    // Warm one-time migration flags & summary cache
+    const firstList = await listVisitors(env);
+    expect(firstList.sourceStats).toEqual([
+      { source: 'poster', label: '分享海报', count: 2 },
+      { source: 'nodeseek', label: 'nodeseek', count: 1 },
+      { source: '', label: '未知', count: 1 },
+    ]);
+
+    // Subsequent reads of listVisitors, getVisitorOverview, and computeSourceStats must produce ZERO KV writes
+    const putSpy = vi.spyOn(kv, 'put');
+    const secondList = await listVisitors(env);
+    const overview = await getVisitorOverview(env);
+    const directStats = computeSourceStats(secondList.items);
+
+    expect(putSpy).not.toHaveBeenCalled();
+    expect(secondList.sourceStats).toEqual(firstList.sourceStats);
+    expect(overview.sourceStats).toEqual(firstList.sourceStats);
+    expect(overview.recent.some((v) => v.userId === '60101' && v.source === 'poster')).toBe(true);
+    expect(directStats).toEqual(firstList.sourceStats);
+  });
+
+  it('builds source links correctly for bot, app, and web kinds and uses & when query already exists', () => {
+    for (const fn of [buildSourceLink, buildClientSourceLink]) {
+      expect(fn('https://t.me/mybot', 'site', 'bot')).toBe('https://t.me/mybot?start=src_site');
+      expect(fn('https://t.me/mybot', 'src_site', 'bot')).toBe('https://t.me/mybot?start=src_site');
+      expect(fn('https://t.me/mybot/panel', 'poster', 'app')).toBe('https://t.me/mybot/panel?startapp=src_poster');
+      expect(fn('https://example.com/', 'link', 'web')).toBe('https://example.com/?src=link');
+
+      // Preserves existing query string with `&`
+      expect(fn('https://t.me/mybot?ref=1', 'channel', 'bot')).toBe('https://t.me/mybot?ref=1&start=src_channel');
+      expect(fn('https://t.me/mybot/panel?foo=bar', 'link', 'app')).toBe('https://t.me/mybot/panel?foo=bar&startapp=src_link');
+      expect(fn('https://example.com/?tab=profile', 'poster', 'web')).toBe('https://example.com/?tab=profile&src=poster');
+
+      // Invalid source returns base untouched
+      expect(fn('https://t.me/mybot', 'INVALID!', 'bot')).toBe('https://t.me/mybot');
+    }
+  });
+});
+
+describe('Monthly unique visitor counter (v1.8)', () => {
+  it('counts a returning visitor once per month and performs zero KV writes on repeat opens', async () => {
+    const kv = createMemoryKV();
+    const botToken = '123456:VISIT_SECRET';
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '900001' };
+
+    const visitorInit = await signInitData(
+      { user: JSON.stringify({ id: 70001, first_name: 'Alice' }), auth_date: Math.floor(Date.now() / 1000) },
+      botToken
+    );
+
+    const putSpy = vi.spyOn(kv, 'put');
+
+    // Open #1 -> writes visit:seen:* and visit:count:* (2 writes)
+    const r1 = await worker.fetch(
+      new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': visitorInit } }),
+      env
+    );
+    expect(r1.status).toBe(200);
+    expect(putSpy).toHaveBeenCalledTimes(2);
+
+    // Verify TTLs on both KV keys
+    const seenCall = putSpy.mock.calls.find(([k]) => k.startsWith('visit:seen:'));
+    const countCall = putSpy.mock.calls.find(([k]) => k.startsWith('visit:count:'));
+    expect(seenCall?.[2]).toEqual({ expirationTtl: VISIT_SEEN_TTL_SECONDS });
+    expect(countCall?.[2]).toEqual({ expirationTtl: VISIT_COUNT_TTL_SECONDS });
+
+    // Opens #2 & #3 -> ZERO KV writes
+    putSpy.mockClear();
+    const r2 = await worker.fetch(
+      new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': visitorInit } }),
+      env
+    );
+    const r3 = await worker.fetch(
+      new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': visitorInit } }),
+      env
+    );
+    expect(r2.status).toBe(200);
+    expect(r3.status).toBe(200);
+    expect(putSpy).not.toHaveBeenCalled();
+
+    const stats = await getVisitStats(env);
+    expect(stats.thisMonth).toBe(1);
+  });
+
+  it('counts two distinct Telegram visitors as 2 and ignores admin, preview, and anonymous web visits', async () => {
+    const kv = createMemoryKV();
+    const botToken = '123456:VISIT_MULTI';
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '900001', DEV_PREVIEW: 'true' };
+
+    const u1Init = await signInitData(
+      { user: JSON.stringify({ id: 71001, first_name: 'One' }), auth_date: Math.floor(Date.now() / 1000) },
+      botToken
+    );
+    const u2Init = await signInitData(
+      { user: JSON.stringify({ id: 71002, first_name: 'Two' }), auth_date: Math.floor(Date.now() / 1000) },
+      botToken
+    );
+    const adminInit = await signInitData(
+      { user: JSON.stringify({ id: 900001, first_name: 'Owner' }), auth_date: Math.floor(Date.now() / 1000) },
+      botToken
+    );
+
+    // 2 real Telegram visitors
+    await worker.fetch(
+      new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': u1Init } }),
+      env
+    );
+    await worker.fetch(
+      new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': u2Init } }),
+      env
+    );
+    expect((await getVisitStats(env)).thisMonth).toBe(2);
+
+    // Admin, local preview (guest & admin), and anonymous web visits must NOT increment count
+    await worker.fetch(
+      new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': adminInit } }),
+      env
+    );
+    await worker.fetch(
+      new Request('http://localhost:8787/api/bootstrap', { headers: { 'X-Dev-Role': 'guest' } }),
+      env
+    );
+    await worker.fetch(
+      new Request('http://localhost:8787/api/bootstrap', { headers: { 'X-Dev-Role': 'admin' } }),
+      env
+    );
+    await worker.fetch(new Request('https://panel.test/api/bootstrap'), env);
+
+    expect((await getVisitStats(env)).thisMonth).toBe(2);
+  });
+
+  it('calculates month rollover using owner timezoneOffsetHours and exposes lastMonth accurately', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv };
+    const cfg = { community: { timezoneOffsetHours: 8 } };
+
+    // UTC 2026-01-31 15:30 = UTC+8 2026-01-31 23:30 -> January (202601)
+    const janDate = new Date('2026-01-31T15:30:00Z');
+    expect(getMonthKeys(janDate, 8)).toEqual({ thisMonthKey: '202601', lastMonthKey: '202512' });
+    await recordMonthlyVisit(env, '72001', cfg, janDate);
+    await recordMonthlyVisit(env, '72002', cfg, janDate);
+
+    // UTC 2026-01-31 16:30 = UTC+8 2026-02-01 00:30 -> February (202602)
+    const febDate = new Date('2026-01-31T16:30:00Z');
+    expect(getMonthKeys(febDate, 8)).toEqual({ thisMonthKey: '202602', lastMonthKey: '202601' });
+
+    // Before anyone opens in Feb: thisMonth is 0, lastMonth is 2
+    expect(await getVisitStats(env, cfg, febDate)).toEqual({ thisMonth: 0, lastMonth: 2 });
+
+    // Same user opening in Feb counts as 1 for Feb without touching Jan
+    await recordMonthlyVisit(env, '72001', cfg, febDate);
+    expect(await getVisitStats(env, cfg, febDate)).toEqual({ thisMonth: 1, lastMonth: 2 });
+  });
+
+  it('fails open on KV write errors so /api/bootstrap still succeeds normally', async () => {
+    const kv = createMemoryKV();
+    const botToken = '123456:VISIT_FAILOPEN';
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '900001' };
+
+    vi.spyOn(kv, 'put').mockRejectedValue(new Error('KV daily write quota exceeded'));
+
+    const guestInit = await signInitData(
+      { user: JSON.stringify({ id: 73001, first_name: 'QuotaTest' }), auth_date: Math.floor(Date.now() / 1000) },
+      botToken
+    );
+    const res = await worker.fetch(
+      new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': guestInit } }),
+      env
+    );
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.ok).toBe(true);
+  });
+
+  it('hides visitStats when showVisitCounter is false, exposes only thisMonth when true, and always gives admin both numbers', async () => {
+    const kv = createMemoryKV();
+    const botToken = '123456:VISIT_VISIBILITY';
+    const env = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '900001' };
+
+    const cfgDefault = await loadPanelConfig(env);
+    expect(cfgDefault.profile.showVisitCounter).toBe(false);
+
+    // Seed this month + last month totals
+    const { thisMonthKey, lastMonthKey } = getMonthKeys(new Date(), cfgDefault.community.timezoneOffsetHours);
+    await kv.put(`visit:count:${thisMonthKey}`, JSON.stringify({ n: 42 }));
+    await kv.put(`visit:count:${lastMonthKey}`, JSON.stringify({ n: 31 }));
+
+    const guestInit = await signInitData(
+      { user: JSON.stringify({ id: 74001, first_name: 'Viewer' }), auth_date: Math.floor(Date.now() / 1000) },
+      botToken
+    );
+    const adminInit = await signInitData(
+      { user: JSON.stringify({ id: 900001, first_name: 'Owner' }), auth_date: Math.floor(Date.now() / 1000) },
+      botToken
+    );
+
+    // 1. showVisitCounter === false (default)
+    const guestOff = await (
+      await worker.fetch(
+        new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': guestInit } }),
+        env
+      )
+    ).json();
+    expect('visitStats' in guestOff.config).toBe(false);
+    expect('visitStats' in guestOff).toBe(false);
+
+    const adminOff = await (
+      await worker.fetch(
+        new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': adminInit } }),
+        env
+      )
+    ).json();
+    expect('visitStats' in adminOff.config).toBe(false);
+    expect(adminOff.visitStats).toEqual({ thisMonth: 43, lastMonth: 31 }); // 42 seeded + guest 74001
+
+    // 2. showVisitCounter === true -> public config exposes ONLY thisMonth (never lastMonth)
+    await savePanelConfig(env, { profile: { showVisitCounter: true } });
+
+    const guestOn = await (
+      await worker.fetch(
+        new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': guestInit } }),
+        env
+      )
+    ).json();
+    expect(guestOn.config.visitStats).toEqual({ thisMonth: 43 });
+    expect('lastMonth' in guestOn.config.visitStats).toBe(false);
+    expect('visitStats' in guestOn).toBe(false);
+
+    const adminOn = await (
+      await worker.fetch(
+        new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': adminInit } }),
+        env
+      )
+    ).json();
+    expect(adminOn.config.visitStats).toEqual({ thisMonth: 43 });
+    expect(adminOn.visitStats).toEqual({ thisMonth: 43, lastMonth: 31 });
+  });
+});
+
+describe('Card footer signature & Get-Same-Card config (v1.8)', () => {
+  it('defaults showPoweredBy to true in public config', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv };
+    const cfg = await loadPanelConfig(env);
+    expect(cfg.profile.showPoweredBy).toBe(true);
+
+    const pub = sanitizePublicConfig(cfg, env, false);
+    expect(pub.profile.showPoweredBy).toBe(true);
+  });
+
+  it('persists showPoweredBy: false and normalizes non-boolean values to strict booleans', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv };
+
+    // Disable explicitly
+    await savePanelConfig(env, { profile: { showPoweredBy: false } });
+    let loaded = await loadPanelConfig(env);
+    expect(loaded.profile.showPoweredBy).toBe(false);
+    expect(sanitizePublicConfig(loaded, env, false).profile.showPoweredBy).toBe(false);
+
+    // Subsequent unrelated profile edit preserves showPoweredBy: false
+    await savePanelConfig(env, { profile: { displayName: 'KeepHidden' } });
+    loaded = await loadPanelConfig(env);
+    expect(loaded.profile.showPoweredBy).toBe(false);
+
+    // Non-boolean truthy value normalizes to boolean true
+    await savePanelConfig(env, { profile: { showPoweredBy: 'yes' } });
+    loaded = await loadPanelConfig(env);
+    expect(loaded.profile.showPoweredBy).toBe(true);
+    expect(typeof sanitizePublicConfig(loaded, env, false).profile.showPoweredBy).toBe('boolean');
+
+    // Non-boolean falsy values (0, '', null) normalize to boolean false
+    for (const raw of [0, '', null]) {
+      await savePanelConfig(env, { profile: { showPoweredBy: raw } });
+      loaded = await loadPanelConfig(env);
+      expect(loaded.profile.showPoweredBy).toBe(false);
+      expect(sanitizePublicConfig(loaded, env, false).profile.showPoweredBy).toBe(false);
+    }
+  });
+
+  it('defaults showPoweredBy to true when loading legacy KV config without the field', async () => {
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv };
+    await kv.put(
+      'config:panel',
+      JSON.stringify({
+        profile: {
+          displayName: 'LegacyCard',
+          tagline: 'From v1.7',
+        },
+      })
+    );
+
+    const loaded = await loadPanelConfig(env);
+    expect(loaded.profile.displayName).toBe('LegacyCard');
+    expect(loaded.profile.showPoweredBy).toBe(true);
+    expect(sanitizePublicConfig(loaded, env, false).profile.showPoweredBy).toBe(true);
   });
 });

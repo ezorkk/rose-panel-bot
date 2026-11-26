@@ -5,9 +5,11 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Copy,
   ExternalLink,
   GitFork,
   Globe,
+  Link2,
   Lock,
   Plus,
   RefreshCw,
@@ -17,7 +19,8 @@ import {
   X,
 } from 'lucide-react';
 import { apiRequest } from '../lib/api.js';
-import { confirmDialog, openExternalUrl } from '../lib/telegram.js';
+import { BRAND_SIGNATURE } from '../lib/brand.js';
+import { buildSourceLink, confirmDialog, copyText, openExternalUrl } from '../lib/telegram.js';
 import { TgStickerMedia, TicketEmblem } from './Emblems.jsx';
 import {
   CHANGELOG_URL,
@@ -64,6 +67,8 @@ const PROBE_PROVIDER_OPTIONS = [
 export default function SettingsDrawer({
   initialSection = 'profile',
   adminConfig,
+  botInfo = null,
+  shareUrl = '',
   appVersion = '',
   onOpenWhatsNew,
   onClose,
@@ -75,6 +80,9 @@ export default function SettingsDrawer({
   const [saving, setSaving] = useState(false);
   const [testingProbe, setTestingProbe] = useState(false);
   const [probeTestResult, setProbeTestResult] = useState(null);
+  const [alertNodes, setAlertNodes] = useState([]);
+  const [loadingAlertNodes, setLoadingAlertNodes] = useState(false);
+  const [sendingAlertTest, setSendingAlertTest] = useState(false);
   const [hideStarStrip, setHideStarStrip] = useState(() => {
     try {
       return localStorage.getItem(HIDE_STAR_STRIP_STORAGE_KEY) === '1';
@@ -273,6 +281,78 @@ export default function SettingsDrawer({
     }));
   };
 
+  const defaultProbeAlerts = {
+    enabled: false,
+    intervalMinutes: 5,
+    confirmChecks: 2,
+    notifyRecovery: true,
+    mutedNodes: [],
+    resource: { enabled: false, cpu: 90, ram: 90, disk: 90, sustainChecks: 3 },
+  };
+
+  const updateProbeAlerts = (patch) => {
+    setDraft((prev) => ({
+      ...prev,
+      probe: {
+        ...prev.probe,
+        alerts: {
+          ...defaultProbeAlerts,
+          ...(prev.probe?.alerts || {}),
+          ...patch,
+          resource: {
+            ...defaultProbeAlerts.resource,
+            ...(prev.probe?.alerts?.resource || {}),
+            ...(patch?.resource || {}),
+          },
+        },
+      },
+    }));
+  };
+
+  const toggleMutedNode = (uuid) => {
+    const id = String(uuid || '').trim();
+    if (!id) return;
+    const current = Array.isArray(draft.probe?.alerts?.mutedNodes) ? draft.probe.alerts.mutedNodes : [];
+    const next = current.includes(id) ? current.filter((x) => x !== id) : [...current, id];
+    updateProbeAlerts({ mutedNodes: next });
+  };
+
+  useEffect(() => {
+    if (section !== 'probe' || !draft.probe?.alerts?.enabled || !String(draft.probe?.url || '').trim()) {
+      return;
+    }
+    if (alertNodes.length > 0 || loadingAlertNodes) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        setLoadingAlertNodes(true);
+        const res = await apiRequest('/api/probe');
+        if (!cancelled && Array.isArray(res?.nodes) && !res.demo) {
+          setAlertNodes(res.nodes);
+        }
+      } catch {
+        // Non-fatal: user can still click "测试探针连接" to pull nodes
+      } finally {
+        if (!cancelled) setLoadingAlertNodes(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [section, draft.probe?.alerts?.enabled, draft.probe?.url]);
+
+  const handleTestProbeAlert = async () => {
+    try {
+      setSendingAlertTest(true);
+      const res = await apiRequest('/api/admin/probe/alert-test', { method: 'POST' });
+      onToast(res.ok ? `✅ 已发送到 ${res.targetLabel || '通知渠道'}` : res.error || '发送失败');
+    } catch (err) {
+      onToast(err.message);
+    } finally {
+      setSendingAlertTest(false);
+    }
+  };
+
   const updateEmblem = (patch) => {
     setDraft((prev) => ({
       ...prev,
@@ -428,6 +508,9 @@ export default function SettingsDrawer({
         ok: true,
         text: `连接成功 (${res.protocol})！读取到 ${res.summary?.total || 0} 台节点（在线 ${res.summary?.online || 0} 台）`,
       });
+      if (Array.isArray(res.nodes) && !res.demo) {
+        setAlertNodes(res.nodes);
+      }
     } catch (err) {
       setProbeTestResult({ ok: false, text: err.message });
     } finally {
@@ -792,6 +875,76 @@ export default function SettingsDrawer({
                 />
               </div>
 
+              <div
+                style={{
+                  marginTop: 12,
+                  paddingTop: 12,
+                  borderTop: '1px solid var(--border)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 12,
+                }}
+              >
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>在名片上公开显示本月访客数</div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3, lineHeight: 1.5 }}>
+                    只统计通过 Telegram 打开名片的访客，每人每月计一次，不含你自己。
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={Boolean(draft.profile.showVisitCounter)}
+                  className={`switch ${draft.profile.showVisitCounter ? 'on' : ''}`}
+                  onClick={() => updateField('profile', 'showVisitCounter', !draft.profile.showVisitCounter)}
+                >
+                  <span className="switch-knob" />
+                </button>
+              </div>
+
+              <div
+                style={{
+                  marginTop: 12,
+                  paddingTop: 12,
+                  borderTop: '1px solid var(--border)',
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 12,
+                  }}
+                >
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>在名片底部显示 RosePanel 署名</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3, lineHeight: 1.5 }}>
+                      署名能帮助更多人发现 RosePanel，感谢你的支持 🌹
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={draft.profile.showPoweredBy !== false}
+                    className={`switch ${draft.profile.showPoweredBy !== false ? 'on' : ''}`}
+                    onClick={() => updateField('profile', 'showPoweredBy', !(draft.profile.showPoweredBy !== false))}
+                  >
+                    <span className="switch-knob" />
+                  </button>
+                </div>
+
+                {draft.profile.showPoweredBy !== false && (
+                  <div className="powered-by-preview">
+                    <span className="powered-by-preview-text">
+                      {BRAND_SIGNATURE} · <span className="card-powered-by-cta">想要同款？</span>
+                    </span>
+                    <span className="powered-by-preview-badge">访客可见</span>
+                  </div>
+                )}
+              </div>
+
               <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
                 <div className="field-label" style={{ marginBottom: 8 }}>
                   开屏加载页风格（新访客首次打开 0ms 即显）
@@ -878,6 +1031,85 @@ export default function SettingsDrawer({
                   </div>
                 ))}
               </div>
+            </div>
+
+            {/* Promo & Referral Links Helper (Section 8) */}
+            <div className="card">
+              <div className="card-header" style={{ marginBottom: 8 }}>
+                <span className="card-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <Link2 size={15} color="var(--accent)" /> 名片分享 · 推广链接
+                </span>
+              </div>
+              {(() => {
+                const botUsername = String(botInfo?.username || draft.botUsername || '')
+                  .trim()
+                  .replace(/^@/, '');
+                const appShortName = String(botInfo?.appShortName || '')
+                  .trim()
+                  .replace(/^\/+|\/+$/g, '');
+                if (!botUsername) {
+                  return (
+                    <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+                      需要先配置 <code>BOT_USERNAME</code>。
+                    </div>
+                  );
+                }
+                const siteShareBase =
+                  String(shareUrl || '').trim() ||
+                  (typeof window !== 'undefined' ? `${window.location.origin}/` : '');
+                const cardShareLink = appShortName
+                  ? buildSourceLink(`https://t.me/${botUsername}/${appShortName}`, 'link', 'app')
+                  : buildSourceLink(siteShareBase, 'link', 'web');
+                const promoLinks = [
+                  {
+                    id: 'site',
+                    label: '放在个人小站的「联系我」按钮',
+                    url: buildSourceLink(`https://t.me/${botUsername}`, 'site', 'bot'),
+                  },
+                  {
+                    id: 'channel',
+                    label: '放在频道简介',
+                    url: buildSourceLink(`https://t.me/${botUsername}`, 'channel', 'bot'),
+                  },
+                  ...(cardShareLink
+                    ? [
+                        {
+                          id: 'card',
+                          label: '分享名片',
+                          url: cardShareLink,
+                        },
+                      ]
+                    : []),
+                ];
+                return (
+                  <>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {promoLinks.map((item) => (
+                        <div key={item.id} className="promo-link-row">
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div className="promo-link-label">{item.label}</div>
+                            <div className="promo-link-url">{item.url}</div>
+                          </div>
+                          <button
+                            type="button"
+                            className="btn btn-soft btn-sm"
+                            style={{ flexShrink: 0 }}
+                            onClick={async () => {
+                              const ok = await copyText(item.url);
+                              onToast(ok ? `已复制「${item.label}」链接` : '复制失败');
+                            }}
+                          >
+                            <Copy size={12} /> 复制
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 10, lineHeight: 1.55 }}>
+                      也可以把 <code>src_</code> 后面换成任意英文渠道名，例如 <code>src_nodeseek</code>，来源统计里就会单独显示。
+                    </div>
+                  </>
+                );
+              })()}
             </div>
           </>
         )}
@@ -1001,7 +1233,21 @@ export default function SettingsDrawer({
           const activeProvider =
             PROBE_PROVIDER_OPTIONS.find((o) => o.id === (draft.probe.provider || 'komari')) ||
             PROBE_PROVIDER_OPTIONS[0];
+          const probeAlerts = {
+            ...defaultProbeAlerts,
+            ...(draft.probe.alerts || {}),
+            resource: {
+              ...defaultProbeAlerts.resource,
+              ...(draft.probe.alerts?.resource || {}),
+            },
+          };
+          const alertInboxMode = adminConfig?.inboxMode || 'off';
+          const alertInboxOff = alertInboxMode === 'off';
+          const mutedList = Array.isArray(probeAlerts.mutedNodes) ? probeAlerts.mutedNodes : [];
+          const knownUuids = new Set(alertNodes.map((n) => String(n.uuid || '')));
+          const extraMutedUuids = mutedList.filter((id) => !knownUuids.has(id));
           return (
+          <>
           <div className="card">
             <div className="field">
               <label className="field-label">探针类型</label>
@@ -1104,6 +1350,257 @@ export default function SettingsDrawer({
               </div>
             )}
           </div>
+
+          <div className="card">
+            <div className="list-row" style={{ paddingTop: 0 }}>
+              <div className="row-main">
+                <div className="row-title" style={{ fontSize: 14 }}>🔔 掉线告警（默认关闭）</div>
+                <div className="row-desc wrap">
+                  节点掉线、恢复或持续高负载时由 Bot 主动通知站长（关闭时零探针请求、零 KV 写入）
+                </div>
+              </div>
+              <button
+                type="button"
+                className={`switch ${probeAlerts.enabled ? 'on' : ''}`}
+                disabled={alertInboxOff}
+                style={alertInboxOff ? { opacity: 0.45, cursor: 'not-allowed' } : undefined}
+                onClick={() => {
+                  if (alertInboxOff) return;
+                  updateProbeAlerts({ enabled: !probeAlerts.enabled });
+                }}
+              >
+                <span className="switch-knob" />
+              </button>
+            </div>
+
+            {alertInboxOff ? (
+              <div
+                style={{
+                  marginTop: 8,
+                  fontSize: 12,
+                  padding: '8px 11px',
+                  borderRadius: 12,
+                  background: 'var(--amber-soft)',
+                  color: 'var(--amber)',
+                  lineHeight: 1.5,
+                }}
+              >
+                ⚠️ 请先配置 ADMIN_IDS 或绑定通知群
+              </div>
+            ) : (
+              <div
+                style={{
+                  marginTop: 8,
+                  fontSize: 12,
+                  padding: '8px 11px',
+                  borderRadius: 12,
+                  background: 'var(--bg-subtle)',
+                  color: 'var(--text-secondary)',
+                  lineHeight: 1.5,
+                }}
+              >
+                通知会发到：
+                {alertInboxMode === 'topic' ? '通知群「🔔 探针告警」话题' : 'Bot 私聊'}
+              </div>
+            )}
+
+            {probeAlerts.enabled && !alertInboxOff && (
+              <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
+                  <div className="field" style={{ marginBottom: 0 }}>
+                    <label className="field-label">检测间隔</label>
+                    <select
+                      className="input"
+                      value={probeAlerts.intervalMinutes}
+                      onChange={(e) => updateProbeAlerts({ intervalMinutes: Number(e.target.value) })}
+                    >
+                      <option value={5}>每 5 分钟</option>
+                      <option value={10}>每 10 分钟</option>
+                      <option value={15}>每 15 分钟</option>
+                      <option value={30}>每 30 分钟</option>
+                    </select>
+                  </div>
+                  <div className="field" style={{ marginBottom: 0 }}>
+                    <label className="field-label">确认次数（1–5）</label>
+                    <input
+                      className="input"
+                      type="number"
+                      min="1"
+                      max="5"
+                      value={probeAlerts.confirmChecks}
+                      onChange={(e) =>
+                        updateProbeAlerts({
+                          confirmChecks: e.target.value === '' ? '' : Number(e.target.value),
+                        })
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div className="list-row">
+                  <div className="row-main">
+                    <div className="row-title" style={{ fontSize: 13 }}>节点恢复时发送静默通知</div>
+                    <div className="row-desc wrap">仅对之前通知过掉线的节点发送恢复提醒（静默不响铃）</div>
+                  </div>
+                  <button
+                    type="button"
+                    className={`switch ${probeAlerts.notifyRecovery !== false ? 'on' : ''}`}
+                    onClick={() => updateProbeAlerts({ notifyRecovery: probeAlerts.notifyRecovery === false })}
+                  >
+                    <span className="switch-knob" />
+                  </button>
+                </div>
+
+                <div className="list-row" style={{ marginTop: 4, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+                  <div className="row-main">
+                    <div className="row-title" style={{ fontSize: 13 }}>资源超限告警（CPU / 内存 / 磁盘）</div>
+                    <div className="row-desc wrap">连续多次达到阈值时提醒，回落后自动清除（不发恢复通知）</div>
+                  </div>
+                  <button
+                    type="button"
+                    className={`switch ${probeAlerts.resource.enabled ? 'on' : ''}`}
+                    onClick={() =>
+                      updateProbeAlerts({ resource: { enabled: !probeAlerts.resource.enabled } })
+                    }
+                  >
+                    <span className="switch-knob" />
+                  </button>
+                </div>
+
+                {probeAlerts.resource.enabled && (
+                  <div
+                    style={{
+                      background: 'var(--bg-subtle)',
+                      borderRadius: 14,
+                      padding: 10,
+                      marginTop: 8,
+                      marginBottom: 10,
+                    }}
+                  >
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                      <div className="field" style={{ marginBottom: 0 }}>
+                        <label className="field-label">CPU 阈值（%，0 禁用）</label>
+                        <input
+                          className="input"
+                          type="number"
+                          min="0"
+                          max="100"
+                          value={probeAlerts.resource.cpu}
+                          onChange={(e) =>
+                            updateProbeAlerts({
+                              resource: { cpu: e.target.value === '' ? '' : Number(e.target.value) },
+                            })
+                          }
+                        />
+                      </div>
+                      <div className="field" style={{ marginBottom: 0 }}>
+                        <label className="field-label">内存阈值（%，0 禁用）</label>
+                        <input
+                          className="input"
+                          type="number"
+                          min="0"
+                          max="100"
+                          value={probeAlerts.resource.ram}
+                          onChange={(e) =>
+                            updateProbeAlerts({
+                              resource: { ram: e.target.value === '' ? '' : Number(e.target.value) },
+                            })
+                          }
+                        />
+                      </div>
+                      <div className="field" style={{ marginBottom: 0 }}>
+                        <label className="field-label">磁盘阈值（%，0 禁用）</label>
+                        <input
+                          className="input"
+                          type="number"
+                          min="0"
+                          max="100"
+                          value={probeAlerts.resource.disk}
+                          onChange={(e) =>
+                            updateProbeAlerts({
+                              resource: { disk: e.target.value === '' ? '' : Number(e.target.value) },
+                            })
+                          }
+                        />
+                      </div>
+                      <div className="field" style={{ marginBottom: 0 }}>
+                        <label className="field-label">持续次数（1–10）</label>
+                        <input
+                          className="input"
+                          type="number"
+                          min="1"
+                          max="10"
+                          value={probeAlerts.resource.sustainChecks}
+                          onChange={(e) =>
+                            updateProbeAlerts({
+                              resource: {
+                                sustainChecks: e.target.value === '' ? '' : Number(e.target.value),
+                              },
+                            })
+                          }
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+                  <div className="field-label" style={{ marginBottom: 6 }}>
+                    静音节点（点击切换，静音后完全跳过检测与通知）
+                  </div>
+                  {loadingAlertNodes ? (
+                    <div className="row-desc">正在加载节点列表…</div>
+                  ) : alertNodes.length > 0 || extraMutedUuids.length > 0 ? (
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                      {alertNodes.map((node) => {
+                        const uuid = String(node.uuid || '');
+                        const muted = mutedList.includes(uuid);
+                        return (
+                          <button
+                            key={uuid}
+                            type="button"
+                            className={`pill ${muted ? 'amber' : ''}`}
+                            style={{ cursor: 'pointer', fontSize: 11 }}
+                            onClick={() => toggleMutedNode(uuid)}
+                          >
+                            {muted ? '🔇 ' : ''}
+                            {node.region ? `${node.region} ` : ''}
+                            {node.name}
+                          </button>
+                        );
+                      })}
+                      {extraMutedUuids.map((uuid) => (
+                        <button
+                          key={uuid}
+                          type="button"
+                          className="pill amber"
+                          style={{ cursor: 'pointer', fontSize: 11 }}
+                          onClick={() => toggleMutedNode(uuid)}
+                        >
+                          🔇 {uuid}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="row-desc wrap">
+                      暂未拉取到节点列表：请先填写探针地址并点击上方「测试探针连接」或保存后重新打开。
+                    </div>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  className="btn btn-soft btn-block"
+                  style={{ marginTop: 12 }}
+                  disabled={sendingAlertTest}
+                  onClick={handleTestProbeAlert}
+                >
+                  {sendingAlertTest ? '发送中…' : '🔔 发送测试告警'}
+                </button>
+              </div>
+            )}
+          </div>
+          </>
           );
         })()}
 

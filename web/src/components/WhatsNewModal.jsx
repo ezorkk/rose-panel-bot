@@ -3,11 +3,44 @@ import { ExternalLink, Sparkles, Star, X } from 'lucide-react';
 import { haptic, openExternalUrl } from '../lib/telegram.js';
 
 export const REPO_URL = 'https://github.com/mango0114/rose-panel-bot';
+// Verified against live GitHub README heading anchor: 🚀 极简部署（5 分钟免费上线）
+export const DEPLOY_GUIDE_URL = `${REPO_URL}#${encodeURIComponent('-极简部署5-分钟免费上线')}`;
 export const CHANGELOG_URL = 'https://github.com/mango0114/rose-panel-bot/blob/main/CHANGELOG.md';
 export const SEEN_VERSION_STORAGE_KEY = 'rose_seen_version';
 export const HIDE_STAR_STRIP_STORAGE_KEY = 'rose_hide_star_strip';
 
 export const RECENT_RELEASES = [
+  {
+    version: '1.8.0',
+    url: 'https://github.com/mango0114/rose-panel-bot/releases/tag/v1.8.0',
+    items: [
+      {
+        tag: '新增',
+        tone: 'new',
+        text: '探针掉线 / 恢复与 CPU·内存·磁盘超限告警（默认关闭，在「设置 → 节点探针」一键开启，支持静音节点与测试告警）',
+      },
+      {
+        tag: '新增',
+        tone: 'new',
+        text: '名片页新增「分享名片」一键生成浅/深色二维码海报与社交平台链接预览（仅含公开名片信息）',
+      },
+      {
+        tag: '新增',
+        tone: 'new',
+        text: '访客来源追踪（src_<渠道名>）与设置页推广链接助手，在访客卡片与访客列表顶部查看各渠道来源统计',
+      },
+      {
+        tag: '新增',
+        tone: 'new',
+        text: '按人去重的「本月访客数」统计（站长在访客页查看本月/上月人数，可按需开启在名片底部公开显示，默认关闭）',
+      },
+      {
+        tag: '新增',
+        tone: 'new',
+        text: '名片底部新增 RosePanel 小字署名和「想要同款？」引导，可在设置里关闭',
+      },
+    ],
+  },
   {
     version: '1.7.0',
     url: 'https://github.com/mango0114/rose-panel-bot/releases/tag/v1.7.0',
@@ -139,7 +172,7 @@ export function StarSupportBanner({ onDismiss = null, style = undefined }) {
 }
 
 export default function WhatsNewModal({
-  appVersion = '1.7.0',
+  appVersion = '1.8.0',
   previousVersion = '',
   mode = 'auto',
   onClose,

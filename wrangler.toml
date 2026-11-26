@@ -33,3 +33,6 @@ ENABLE_CHECKIN = "false"
 
 [previews.vars]
 ENABLE_CHECKIN = "false"
+
+[triggers]
+crons = ["*/5 * * * *"]

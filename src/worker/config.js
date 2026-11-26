@@ -1,5 +1,7 @@
 // Configuration defaults and KV storage helpers for RosePanel Bot
 
+import { buildMiniAppDirectLink } from './telegram.js';
+
 export const LEVELS = [
   { level: 1, title: '初遇者', minXp: 0, badge: 'petal', color: '#E38AA6' },
   { level: 2, title: '漫游者', minXp: 100, badge: 'compass', color: '#D96B90' },
@@ -56,6 +58,21 @@ function isLegacyDefaultTgSocial(item) {
   );
 }
 
+export const DEFAULT_PROBE_ALERTS = {
+  enabled: false, // 总开关，默认关闭
+  intervalMinutes: 5, // 5 | 10 | 15 | 30
+  confirmChecks: 2, // 1–5
+  notifyRecovery: true,
+  mutedNodes: [], // 节点 uuid 列表
+  resource: {
+    enabled: false, // 资源告警单独开关，默认关闭
+    cpu: 90, // 50–100，填 0 表示不检测这一项
+    ram: 90,
+    disk: 90,
+    sustainChecks: 3, // 1–10
+  },
+};
+
 export const DEFAULT_CONFIG = {
   profile: {
     displayName: 'RosePanel',
@@ -72,6 +89,8 @@ export const DEFAULT_CONFIG = {
     labelsRev: PROFILE_LABELS_REV,
     notice: '',
     tags: '',
+    showVisitCounter: false, // 是否在名片上公开显示本月访客数，默认不公开
+    showPoweredBy: true, // 名片底部是否显示「Made with RosePanel · 想要同款？」，默认显示
     noteTitle: '来信礼仪',
     noteLines:
       '初次私聊请直接说明来意，不用只发「在吗」\n欢迎技术交流、友链与合作，谢绝广告推销\n看到消息后会尽快回复，请稍作等待 🌙',
@@ -114,6 +133,7 @@ export const DEFAULT_CONFIG = {
     cacheTtlSeconds: 15,
     demoMode: false,
     visibility: 'public', // public | private
+    alerts: structuredClone(DEFAULT_PROBE_ALERTS),
   },
   community: {
     enableCheckin: false, // 个人名片模式默认关闭；群社区部署时可一键开启
@@ -263,7 +283,69 @@ export function normalizeSplash(baseSplash = DEFAULT_SPLASH, override = null) {
 }
 
 export const PROBE_PROVIDER_IDS = ['komari', 'nezha', 'nodeget', 'json'];
+export const ALERT_INTERVAL_OPTIONS = [5, 10, 15, 30];
 const AVATAR_MODES = ['bot', 'owner', 'custom'];
+
+function clampInt(val, min, max, fallback) {
+  if (val === '' || val === null || val === undefined) return fallback;
+  const n = Number(val);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(Math.round(n), min), max);
+}
+
+function clampAlertThreshold(val, fallback = 90) {
+  if (val === '' || val === null || val === undefined) return fallback;
+  const n = Number(val);
+  if (!Number.isFinite(n)) return fallback;
+  const rounded = Math.round(n);
+  if (rounded <= 0) return 0; // 0 disables monitoring for this metric
+  return Math.min(Math.max(rounded, 50), 100);
+}
+
+export function normalizeProbeAlerts(baseAlerts = DEFAULT_PROBE_ALERTS, override = null) {
+  const base = baseAlerts && typeof baseAlerts === 'object' ? baseAlerts : DEFAULT_PROBE_ALERTS;
+  const ov = override && typeof override === 'object' ? override : {};
+  const rawInterval = Number(ov.intervalMinutes ?? base.intervalMinutes ?? DEFAULT_PROBE_ALERTS.intervalMinutes);
+  const intervalMinutes = ALERT_INTERVAL_OPTIONS.includes(rawInterval)
+    ? rawInterval
+    : DEFAULT_PROBE_ALERTS.intervalMinutes;
+  const rawMuted = Array.isArray(ov.mutedNodes)
+    ? ov.mutedNodes
+    : Array.isArray(base.mutedNodes)
+      ? base.mutedNodes
+      : [];
+  const mutedNodes = Array.from(
+    new Set(
+      rawMuted
+        .map((id) => String(id ?? '').trim().slice(0, 128))
+        .filter(Boolean)
+    )
+  ).slice(0, 200);
+
+  const baseRes =
+    base.resource && typeof base.resource === 'object' ? base.resource : DEFAULT_PROBE_ALERTS.resource;
+  const ovRes = ov.resource && typeof ov.resource === 'object' ? ov.resource : {};
+
+  return {
+    enabled: Boolean(ov.enabled ?? base.enabled ?? false),
+    intervalMinutes,
+    confirmChecks: clampInt(ov.confirmChecks ?? base.confirmChecks, 1, 5, DEFAULT_PROBE_ALERTS.confirmChecks),
+    notifyRecovery: (ov.notifyRecovery ?? base.notifyRecovery) !== false,
+    mutedNodes,
+    resource: {
+      enabled: Boolean(ovRes.enabled ?? baseRes.enabled ?? false),
+      cpu: clampAlertThreshold(ovRes.cpu ?? baseRes.cpu, DEFAULT_PROBE_ALERTS.resource.cpu),
+      ram: clampAlertThreshold(ovRes.ram ?? baseRes.ram, DEFAULT_PROBE_ALERTS.resource.ram),
+      disk: clampAlertThreshold(ovRes.disk ?? baseRes.disk, DEFAULT_PROBE_ALERTS.resource.disk),
+      sustainChecks: clampInt(
+        ovRes.sustainChecks ?? baseRes.sustainChecks,
+        1,
+        10,
+        DEFAULT_PROBE_ALERTS.resource.sustainChecks
+      ),
+    },
+  };
+}
 
 function resolveAvatarMode(rawMode, avatarUrl) {
   if (AVATAR_MODES.includes(rawMode)) return rawMode;
@@ -277,14 +359,20 @@ export function mergeConfig(base, override) {
     cloned.profile.emblem = normalizeEmblem(cloned.profile.emblem);
     cloned.profile.splash = normalizeSplash(cloned.profile.splash);
     cloned.profile.avatarMode = resolveAvatarMode(cloned.profile.avatarMode, cloned.profile.avatarUrl);
+    cloned.profile.showVisitCounter = Boolean(cloned.profile.showVisitCounter);
+    cloned.profile.showPoweredBy =
+      cloned.profile.showPoweredBy === undefined ? true : Boolean(cloned.profile.showPoweredBy);
     cloned.probe.visibility = cloned.probe.visibility === 'private' ? 'private' : 'public';
     cloned.probe.provider = PROBE_PROVIDER_IDS.includes(cloned.probe.provider) ? cloned.probe.provider : 'komari';
+    cloned.probe.alerts = normalizeProbeAlerts(DEFAULT_PROBE_ALERTS, cloned.probe.alerts);
+    cloned.siteOrigin = String(cloned.siteOrigin || '').trim();
     return cloned;
   }
   const rawSites = Array.isArray(override.sites) ? override.sites : base.sites;
   const mergedProbe = {
     ...base.probe,
     ...(override.probe || {}),
+    alerts: normalizeProbeAlerts(base.probe?.alerts, override.probe?.alerts),
   };
   mergedProbe.visibility = mergedProbe.visibility === 'private' ? 'private' : 'public';
   mergedProbe.provider = PROBE_PROVIDER_IDS.includes(mergedProbe.provider) ? mergedProbe.provider : 'komari';
@@ -303,6 +391,14 @@ export function mergeConfig(base, override) {
     explicitMode !== undefined ? explicitMode : base.profile?.avatarMode && !override.profile?.avatarUrl ? base.profile.avatarMode : undefined,
     mergedProfile.avatarUrl
   );
+  mergedProfile.showVisitCounter = Boolean(
+    override.profile?.showVisitCounter ?? base.profile?.showVisitCounter ?? false
+  );
+  const rawShowPoweredBy =
+    override.profile?.showPoweredBy !== undefined
+      ? override.profile.showPoweredBy
+      : base.profile?.showPoweredBy;
+  mergedProfile.showPoweredBy = rawShowPoweredBy === undefined ? true : Boolean(rawShowPoweredBy);
   return {
     profile: mergedProfile,
     sites: rawSites.map(normalizeSite),
@@ -345,6 +441,9 @@ export function mergeConfig(base, override) {
     botUsername: String(override.botUsername ?? base.botUsername ?? '')
       .trim()
       .replace(/^@/, ''),
+    siteOrigin: String(override.siteOrigin ?? base.siteOrigin ?? '')
+      .trim()
+      .replace(/\/+$/, ''),
   };
 }
 
@@ -420,9 +519,15 @@ export async function savePanelConfig(env, nextConfig) {
   merged.profile.ownerTag = String(merged.profile.ownerTag ?? '').trim().slice(0, 32);
   merged.profile.badgeTitle = String(merged.profile.badgeTitle ?? '').trim().slice(0, 32);
   merged.profile.joinedText = String(merged.profile.joinedText ?? '').trim().slice(0, 48);
+  merged.profile.showVisitCounter = Boolean(merged.profile.showVisitCounter);
+  merged.profile.showPoweredBy =
+    merged.profile.showPoweredBy === undefined ? true : Boolean(merged.profile.showPoweredBy);
 
   // Clamp numeric settings
   merged.probe.cacheTtlSeconds = Math.min(Math.max(Number(merged.probe.cacheTtlSeconds) || 15, 5), 300);
+  merged.probe.alerts = normalizeProbeAlerts(DEFAULT_PROBE_ALERTS, merged.probe.alerts);
+  const rawSiteOrigin = String(merged.siteOrigin || '').trim().replace(/\/+$/, '');
+  merged.siteOrigin = /^https:\/\/[^\s/]+$/i.test(rawSiteOrigin) ? rawSiteOrigin.slice(0, 200) : '';
   merged.community.dailyMinPoints = Math.min(Math.max(Number(merged.community.dailyMinPoints) || 10, 1), 1000);
   merged.community.dailyMaxPoints = Math.min(
     Math.max(Number(merged.community.dailyMaxPoints) || 25, merged.community.dailyMinPoints),
@@ -471,12 +576,24 @@ export async function savePanelConfig(env, nextConfig) {
   return merged;
 }
 
+export function resolveShareUrl(config, env = {}, requestOrigin = '') {
+  const botUsername =
+    String(env?.BOT_USERNAME || '').trim().replace(/^@/, '') ||
+    String(config?.botUsername || '').trim().replace(/^@/, '');
+  const appShortName = String(env?.APP_SHORT_NAME || '').trim().replace(/^\/+|\/+$/g, '');
+  if (botUsername && appShortName) {
+    return buildMiniAppDirectLink({ BOT_USERNAME: botUsername, APP_SHORT_NAME: appShortName });
+  }
+  const cleanOrigin = String(requestOrigin || config?.siteOrigin || '').trim().replace(/\/+$/, '');
+  return cleanOrigin ? `${cleanOrigin}/` : '';
+}
+
 /**
  * Returns panel configuration tailored to caller privileges.
  * CRITICAL SECURITY: Private sites (`visibility === 'private'`) and saved sticker library
  * are strictly stripped server-side for non-admin visitors.
  */
-export function sanitizePublicConfig(config, env, isAdmin = false) {
+export function sanitizePublicConfig(config, env, isAdmin = false, requestOrigin = '', visitStats = null) {
   const visibleSites = isAdmin
     ? config.sites
     : config.sites.filter((s) => (s.visibility || 'public') !== 'private');
@@ -490,10 +607,15 @@ export function sanitizePublicConfig(config, env, isAdmin = false) {
   };
 
   const probePrivateHidden = config.probe.visibility === 'private' && !isAdmin;
+  const publicVisitStats =
+    config.profile?.showVisitCounter === true
+      ? { thisMonth: Math.max(0, Number(visitStats?.thisMonth) || 0) }
+      : undefined;
 
   return {
     profile: {
       ...config.profile,
+      showPoweredBy: config.profile?.showPoweredBy === undefined ? true : Boolean(config.profile.showPoweredBy),
       emblem: activeEmblem,
       splash: normalizeSplash(config.profile.splash),
     },
@@ -538,6 +660,8 @@ export function sanitizePublicConfig(config, env, isAdmin = false) {
         })(),
       appShortName: env.APP_SHORT_NAME || '',
     },
+    shareUrl: resolveShareUrl(config, env, requestOrigin),
+    ...(publicVisitStats ? { visitStats: publicVisitStats } : {}),
   };
 }
 

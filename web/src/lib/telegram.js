@@ -73,6 +73,72 @@ export function getLaunchTarget() {
   return { tab, visitorId, settings };
 }
 
+const SOURCE_PARAM_RE = /^[a-z0-9_]{1,24}$/;
+
+export const BUILTIN_SOURCE_LABELS = {
+  poster: '分享海报',
+  link: '名片链接',
+  site: '个人小站',
+  channel: '频道',
+};
+
+export function normalizeSourceParam(raw) {
+  if (typeof raw !== 'string') return '';
+  const stripped = raw.startsWith('src_') ? raw.slice(4) : raw;
+  return SOURCE_PARAM_RE.test(stripped) ? stripped : '';
+}
+
+export function formatSourceLabel(source) {
+  const raw = String(source || '').trim();
+  if (!raw) return '未知';
+  const stripped = raw.startsWith('src_') ? raw.slice(4) : raw;
+  if (!stripped) return '未知';
+  return BUILTIN_SOURCE_LABELS[stripped] || stripped;
+}
+
+/**
+ * Appends a source attribution parameter to a bot/app/web link without clobbering existing query params.
+ *   kind === 'bot' -> ?start=src_<x>
+ *   kind === 'app' -> ?startapp=src_<x>
+ *   kind === 'web' -> ?src=<x>
+ */
+export function buildSourceLink(base, source, kind = 'web') {
+  const cleanBase = String(base || '').trim();
+  if (!cleanBase) return '';
+  const normalized = normalizeSourceParam(source);
+  if (!normalized) return cleanBase;
+  const hashIdx = cleanBase.indexOf('#');
+  const beforeHash = hashIdx >= 0 ? cleanBase.slice(0, hashIdx) : cleanBase;
+  const hashPart = hashIdx >= 0 ? cleanBase.slice(hashIdx) : '';
+  const sep = beforeHash.includes('?') ? '&' : '?';
+  if (kind === 'bot') {
+    return `${beforeHash}${sep}start=src_${normalized}${hashPart}`;
+  }
+  if (kind === 'app') {
+    return `${beforeHash}${sep}startapp=src_${normalized}${hashPart}`;
+  }
+  return `${beforeHash}${sep}src=${normalized}${hashPart}`;
+}
+
+/**
+ * Reads the referral source channel from Telegram `start_param` (`src_<x>`) or URL query (`?src=<x>`).
+ * Strictly requires `src_` prefix in `start_param` so existing Mini App params are never affected.
+ */
+export function getLaunchSource() {
+  const tg = getTelegramWebApp();
+  const startParam = String(tg?.initDataUnsafe?.start_param || '');
+  if (startParam.startsWith('src_')) {
+    const fromStart = normalizeSourceParam(startParam);
+    if (fromStart) return fromStart;
+  }
+  if (typeof window !== 'undefined') {
+    const params = new URLSearchParams(window.location.search);
+    const fromQuery = normalizeSourceParam(params.get('src') || '');
+    if (fromQuery) return fromQuery;
+  }
+  return '';
+}
+
 export function haptic(type = 'light') {
   const tg = getTelegramWebApp();
   try {

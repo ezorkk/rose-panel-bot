@@ -457,6 +457,7 @@ export default function App() {
         {effectiveTab === 'visitors' && isAdmin && (
           <VisitorsTab
             initialVisitorId={deepVisitorId}
+            initialVisitStats={bootstrap?.visitStats || null}
             onClearInitial={() => setDeepVisitorId('')}
             onToast={showToast}
           />
@@ -502,6 +503,8 @@ export default function App() {
         <SettingsDrawer
           initialSection={settingsSection}
           adminConfig={bootstrap.adminConfig}
+          botInfo={bootstrap.config?.bot}
+          shareUrl={bootstrap.config?.shareUrl}
           appVersion={bootstrap.appVersion}
           onOpenWhatsNew={() =>
             setWhatsNewState({ open: true, mode: 'manual', previousVersion: '' })

@@ -1488,6 +1488,10 @@ select {
   padding: 0 3px;
 }
 
+.chat-row.pending .chat-bubble {
+  opacity: 0.72;
+}
+
 .chat-recall-btn {
   border: none;
   background: transparent;
@@ -2005,4 +2009,274 @@ select {
 ::view-transition-new(root) {
   animation: none;
   mix-blend-mode: normal;
+}
+
+/* Share Poster Preview Sheet */
+.share-poster-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 14px;
+  min-height: 240px;
+}
+
+.share-poster-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 44px 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.share-poster-img {
+  display: block;
+  max-width: 100%;
+  max-height: 56vh;
+  width: auto;
+  height: auto;
+  border-radius: 16px;
+  box-shadow: 0 10px 28px rgba(140, 38, 72, 0.14);
+  -webkit-touch-callout: default;
+  -webkit-user-select: auto;
+  user-select: auto;
+}
+
+.share-poster-tip {
+  margin-top: 10px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.share-poster-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 14px;
+}
+
+.share-poster-actions .btn {
+  flex: 1 1 130px;
+  justify-content: center;
+}
+
+/* Visitor insights bar (source stats & monthly visits) */
+.visitor-insight-bar {
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.visitor-insight-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  line-height: 1.5;
+}
+
+.visitor-insight-label {
+  font-weight: 700;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.visitor-insight-val {
+  color: var(--text-secondary);
+}
+
+/* Promo link helper rows inside Settings */
+.promo-link-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg-subtle);
+  border-radius: 14px;
+  padding: 9px 11px;
+}
+
+.promo-link-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.promo-link-url {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  word-break: break-all;
+}
+
+/* Subtle bottom monthly visitor counter on card (when owner enables public display) */
+.card-visit-counter {
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 12px 0 4px;
+  letter-spacing: 0.01em;
+}
+
+/* Subtle bottom RosePanel signature & "想要同款？" CTA (visible to visitors only) */
+.card-powered-by {
+  display: flex;
+  justify-content: center;
+  margin: 8px 0 4px;
+}
+
+.card-powered-by-btn {
+  border: none;
+  background: transparent;
+  padding: 4px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  opacity: 0.5;
+  cursor: pointer;
+  transition: opacity 0.16s ease;
+}
+
+.card-powered-by-btn:hover,
+.card-powered-by-btn:focus-visible {
+  opacity: 0.78;
+}
+
+.card-powered-by-btn:active {
+  opacity: 0.85;
+}
+
+.card-powered-by-cta {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* Admin settings preview of visitor-visible signature line */
+.powered-by-preview {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: var(--bg-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.powered-by-preview-text {
+  font-size: 11px;
+  color: var(--text-secondary);
+  opacity: 0.55;
+}
+
+.powered-by-preview-badge {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+/* Get Same Card Guide Modal (lazy-loaded) */
+.get-same-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.get-same-body {
+  gap: 12px;
+}
+
+.get-same-intro {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.58;
+  color: var(--text-secondary);
+}
+
+.get-same-highlights {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.get-same-highlight-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.get-same-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.get-same-box {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 11px 13px;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.get-same-box-title {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--accent);
+  margin-bottom: 3px;
+}
+
+.get-same-box-text {
+  color: var(--text-secondary);
+}
+
+.get-same-box-bold {
+  margin-top: 5px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.get-same-eta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.get-same-foot {
+  justify-content: space-between;
+}
+
+.get-same-foot .btn {
+  flex: 1;
+  justify-content: center;
 }

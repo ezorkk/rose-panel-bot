@@ -127,9 +127,9 @@ Unused modules stay completely hidden and add zero overhead:
 
 | Module | Default | Activation | Notes |
 | :--- | :---: | :--- | :--- |
-| **🪪 Personal Card + 🌐 Public/Private Sites** | Core | `BOT_TOKEN` + `TOPIC_MAP` KV | 0.2s panel with pixel Day/Night slider, animated emblems & dual-layer sites |
+| **🪪 Personal Card + 🌐 Public/Private Sites** | Core | `BOT_TOKEN` + `TOPIC_MAP` KV | 0.2s panel with pixel Day/Night slider, animated emblems, dual-layer sites, shareable QR poster, Open Graph link previews, `src_<channel>` referral tracking, per-user monthly visitor count (admin-only by default; fail-open if Cloudflare KV's ~500 new visitors/day free write quota is exceeded, never blocking card loads), and a visitor-only footer signature with a "Want one?" deployment guide (toggleable off anytime in Settings) |
 | **👤 Bidirectional PM Bot + 4-Layer Shield** | Optional | Works with `ADMIN_IDS` (Bot DM push), or `/bind` in a Topics group (optional, recommended for high volume) | Ready out-of-the-box via Bot DM push (quote-reply to respond), direct in-panel chat/photos, archive, CAS & sticker quizzes; `/bind` switches automatically to per-visitor Forum Topics |
-| **📡 Pluggable Server Probe** | Optional | Pick provider & URL in Mini App | **Komari / Nezha (v1·v0) / NodeGet / Generic JSON**; Admin-Only toggle supported |
+| **📡 Pluggable Server Probe** | Optional | Pick provider & URL in Mini App | **Komari / Nezha (v1·v0) / NodeGet / Generic JSON**; Admin-Only toggle & optional offline/resource alerts (off by default) |
 | **🛡️ CF Turnstile Strict Mode** | Optional | `TURNSTILE_SITE_KEY` & `SECRET` | Auto-escalates high-risk ads or toggle manually in Settings |
 | **🌸 Group Check-in, Points & Badges** | Optional | `ENABLE_CHECKIN="true"` or in-app switch | Off by default for personal cards; 1-click on for group communities |
 
@@ -278,11 +278,11 @@ RosePanel Bot is 100% free & MIT open-source with zero paywalls and zero data co
 ### 🏆 Sponsors Wall
 
 <details open>
-<summary><b>View Sponsors Wall (Open for our first supporter 🌸)</b></summary>
+<summary><b>View Sponsors Wall (Thank you to every supporter 🌸)</b></summary>
 
 | # | Sponsor | Amount | Note |
 | :---: | :---: | :---: | :--- |
-| 1 | *Waiting for you* | — | Be our very first sponsor ✨ |
+| 1 | 元气少女马冬梅 | ¥6.66 | 机器人很好用，感谢 (The bot works great, thanks!) |
 
 </details>
 

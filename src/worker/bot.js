@@ -40,10 +40,14 @@ import {
 } from './telegram.js';
 import {
   applyVisitorAction,
+  findLatestVisitorTopicMessage,
   formatDisplayName,
+  formatSourceLabel,
   getVisitorDetail,
+  normalizeSourceParam,
   recallAdminVisitorMessage,
   recordVisitorExchange,
+  rememberPendingSource,
   upsertVisitorProfile,
 } from './visitors.js';
 
@@ -280,7 +284,7 @@ function serializePendingMessage(msg) {
   };
 }
 
-function buildVisitorCardText(detail) {
+export function buildVisitorCardText(detail) {
   const statusMap = {
     banned: '🚫 已拉黑',
     trusted: '⭐ 永久信任',
@@ -302,6 +306,9 @@ function buildVisitorCardText(detail) {
     `• 聊天统计：共 <b>${detail.msg_count || 0}</b> 条（对方 ${detail.visitor_msg_count || 0} · 我 ${detail.admin_msg_count || 0}）`,
     `• 归档媒体：🖼️ ${detail.photo_count || 0} 图 · 🔗 ${detail.link_count || 0} 链`,
   ];
+  if (detail.source) {
+    lines.push(`• 来源：${escapeHtml(formatSourceLabel(detail.source))}`);
+  }
   if (detail.note) {
     lines.push(`• 备注：${escapeHtml(detail.note)}`);
   }
@@ -412,7 +419,7 @@ function buildVisitorModerationKeyboard(env, requestOrigin, detail, { isGroup = 
   return { inline_keyboard: [[profileBtn], row2] };
 }
 
-async function checkRateLimit(env, key, limit = 40, windowSec = 60) {
+export async function checkRateLimit(env, key, limit = 40, windowSec = 60) {
   if (!env.TOPIC_MAP) return true;
   const count = Number((await env.TOPIC_MAP.get(key)) || 0);
   if (count >= limit) return false;
@@ -581,8 +588,9 @@ async function forwardMessageToTopic(env, requestOrigin, msg, knownPreview = und
   const preview = knownPreview !== undefined ? knownPreview : previewTextOfMessage(msg);
 
   let { threadId } = await ensureVisitorTopic(env, requestOrigin, user, preview);
+  let copied = null;
   try {
-    await tgCall(env, 'copyMessage', {
+    copied = await tgCall(env, 'copyMessage', {
       chat_id: supergroupId,
       message_thread_id: threadId,
       from_chat_id: msg.chat.id,
@@ -595,7 +603,7 @@ async function forwardMessageToTopic(env, requestOrigin, msg, knownPreview = und
       await safePutJSON(env.TOPIC_MAP, `user:${uid}`, rec);
       await env.TOPIC_MAP.delete(`thread:${threadId}`);
       ({ threadId } = await ensureVisitorTopic(env, requestOrigin, user, preview));
-      await tgCall(env, 'copyMessage', {
+      copied = await tgCall(env, 'copyMessage', {
         chat_id: supergroupId,
         message_thread_id: threadId,
         from_chat_id: msg.chat.id,
@@ -606,7 +614,7 @@ async function forwardMessageToTopic(env, requestOrigin, msg, knownPreview = und
     }
   }
 
-  return { supergroupId, threadId };
+  return { supergroupId, threadId, topicMsgId: copied?.result?.message_id || null };
 }
 
 async function processVisitorMessage(env, requestOrigin, msg, config = null) {
@@ -2194,6 +2202,14 @@ export async function handleTelegramUpdate(update, env, requestOrigin) {
         if (inboxMode === 'dm' && uid === getOwnerChatId(env)) {
           await clearOwnerUnreachable(env);
         }
+        // Record first-touch source attribution (`src_<channel>`) before verification so
+        // visitors who must verify first still retain their referral source.
+        if (!isAdmin && parsed.args && parsed.args.startsWith('src_')) {
+          const src = normalizeSourceParam(parsed.args);
+          if (src) {
+            await rememberPendingSource(env, uid, src).catch(() => {});
+          }
+        }
         const verified = await env.TOPIC_MAP.get(`verified:${uid}`);
         const needsVerify = await env.TOPIC_MAP.get(`needs_verify:${uid}`);
         const verifyMode =
@@ -2344,7 +2360,7 @@ export async function handleTelegramUpdate(update, env, requestOrigin) {
  * Initiates private chat / verification right from the Mini App `[发私信]` button
  * so collapsing the WebApp drops the visitor directly onto an active verification prompt or input box.
  */
-export async function initiateChatFromMiniApp(env, requestOrigin, tgUser, config = null) {
+export async function initiateChatFromMiniApp(env, requestOrigin, tgUser, config = null, options = {}) {
   if (!env.BOT_TOKEN || !tgUser?.id) {
     return { ok: false, needsDeepLink: true };
   }
@@ -2357,6 +2373,11 @@ export async function initiateChatFromMiniApp(env, requestOrigin, tgUser, config
   const isAdmin = await isUserAdmin(env, tgUser.id, tgCall);
   if (!isAdmin && (await env.TOPIC_MAP?.get(`banned:${uid}`)) === '1') {
     return { ok: true, needsDeepLink: false };
+  }
+
+  const incomingSource = normalizeSourceParam(options?.source || '');
+  if (!isAdmin && incomingSource) {
+    await rememberPendingSource(env, uid, incomingSource).catch(() => {});
   }
 
   const inboxMode = await resolveInboxMode(env);
@@ -2556,6 +2577,8 @@ export async function syncTelegramBotSurface(env, requestOrigin, config = null, 
  * directly to the visitor in private chat, while silently mirroring into the Forum Supergroup Topic
  * (if bound) and archiving into `history:<uid>` so Mini App and Telegram Topics stay 100% synced.
  */
+const PANEL_MIRROR_LABEL = '📱 <b>我在面板回复</b>';
+
 export async function sendAdminDirectVisitorReply(env, requestOrigin, targetUid, payload = {}) {
   const uid = String(targetUid || '').trim();
   if (!/^\d+$/.test(uid)) {
@@ -2635,22 +2658,35 @@ export async function sendAdminDirectVisitorReply(env, requestOrigin, targetUid,
         preview
       );
 
+      // The mirror is posted by the bot, like the visitor's own copied messages, so Telegram groups
+      // them under the same sender. A bold label + blockquote, and a quote of the visitor message
+      // being answered, keep the owner's panel replies visually distinct from what the visitor said.
       const mirrorOnce = async (tid) => {
+        const quoted = await findLatestVisitorTopicMessage(env, uid, tid).catch(() => null);
+        const replyPart = quoted?.topicMsgId
+          ? { reply_parameters: { message_id: quoted.topicMsgId, allow_sending_without_reply: true } }
+          : {};
         if (photoFile && Array.isArray(sentPm?.photo) && sentPm.photo.length > 0) {
           const largestId = sentPm.photo[sentPm.photo.length - 1].file_id;
           return tgCall(env, 'sendPhoto', {
             chat_id: supergroupId,
             message_thread_id: tid,
             photo: largestId,
-            caption: rawText ? `📱 [面板回复] ${rawText}`.slice(0, 1024) : '📱 [面板发出图片]',
+            caption: rawText
+              ? `${PANEL_MIRROR_LABEL}\n<blockquote>${escapeHtml(rawText.slice(0, 900))}</blockquote>`
+              : `${PANEL_MIRROR_LABEL}（图片）`,
+            parse_mode: 'HTML',
             disable_notification: true,
+            ...replyPart,
           });
         }
         return tgCall(env, 'sendMessage', {
           chat_id: supergroupId,
           message_thread_id: tid,
-          text: `📱 [面板回复]\n${rawText}`.slice(0, 4096),
+          text: `${PANEL_MIRROR_LABEL}\n<blockquote>${escapeHtml(rawText.slice(0, 3800))}</blockquote>`,
+          parse_mode: 'HTML',
           disable_notification: true,
+          ...replyPart,
         });
       };
 

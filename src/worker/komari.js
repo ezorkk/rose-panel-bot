@@ -976,7 +976,7 @@ function summarizeNodes(nodes) {
 }
 
 export async function fetchProbeStatus(env, probeConfig, options = {}) {
-  const { forceRefresh = false } = options;
+  const { forceRefresh = false, skipCacheWrite = false } = options;
 
   if (probeConfig.demoMode && !probeConfig.url) {
     const nodes = getDemoKomariNodes();
@@ -1060,7 +1060,7 @@ export async function fetchProbeStatus(env, probeConfig, options = {}) {
     nodes,
   };
 
-  if (env.TOPIC_MAP) {
+  if (env.TOPIC_MAP && !skipCacheWrite) {
     try {
       await env.TOPIC_MAP.put(
         PROBE_CACHE_KEY,

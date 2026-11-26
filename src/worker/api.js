@@ -1,8 +1,10 @@
 // Mini App REST API router (/api/*)
 
+import { sendTestProbeAlert } from './alerts.js';
 import { getBlockedSpamCount } from './antispam.js';
 import { authenticateRequest, parseAdminIds, signMediaToken, verifyMediaToken } from './auth.js';
 import {
+  checkRateLimit,
   initiateChatFromMiniApp,
   resolveBotUsername,
   sendAdminDirectVisitorReply,
@@ -21,6 +23,7 @@ import { fetchProbeStatus } from './komari.js';
 import { isOwnerUnreachable, resolveInboxMode } from './inbox.js';
 import { checkLatestRelease, syncForkWithUpstream } from './updater.js';
 import { APP_VERSION } from './version.js';
+import { getVisitStats, recordMonthlyVisit } from './visitStats.js';
 import {
   handleAvatarProxy,
   handleSignedMediaProxy,
@@ -117,6 +120,16 @@ export async function handleApiRequest(request, env, url, ctx = null) {
 
   // GET /api/bootstrap
   if (path === '/api/bootstrap' && method === 'GET') {
+    // Count unique Telegram visitors per month in the background (excludes admins, previews, and anonymous web visits).
+    if (auth.user?.id && !auth.isAdmin && !auth.isPreview) {
+      const visitWork = recordMonthlyVisit(env, auth.user.id, config);
+      if (ctx?.waitUntil) {
+        ctx.waitUntil(visitWork);
+      } else {
+        await visitWork;
+      }
+    }
+
     let checkin = null;
     if (config.community.enableCheckin && auth.user) {
       checkin = await getMemberTicket(env, auth.user, config.community);
@@ -126,16 +139,21 @@ export async function handleApiRequest(request, env, url, ctx = null) {
     let recentVisitors = [];
     let blockedSpamCount = 0;
     let inboxStatus = null;
+    let visitStats = null;
     if (auth.isAdmin) {
-      const [overview, spamCount, status] = await Promise.all([
+      const [overview, spamCount, status, monthlyStats] = await Promise.all([
         getVisitorOverview(env),
         getBlockedSpamCount(env),
         loadAdminInboxStatus(env),
+        getVisitStats(env, config),
       ]);
       visitorSummary = overview.stats;
       recentVisitors = overview.recent;
       blockedSpamCount = spamCount;
       inboxStatus = status;
+      visitStats = monthlyStats;
+    } else if (config.profile?.showVisitCounter === true) {
+      visitStats = await getVisitStats(env, config, new Date(), { includeLastMonth: false });
     }
 
     return json({
@@ -144,7 +162,7 @@ export async function handleApiRequest(request, env, url, ctx = null) {
       isAdmin: auth.isAdmin,
       isPreview: auth.isPreview,
       startParam: auth.startParam,
-      config: sanitizePublicConfig(config, env, auth.isAdmin),
+      config: sanitizePublicConfig(config, env, auth.isAdmin, url.origin, visitStats),
       adminConfig: auth.isAdmin ? sanitizeAdminConfig(config, env, inboxStatus) : null,
       checkin,
       levels: LEVELS,
@@ -152,6 +170,7 @@ export async function handleApiRequest(request, env, url, ctx = null) {
       visitorSummary,
       recentVisitors,
       blockedSpamCount,
+      ...(auth.isAdmin ? { visitStats } : {}),
       appVersion: auth.isAdmin ? APP_VERSION : undefined,
     });
   }
@@ -161,7 +180,9 @@ export async function handleApiRequest(request, env, url, ctx = null) {
     if (!auth.user?.id) {
       return json({ ok: true, needsDeepLink: true });
     }
-    const chatRes = await initiateChatFromMiniApp(env, url.origin, auth.user, config);
+    const body = await readJsonBody(request);
+    const source = typeof body?.source === 'string' ? body.source : '';
+    const chatRes = await initiateChatFromMiniApp(env, url.origin, auth.user, config, { source });
     return json({ ok: true, ...chatRes });
   }
 
@@ -206,11 +227,12 @@ export async function handleApiRequest(request, env, url, ctx = null) {
     if (path === '/api/admin/visitors' && method === 'GET') {
       const search = url.searchParams.get('q') || '';
       const filter = url.searchParams.get('filter') || 'all';
-      const [data, blockedSpamCount] = await Promise.all([
+      const [data, blockedSpamCount, visitStats] = await Promise.all([
         listVisitors(env, { search, filter, limit: 80 }),
         getBlockedSpamCount(env),
+        getVisitStats(env, config),
       ]);
-      return json({ ok: true, ...data, blockedSpamCount });
+      return json({ ok: true, ...data, blockedSpamCount, visitStats });
     }
 
     // GET /api/admin/visitors/:userId
@@ -410,13 +432,14 @@ export async function handleApiRequest(request, env, url, ctx = null) {
       });
       if (!found) return json({ ok: false, error: '未找到该站点' }, 404);
 
-      const [saved, inboxStatus] = await Promise.all([
+      const [saved, inboxStatus, visitStats] = await Promise.all([
         savePanelConfig(env, { sites: nextSites }),
         loadAdminInboxStatus(env),
+        config.profile?.showVisitCounter ? getVisitStats(env, config, new Date(), { includeLastMonth: false }) : Promise.resolve(null),
       ]);
       return json({
         ok: true,
-        config: sanitizePublicConfig(saved, env, true),
+        config: sanitizePublicConfig(saved, env, true, url.origin, visitStats),
         adminConfig: sanitizeAdminConfig(saved, env, inboxStatus),
       });
     }
@@ -470,10 +493,16 @@ export async function handleApiRequest(request, env, url, ctx = null) {
         ck: config.community?.enableCheckin,
         bu: Boolean(env.BOT_USERNAME || config.botUsername),
       });
-      // Cache @username in the same write as the owner's settings (see syncTelegramBotSurface)
+      // Cache @username & HTTPS siteOrigin in the same write as the owner's settings
       if (env.BOT_TOKEN && !env.BOT_USERNAME && !config.botUsername) {
         const uname = await resolveBotUsername(env, config);
         if (uname) body.botUsername = uname;
+      }
+      // Only fill siteOrigin when it is still unknown. Saving from a Workers Builds preview URL or the
+      // workers.dev host must not replace the canonical domain (previews share production KV);
+      // /setup is the explicit place that (re)sets it.
+      if (/^https:\/\//i.test(url.origin) && !config.siteOrigin) {
+        body.siteOrigin = url.origin;
       }
       const saved = await savePanelConfig(env, body);
       const nextSurfaceSig = JSON.stringify({
@@ -499,9 +528,12 @@ export async function handleApiRequest(request, env, url, ctx = null) {
         loadPanelConfig(env),
         loadAdminInboxStatus(env),
       ]);
+      const visitStats = latestCfg.profile?.showVisitCounter
+        ? await getVisitStats(env, latestCfg, new Date(), { includeLastMonth: false })
+        : null;
       return json({
         ok: true,
-        config: sanitizePublicConfig(latestCfg, env, true),
+        config: sanitizePublicConfig(latestCfg, env, true, url.origin, visitStats),
         adminConfig: sanitizeAdminConfig(latestCfg, env, inboxStatus),
       });
     }
@@ -519,6 +551,16 @@ export async function handleApiRequest(request, env, url, ctx = null) {
       }
       const result = await fetchProbeStatus(env, testProbeConfig, { forceRefresh: true });
       return json({ ok: !result.error, ...result }, result.error ? 400 : 200);
+    }
+
+    // POST /api/admin/probe/alert-test — send a test probe alert via the active inbox mode (3/min)
+    if (path === '/api/admin/probe/alert-test' && method === 'POST') {
+      const uid = String(auth.user?.id || 'admin');
+      if (!(await checkRateLimit(env, `rl:alert_test:${uid}`, 3, 60))) {
+        return json({ ok: false, error: '发送过于频繁，每分钟最多测试 3 次' }, 429);
+      }
+      const result = await sendTestProbeAlert(env, url.origin, config);
+      return json(result, result.ok ? 200 : 400);
     }
 
     // GET /api/admin/update/check — Scheme A: check latest GitHub release (KV-cached 6h)
