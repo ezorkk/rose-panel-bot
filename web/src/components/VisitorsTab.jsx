@@ -65,7 +65,12 @@ export default function VisitorsTab({
   // In-panel direct chat composer state
   const [replyText, setReplyText] = useState('');
   const [replyPhoto, setReplyPhoto] = useState(null);
-  const [sendingReply, setSendingReply] = useState(false);
+  // Optimistic outgoing bubbles: shown the moment the owner taps Send while the request (deliver to
+  // visitor -> mirror to topic -> archive) runs in the background. Kept outside `historyData` so the
+  // 6-second history poll can't wipe them; sends go through a queue so the visitor receives them in order.
+  const [pendingReplies, setPendingReplies] = useState([]);
+  const sendQueueRef = useRef(Promise.resolve());
+  const pendingSeqRef = useRef(0);
   const [recallingId, setRecallingId] = useState(null);
   const chatEndRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -166,7 +171,7 @@ export default function VisitorsTab({
     if (drawerView === 'chat') {
       chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
     }
-  }, [drawerView, historyData.messages.length]);
+  }, [drawerView, historyData.messages.length, pendingReplies.length]);
 
   useEffect(() => {
     if (drawerView !== 'chat' || !activeVisitor?.userId) return undefined;
@@ -178,51 +183,72 @@ export default function VisitorsTab({
     return () => clearInterval(iv);
   }, [drawerView, activeVisitor?.userId]);
 
-  const handleSendReply = async () => {
-    if (!activeVisitor || sendingReply) return;
-    const uid = String(activeVisitor.userId);
-    const trimmed = replyText.trim();
-    const photo = replyPhoto;
-    if (!trimmed && !photo) return;
-
+  const sendReplyRequest = async (pending) => {
+    const { uid, text, photo, localId } = pending;
     try {
-      setSendingReply(true);
-      haptic('light');
-      // Invalidate any poll already in flight: its snapshot predates this message
-      historySeqRef.current += 1;
       let body;
       if (photo) {
         body = new FormData();
         body.append('photo', photo, photo.name || 'photo.jpg');
-        if (trimmed) body.append('text', trimmed);
+        if (text) body.append('text', text);
       } else {
-        body = { text: trimmed };
+        body = { text };
       }
+      // Invalidate any poll already in flight: its snapshot predates this message
+      historySeqRef.current += 1;
       const res = await apiRequest(`/api/admin/visitors/${encodeURIComponent(uid)}/reply`, {
         method: 'POST',
         body,
       });
       historySeqRef.current += 1;
       loadList(search, filter);
-      // Admin switched to another visitor while the upload was in flight: don't touch the new drawer
-      if (activeUidRef.current !== uid) return;
-      setReplyText('');
-      clearReplyPhoto();
-      if (res.visitor) setActiveVisitor(res.visitor);
-      if (res.message) {
-        setHistoryData((prev) => {
-          const list = prev.messages || [];
-          if (list.some((m) => m.id === res.message.id)) return prev;
-          return { ...prev, messages: [...list, res.message] };
-        });
-      } else {
-        await loadVisitorHistory(uid, { silent: true });
+      // Admin switched to another visitor while the request was in flight: leave that drawer alone
+      if (activeUidRef.current === uid) {
+        if (res.visitor) setActiveVisitor(res.visitor);
+        if (res.message) {
+          setHistoryData((prev) => {
+            const list = prev.messages || [];
+            if (list.some((m) => m.id === res.message.id)) return prev;
+            return { ...prev, messages: [...list, res.message] };
+          });
+        } else {
+          await loadVisitorHistory(uid, { silent: true });
+        }
       }
     } catch (err) {
-      if (activeUidRef.current === uid) onToast(err.message);
+      // Put the text back (unless the owner already typed something new) and explain why it failed
+      if (activeUidRef.current === uid) {
+        if (text) setReplyText((cur) => (cur.trim() ? cur : text));
+        onToast(err.message || '发送失败');
+      }
     } finally {
-      setSendingReply(false);
+      setPendingReplies((list) => list.filter((p) => p.localId !== localId));
+      if (pending.previewUrl) URL.revokeObjectURL(pending.previewUrl);
     }
+  };
+
+  const handleSendReply = () => {
+    if (!activeVisitor) return;
+    const uid = String(activeVisitor.userId);
+    const trimmed = replyText.trim();
+    const photo = replyPhoto;
+    if (!trimmed && !photo) return;
+
+    haptic('light');
+    pendingSeqRef.current += 1;
+    const pending = {
+      localId: `pending-${Date.now()}-${pendingSeqRef.current}`,
+      uid,
+      text: trimmed,
+      photo,
+      previewUrl: photo && typeof URL !== 'undefined' ? URL.createObjectURL(photo) : '',
+      at: new Date().toISOString(),
+    };
+    setPendingReplies((list) => [...list, pending]);
+    setReplyText('');
+    clearReplyPhoto();
+
+    sendQueueRef.current = sendQueueRef.current.then(() => sendReplyRequest(pending));
   };
 
   const handleRecallBubble = async (pmMessageId) => {
@@ -561,7 +587,7 @@ export default function VisitorsTab({
                       <RefreshCw size={20} className="spin" color="var(--accent)" />
                       <div style={{ marginTop: 8 }}>正在加载最近对话…</div>
                     </div>
-                  ) : historyData.messages.length === 0 ? (
+                  ) : historyData.messages.length === 0 && !pendingReplies.some((p) => p.uid === String(activeVisitor.userId)) ? (
                     <div className="empty-state" style={{ margin: 'auto 0' }}>
                       <div style={{ fontSize: 26, marginBottom: 6 }}>💬</div>
                       <div style={{ fontWeight: 600, color: 'var(--text)' }}>直接在下方打字或发图给 TA</div>
@@ -615,6 +641,19 @@ export default function VisitorsTab({
                       );
                     })
                   )}
+                  {pendingReplies
+                    .filter((p) => p.uid === String(activeVisitor.userId))
+                    .map((p) => (
+                      <div key={p.localId} className="chat-row me pending">
+                        <div className="chat-bubble">
+                          {p.previewUrl && <img className="chat-photo" src={p.previewUrl} alt={p.text || 'chat photo'} />}
+                          {p.text ? <div>{p.text}</div> : null}
+                        </div>
+                        <div className="chat-meta">
+                          <span>发送中…</span>
+                        </div>
+                      </div>
+                    ))}
                   <div ref={chatEndRef} />
                 </div>
 
@@ -646,7 +685,6 @@ export default function VisitorsTab({
                       type="button"
                       className="icon-btn accent"
                       title="发送图片"
-                      disabled={sendingReply}
                       onClick={() => fileInputRef.current?.click()}
                     >
                       <ImagePlus size={16} />
@@ -656,7 +694,6 @@ export default function VisitorsTab({
                       className="chat-input"
                       rows={1}
                       value={replyText}
-                      disabled={sendingReply}
                       onChange={(e) => setReplyText(e.target.value)}
                       onKeyDown={(e) => {
                         // Don't send while a CJK IME is still composing (Enter confirms the candidate)
@@ -672,10 +709,10 @@ export default function VisitorsTab({
                       type="button"
                       className="btn btn-primary btn-sm"
                       style={{ height: 36, padding: '0 14px', flexShrink: 0 }}
-                      disabled={sendingReply || (!replyText.trim() && !replyPhoto)}
+                      disabled={!replyText.trim() && !replyPhoto}
                       onClick={handleSendReply}
                     >
-                      <Send size={14} /> {sendingReply ? '发送中' : '发送'}
+                      <Send size={14} /> 发送
                     </button>
                   </div>
                 </div>

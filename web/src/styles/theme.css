@@ -1488,6 +1488,10 @@ select {
   padding: 0 3px;
 }
 
+.chat-row.pending .chat-bubble {
+  opacity: 0.72;
+}
+
 .chat-recall-btn {
   border: none;
   background: transparent;
