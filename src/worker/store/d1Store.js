@@ -200,7 +200,7 @@ export function createD1Store(env, hooks = {}) {
       if (hasBubble || validPmId) {
         rowId = hasBubble
           ? `m_${ts}_${Math.floor(Math.random() * 10000)}`
-          : `pm_${ts}_${Math.floor(Math.random() * 10000)}`;
+          : `pm:${ts}_${Math.floor(Math.random() * 10000)}`;
 
         batchStmts.push(
           db
@@ -296,7 +296,7 @@ export function createD1Store(env, hooks = {}) {
         db
           .prepare(
             `SELECT * FROM messages
-             WHERE uid = ? AND id LIKE 'm_%'
+             WHERE uid = ? AND id NOT LIKE 'p_%' AND id NOT LIKE 'p:%' AND id NOT LIKE 'pm:%'
              ORDER BY created_at DESC, rowid DESC
              LIMIT ?`
           )
@@ -454,7 +454,11 @@ export function createD1Store(env, hooks = {}) {
         .bind(cleanUid, targetId)
         .all();
       const matchedRows = matchedRes?.results || [];
-      const bubbleRow = matchedRows.find((r) => String(r.id).startsWith('m_')) || null;
+      const bubbleRow =
+        matchedRows.find((r) => {
+          const rid = String(r.id);
+          return !rid.startsWith('p_') && !rid.startsWith('p:') && !rid.startsWith('pm:');
+        }) || null;
 
       const stmts = [
         db
@@ -503,7 +507,7 @@ export function createD1Store(env, hooks = {}) {
       const target = await db
         .prepare(
           `SELECT id, ${col} AS prev_val FROM messages
-           WHERE uid = ? AND pm_message_id = ? AND id LIKE 'm_%'
+           WHERE uid = ? AND pm_message_id = ? AND id NOT LIKE 'p_%' AND id NOT LIKE 'p:%' AND id NOT LIKE 'pm:%'
            ORDER BY created_at DESC, rowid DESC
            LIMIT 1`
         )

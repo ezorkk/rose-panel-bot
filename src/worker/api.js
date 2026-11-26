@@ -25,6 +25,7 @@ import {
 } from './config.js';
 import { fetchProbeStatus } from './komari.js';
 import { isOwnerUnreachable, resolveInboxMode } from './inbox.js';
+import { getStorageStatus, migrateVisitorsBatch } from './store/index.js';
 import { checkLatestRelease, syncForkWithUpstream } from './updater.js';
 import { APP_VERSION } from './version.js';
 import { getVisitStats, recordMonthlyVisit } from './visitStats.js';
@@ -639,6 +640,20 @@ export async function handleApiRequest(request, env, url, ctx = null) {
       };
       const result = await syncForkWithUpstream(env, syncConfig);
       return json(result, result.status || (result.ok ? 200 : 400));
+    }
+
+    // GET /api/admin/storage — D1 / KV active storage mode & visitor migration progress
+    if (path === '/api/admin/storage' && method === 'GET') {
+      const status = await getStorageStatus(env);
+      return json(status, 200);
+    }
+
+    // POST /api/admin/storage/migrate — migrate one small batch of visitors from KV to D1
+    if (path === '/api/admin/storage/migrate' && method === 'POST') {
+      const body = await readJsonBody(request);
+      const batchSize = body?.batchSize !== undefined ? Number(body.batchSize) : undefined;
+      const result = await migrateVisitorsBatch(env, { batchSize });
+      return json(result, result.ok ? 200 : 400);
     }
   }
 
