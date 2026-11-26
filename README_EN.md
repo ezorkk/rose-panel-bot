@@ -21,7 +21,7 @@
   <a href="#-support--sponsors">🧧 Sponsors</a>
 </p>
 
-<sub><b>Anti-Spam Telegram PM Bot where you chat & send photos right inside the panel</b> — In-Panel Text/Photo Replies & Recall · 4-Layer Shield + 4 Verification Modes (incl. animated sticker quizzes) · Custom Auto-Reply & Keyword Rules · Includes a <b>0.2-Second Personal Panel</b> (Modular Multi-Protocol Probe / Site Bookmarks / Pixel Day-Night Slider) on Cloudflare Workers Free Tier</sub>
+<sub><b>Zero-group Anti-Spam Telegram PM Bot where you chat, view stickers & send photos right inside the panel</b> — In-Panel Replies/Photos/Stickers & Recall · Bidirectional Emoji Reaction Sync · 4-Layer Shield + 4 Verification Modes (incl. animated sticker quizzes) · Custom Auto-Reply · Includes a <b>0.2-Second Personal Panel</b> (Shareable QR Poster & Referral Tracking / Modular Probe with Offline Alerts / Site Bookmarks / Pixel Day-Night Slider) on Cloudflare Workers Free Tier</sub>
 
 </div>
 
@@ -39,8 +39,8 @@
   <img src="docs/assets/demo-chat.webp" alt="Direct in-panel chat, album photo upload, and Forum Topic sync" width="94%" />
 </div>
 
-- Tap **`💬 聊过` (Chat)** on any visitor card to view the last 60 two-way bubbles, **type text or pick any photo from your phone album (JPG / PNG / WebP / GIF, up to 10 MB) and send directly**, with **1-tap two-way recall**;
-- Every reply silently mirrors to the visitor's Forum Topic (send `/bind` in a private Topics group for 1-click setup; `/del` recalls from topics), while photos & links auto-archive by sender (`Visitor` / `Me`).
+- Tap **`💬 聊过` (Chat)** on any visitor card to view the last 60 two-way bubbles, **type text, pick any photo from your phone album (JPG / PNG / WebP / GIF, up to 10 MB), view signed static/video/Lottie stickers directly inside the chat, and recall messages in 1 tap**;
+- **Works out-of-the-box without a group**: set `ADMIN_IDS` for Bot DM direct push (quote-reply to respond), or send `/bind` in a private Topics group anytime to switch into per-visitor Forum Topics (`/del` recalls from topics); **syncs emoji reactions bidirectionally** between visitor PMs and admin inbox, while photos & links auto-archive by sender (`Visitor` / `Me`).
 
 ### 2 · First-Time Stranger `/start` Sticker Quiz (Auto-Switch on Wrong Tap)
 
@@ -58,7 +58,7 @@
 </div>
 
 - **224×84 Pixel Day/Night Bubble Slider**: scrub the crystal magnifier to toggle **Dark / Follow Telegram / Light** with a full-screen circular View Transition ripple synced to Telegram chrome; edge-injected splash + local SWR cache open in 0.2s, with an automatic **What's New** modal after upgrades;
-- Filter exchanged photos by sender; inspect live **Komari / Nezha (v1·v0) / NodeGet / Generic JSON** server metrics and **Public / 🔒 Private** site bookmarks; swap animated `.webp` / `.webm` / `.tgs` emblems via `/set` with 3-way private avatar options.
+- Filter exchanged photos by sender; inspect live **Komari / Nezha (v1·v0) / NodeGet / Generic JSON** server metrics (with optional offline & resource alerts, off by default) and **Public / 🔒 Private** site bookmarks; generate **light/dark shareable QR card posters with Open Graph previews, `src_` referral tracking, and monthly unique visitor counts**; swap animated `.webp` / `.webm` / `.tgs` emblems via `/set` with 3-way private avatar options.
 
 ---
 
