@@ -34,8 +34,16 @@ function timingSafeEqualHex(a, b) {
  * so private visitor chat photos can be displayed in <img> tags without leaking BOT_TOKEN
  * or exposing private media to unauthenticated requests.
  */
-export async function signMediaToken(fileId, botToken, ttlSeconds = 1800) {
-  const exp = Math.floor(Date.now() / 1000) + ttlSeconds;
+// Expiry is rounded up to a fixed window so the same file gets the SAME signed URL for the
+// whole window. The panel re-fetches chat history every few seconds; if every fetch minted a
+// new URL, images would reload and animated stickers would restart (and flash) on each poll.
+export const MEDIA_TOKEN_BUCKET_SECONDS = 600;
+
+export async function signMediaToken(fileId, botToken, ttlSeconds = 1800, bucketSeconds = MEDIA_TOKEN_BUCKET_SECONDS) {
+  const now = Math.floor(Date.now() / 1000);
+  const bucket = Math.max(1, Math.floor(Number(bucketSeconds) || 1));
+  // Always valid for at least ttlSeconds (at most ttlSeconds + bucket).
+  const exp = Math.ceil((now + ttlSeconds) / bucket) * bucket;
   const key = encoder.encode(`RoseMedia:${botToken || 'dev'}`);
   const sigBytes = await hmacSha256Raw(key, `${fileId}:${exp}`);
   return { exp, sig: toHex(sigBytes) };

@@ -8,7 +8,12 @@ import {
   sendAlertNotification,
 } from '../src/worker/alerts.js';
 import { assessIncomingRisk, checkCasBlacklist, normalizeAntiSpamText } from '../src/worker/antispam.js';
-import { signMediaToken, verifyMediaToken, verifyTelegramInitData } from '../src/worker/auth.js';
+import {
+  MEDIA_TOKEN_BUCKET_SECONDS,
+  signMediaToken,
+  verifyMediaToken,
+  verifyTelegramInitData,
+} from '../src/worker/auth.js';
 import {
   TOPIC_MSG_MAP_PREFIX,
   TOPIC_MSG_MAP_TTL_SECONDS,
@@ -3130,6 +3135,31 @@ describe('Mini App in-panel visitor chat log, direct text/photo reply & recall',
       expect(globalThis.fetch.mock.calls[0][1].timeoutMs).toBeUndefined();
     } finally {
       globalThis.fetch = origFetch;
+    }
+  });
+
+  it('signs media with a stable URL within a time window so polled stickers and photos do not reload', async () => {
+    const botToken = '999555:STABLE_MEDIA';
+    const base = Date.UTC(2026, 10, 27, 12, 0, 0);
+    const nowSpy = vi.spyOn(Date, 'now');
+    try {
+      nowSpy.mockReturnValue(base + 1000);
+      const a = await signMediaToken('sticker_file_1', botToken, 1800);
+      nowSpy.mockReturnValue(base + 7000); // next 6s poll
+      const b = await signMediaToken('sticker_file_1', botToken, 1800);
+      expect(b).toEqual(a);
+      // Still valid for at least the requested TTL, at most TTL + one window
+      const nowSec = Math.floor((base + 7000) / 1000);
+      expect(b.exp - nowSec).toBeGreaterThanOrEqual(1800);
+      expect(b.exp - nowSec).toBeLessThanOrEqual(1800 + MEDIA_TOKEN_BUCKET_SECONDS);
+      expect(await verifyMediaToken('sticker_file_1', String(b.exp), b.sig, botToken)).toBe(true);
+
+      // A later window rolls to a new (still valid) URL
+      nowSpy.mockReturnValue(base + (MEDIA_TOKEN_BUCKET_SECONDS + 5) * 1000);
+      const c = await signMediaToken('sticker_file_1', botToken, 1800);
+      expect(c.exp).toBeGreaterThan(a.exp);
+    } finally {
+      nowSpy.mockRestore();
     }
   });
 });
