@@ -18,10 +18,10 @@
   <a href="AGENTS.md">🤖 AI Auto-Deploy</a> ·
   <a href="CHANGELOG.md">📋 Changelog</a> ·
   <a href="https://t.me/Rose202_bot">💬 Live Demo</a> ·
-  <a href="#-support--sponsors">🧧 Sponsors</a>
+  <a href="#sponsor">🧧 Sponsors</a>
 </p>
 
-<sub><b>Zero-group Anti-Spam Telegram PM Bot where you chat, view stickers & send photos right inside the panel</b> — In-Panel Replies/Photos/Stickers & Recall · Bidirectional Emoji Reaction Sync · 4-Layer Shield + 4 Verification Modes (incl. animated sticker quizzes) · Custom Auto-Reply · Includes a <b>0.2-Second Personal Panel</b> (Shareable QR Poster & Referral Tracking / Modular Probe with Offline Alerts / Site Bookmarks / Pixel Day-Night Slider) on Cloudflare Workers Free Tier</sub>
+<sub><b>Zero-group Anti-Spam Telegram PM Bot where you chat, view stickers & send photos right inside the panel</b> — +400% Faster In-Panel Chat Sync on Cloudflare D1 · In-Panel Replies/Photos/Stickers & Recall · Bidirectional Emoji Reaction Sync · 5-Layer Shield + 4 Verification Modes (incl. animated sticker quizzes) · Custom Auto-Reply · Includes a <b>0.2-Second Personal Panel</b> (Shareable QR Poster & Referral Tracking / Modular Probe with Offline Alerts / Site Bookmarks / Pixel Day-Night Slider) on Cloudflare Workers Free Tier</sub>
 
 </div>
 
@@ -31,7 +31,7 @@
 
 ---
 
-## 🎬 Live Motion Showcase (3 Real-App Clips)
+## <img src="docs/assets/stickers/mail.webp" width="24" height="24" align="absmiddle" /> Live Motion Showcase (3 Real-App Clips)
 
 ### 1 · Direct In-Panel Chat & Phone Album Photo Replies
 
@@ -62,7 +62,7 @@
 
 ---
 
-## 💬 More Highlights: Share Poster · `/add` Quizzes · `/set` Animated Emblems · 1-Click Fork Sync
+## <img src="docs/assets/stickers/sparkle.webp" width="24" height="24" align="absmiddle" /> More Highlights: Share Poster · `/add` Quizzes · `/set` Animated Emblems · 1-Click Fork Sync
 
 <div align="center">
   <p><b>🪪 One-Tap Light & Dark QR Share Posters · Long-Press Save / Native Share / Copy Link</b></p>
@@ -86,8 +86,8 @@
   <p><b>🪪 1 · Personal Card & Direct PM Wake-Up　｜　🌐 2 · Public & Private Dual-Layer Sites</b></p>
   <img src="docs/assets/preview-row1.png" alt="1 Personal Card & Contact Etiquette · 2 Public & Private Sites" width="96%" />
   <br /><br />
-  <p><b>📡 3 · Multi-Protocol Probe　｜　🛡️ 4 · 4-Layer Anti-Spam & Visitor List</b></p>
-  <img src="docs/assets/preview-row2.png" alt="3 Multi-Protocol Server Probe (Komari / Nezha / NodeGet / JSON) · 4 Visitors & 4-Layer Anti-Spam Shield" width="96%" />
+  <p><b>📡 3 · Multi-Protocol Probe　｜　🛡️ 4 · 5-Layer Anti-Spam & Visitor List</b></p>
+  <img src="docs/assets/preview-row2.png" alt="3 Multi-Protocol Server Probe (Komari / Nezha / NodeGet / JSON) · 4 Visitors & 5-Layer Anti-Spam Shield" width="96%" />
   <br /><br />
   <p><b>🌙 Dark Rose-Obsidian Theme　｜　🖼️ Exchanged Photos Gallery & Link Archive (Filtered by Sender)</b></p>
   <img src="docs/assets/preview-row3.png" alt="Dark Rose-Obsidian Theme & Exchanged Photos Gallery" width="96%" />
@@ -98,20 +98,11 @@
 
 ---
 
-## 🛡️ 4-Layer Anti-Spam Architecture & 4 Verification Modes
+## <img src="docs/assets/stickers/rose.webp" width="24" height="24" align="absmiddle" /> 5-Layer Anti-Spam Architecture & 4 Verification Modes
 
-```mermaid
-flowchart LR
-  U["Stranger PMs Bot"] --> L1{"Layer 1 · CAS Global Blacklist"}
-  L1 -- "Known Spammer" --> DROP["🚫 Silent Drop & Logged"]
-  L1 -- "Clean User" --> L2{"Layer 2 · Risk & De-Obfuscation"}
-  L2 -- "Banned Keyword / Edit Bypass" --> DROP
-  L2 -- "Ad Flyer / Forward / URL / Spam Bio" --> TS["🛡️ Auto-Escalate to CF Turnstile"]
-  L2 -- "Normal Message" --> CH["🎭 Sticker Quiz / 🎯 Emoji Pick"]
-  CH -- "Trap / Repeated Fail" --> COOL["⏳ Cooldown Lock (or Instant Ban)"]
-  CH -- "Passed (Custom Grace Days)" --> INBOX["💬 Forward to Forum Topic + Mini App Archive"]
-  TS -- "Verified" --> INBOX
-```
+<div align="center">
+  <img src="docs/assets/shield-5layers-en.png" alt="RosePanel 5-Layer Anti-Spam Shield Mindmap: CAS Blacklist, Risk & De-Obfuscation, 4 Verification Modes + Honeypot, New-Visitor Probation & Review Queue, Post-Send Edit Guard" width="100%" />
+</div>
 
 Switch anytime inside **⚙️ Settings → 防骚扰验证 (Anti-Spam Verification)** (or disable verification for direct forwarding), with visual controls for **New Visitor Probation** (holds links, `@username` mentions, contact info, or forwarded messages from newly verified visitors for silent admin approval/ban with domain allowlists and ordered replay — zero message loss) and **6 grouped ad-phrase blocked keyword presets** (all off by default, toggle per phrase or add by group):
 
@@ -133,7 +124,7 @@ Unused modules stay completely hidden and add zero overhead:
 | Module | Default | Activation | Notes |
 | :--- | :---: | :--- | :--- |
 | **🪪 Personal Card + 🌐 Public/Private Sites** | Core | `BOT_TOKEN` + `TOPIC_MAP` KV | 0.2s panel with pixel Day/Night slider, animated emblems, dual-layer sites, shareable QR poster, Open Graph link previews, `src_<channel>` referral tracking, per-user monthly visitor count (admin-only by default; fail-open if Cloudflare KV's ~500 new visitors/day free write quota is exceeded, never blocking card loads), and a visitor-only footer signature with a "Want one?" deployment guide (toggleable off anytime in Settings) |
-| **👤 Bidirectional PM Bot + 4-Layer Shield** | Optional | Works with `ADMIN_IDS` (Bot DM push), or `/bind` in a Topics group (optional, recommended for high volume) | Ready out-of-the-box via Bot DM push (quote-reply to respond), direct in-panel chat/photos & signed sticker rendering, bidirectional emoji reaction sync (in Topics mode, adds 1 KV write per visitor message for a 30-day `tmsg:*` reverse map), archive, CAS & sticker quizzes; `/bind` switches automatically to per-visitor Forum Topics |
+| **👤 Bidirectional PM Bot + 5-Layer Shield** | Optional | Works with `ADMIN_IDS` (Bot DM push), or `/bind` in a Topics group (optional, recommended for high volume) | Ready out-of-the-box via Bot DM push (quote-reply to respond), direct in-panel chat/photos & signed sticker rendering (+400% faster chat sync on D1), bidirectional emoji reaction sync, archive, CAS + sticker quizzes + probation review; `/bind` switches automatically to per-visitor Forum Topics |
 | **📡 Pluggable Server Probe** | Optional | Pick provider & URL in Mini App | **Komari / Nezha (v1·v0) / NodeGet / Generic JSON**; per-line **latency & packet loss display** (requires configuring Ping Tasks in the Komari dashboard; currently Komari-only), Admin-Only toggle & optional offline/resource alerts (off by default) |
 | **🛡️ CF Turnstile Strict Mode** | Optional | `TURNSTILE_SITE_KEY` & `SECRET` | Auto-escalates high-risk ads or toggle manually in Settings |
 | **🌸 Group Check-in, Points & Badges** | Optional | `ENABLE_CHECKIN="true"` or in-app switch | Off by default for personal cards; 1-click on for group communities |
@@ -300,7 +291,8 @@ Found a bug, have a deployment question, or want to suggest an improvement? Feel
 
 ---
 
-## 🧧 Support & Sponsors
+<a id="sponsor"></a>
+## <img src="docs/assets/stickers/heart.webp" width="24" height="24" align="absmiddle" /> Support & Sponsors
 
 RosePanel Bot is 100% free & MIT open-source with zero paywalls and zero data collection. If it saves you from Telegram spam or makes your personal profile shine, feel free to support ongoing development ☕✨
 
@@ -334,6 +326,6 @@ RosePanel Bot is 100% free & MIT open-source with zero paywalls and zero data co
 
 <div align="center">
   <br />
-  <b>⭐ If you find RosePanel Bot useful, please consider giving it a Star!</b><br /><br />
+  <img src="docs/assets/stickers/star.webp" width="20" height="20" align="absmiddle" /> <b>If you find RosePanel Bot useful, please consider giving it a Star!</b> <img src="docs/assets/stickers/sakura.webp" width="20" height="20" align="absmiddle" /><br /><br />
   <sub>MIT License © 2026 <a href="https://github.com/mango0114">mango0114</a></sub>
 </div>

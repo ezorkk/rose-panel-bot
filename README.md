@@ -18,10 +18,10 @@
   <a href="AGENTS.md">🤖 AI 一键部署协议</a> ·
   <a href="CHANGELOG.md">📋 更新日志</a> ·
   <a href="https://t.me/Rose202_bot">💬 在线体验 / 联系作者</a> ·
-  <a href="#-赞助与支持">🧧 赞助支持</a>
+  <a href="#sponsor">🧧 赞助支持</a>
 </p>
 
-<sub><b>免建群即可收发私信、在面板里直接聊天发图的防广告 Telegram 机器人</b> — 面板内看记录/发图/显示贴纸与撤回 · 表情回应双向同步 · 四层防护 + 4 种人机验证（含动图题）· 免会员自定义回复 · 附带 <b>0.2 秒启动个人面板</b>（名片分享海报与来源追踪 / 多协议探针与掉线告警 / 网站书签 / 像素昼夜滑块），Cloudflare Workers 免费部署</sub>
+<sub><b>免建群即可收发私信、在面板里直接聊天发图的防广告 Telegram 机器人</b> — 接入 Cloudflare D1 面板聊天提速 400%+ · 面板内看记录/发图/显示贴纸与撤回 · 表情回应双向同步 · 五层防护 + 4 种人机验证（含动图题）· 免会员自定义回复 · 附带 <b>0.2 秒启动个人面板</b>（名片分享海报与来源追踪 / 多协议探针与掉线告警 / 网站书签 / 像素昼夜滑块），Cloudflare Workers 免费部署</sub>
 
 </div>
 
@@ -31,7 +31,7 @@
 
 ---
 
-## 🎬 动态功能演示（三段实机录屏）
+## <img src="docs/assets/stickers/mail.webp" width="24" height="24" align="absmiddle" /> 动态功能演示（三段实机录屏）
 
 ### 1 · 面板内直接聊天与手机相册选图发图
 
@@ -62,7 +62,7 @@
 
 ---
 
-## 💬 更多实机亮点：分享海报 · `/add` 出题 · `/set` 动态徽章 · 站内版本更新
+## <img src="docs/assets/stickers/sparkle.webp" width="24" height="24" align="absmiddle" /> 更多实机亮点：分享海报 · `/add` 出题 · `/set` 动态徽章 · 站内版本更新
 
 <div align="center">
   <p><b>🪪 一键生成浅/深色二维码名片分享海报 · 长按存图 / 系统分享 / 复制名片链接</b></p>
@@ -86,8 +86,8 @@
   <p><b>🪪 1 · 玫瑰瓷个人名片与一键发私信　｜　🌐 2 · 公开 / 私密双层个人小站</b></p>
   <img src="docs/assets/preview-row1.png" alt="1 名片与来信礼仪 · 2 公开与私密双层小站" width="96%" />
   <br /><br />
-  <p><b>📡 3 · 多合一节点探针　｜　🛡️ 4 · 四层防广告护盾与访客列表</b></p>
-  <img src="docs/assets/preview-row2.png" alt="3 多合一节点探针（Komari / 哪吒 / NodeGet / JSON） · 4 访客与四层防广告管理" width="96%" />
+  <p><b>📡 3 · 多合一节点探针　｜　🛡️ 4 · 五层防广告护盾与访客列表</b></p>
+  <img src="docs/assets/preview-row2.png" alt="3 多合一节点探针（Komari / 哪吒 / NodeGet / JSON） · 4 访客与五层防广告管理" width="96%" />
   <br /><br />
   <p><b>🌙 暗黑玫瑰瓷主题　｜　🖼️ 往来图片相册与链接清单（按「对方发来 / 我发出的」自动归档）</b></p>
   <img src="docs/assets/preview-row3.png" alt="暗黑玫瑰瓷主题 · 往来图片相簿与链接分类归档" width="96%" />
@@ -98,20 +98,11 @@
 
 ---
 
-## 🛡️ 四层防骚扰架构 & 4 种人机验证
+## <img src="docs/assets/stickers/rose.webp" width="24" height="24" align="absmiddle" /> 五层防骚扰架构 & 4 种人机验证
 
-```mermaid
-flowchart LR
-  U["陌生人私聊 Bot"] --> L1{"第 1 层 · CAS 全球黑名单"}
-  L1 -- "命中已知广告号" --> DROP["🚫 静默拦截并计入战报"]
-  L1 -- "正常用户" --> L2{"第 2 层 · 风险与去混淆检测"}
-  L2 -- "命中违禁词 / 编辑偷改" --> DROP
-  L2 -- "广告海报图 / 转发 / 外链 / 广告昵称" --> TS["🛡️ 自动升级 CF Turnstile 严格核验"]
-  L2 -- "普通消息" --> CH["🎭 表情包看图猜题 / 🎯 Emoji 找茬"]
-  CH -- "触发防脚本陷阱 / 连错" --> COOL["⏳ 冷却锁定（可选直接拉黑）"]
-  CH -- "通过验证 (免验证天数可调)" --> INBOX["💬 转发至通知群独立话题 + 小程序媒体归档"]
-  TS -- "核验通过" --> INBOX
-```
+<div align="center">
+  <img src="docs/assets/shield-5layers.png" alt="RosePanel 五层防广告护盾思维导图：CAS 联防、风险去混淆、4 种人机验证与蜜罐、新访客观察期审核、防编辑偷改守卫" width="100%" />
+</div>
 
 在小程序 **⚙️ 设置 → 防骚扰验证** 可一键切换 4 种模式（亦可一键关闭验证直转），容错次数、冷却时长、免验证天数、**新访客观察期（验证通过后前几条带链接/@用户名/联系方式或转发的消息先扣下静默待审，支持链接白名单域名，放行按序补发不丢消息）**与 **6 组广告特有短语屏蔽词预设（默认不选，点选或整组添加）**全可视化配置：
 
@@ -133,7 +124,7 @@ flowchart LR
 | 模块 | 默认状态 | 开启条件 | 说明 |
 | :--- | :---: | :--- | :--- |
 | **🪪 个人名片 + 🌐 公开/私密小站** | 核心必选 | `BOT_TOKEN` + `TOPIC_MAP` KV | 0.2 秒玫瑰瓷个人面板、像素昼夜滑块、动态贴纸徽章、双层小站，支持生成分享海报、链接预览、`src_<渠道>` 来源追踪、按人去重的本月访客数（默认仅站长可见；单日约 500 位新访客触及 KV 免费写入上限时静默跳过计数，不影响名片打开），以及名片底部「想要同款？」部署引导（仅访客可见，可在设置中一键关闭） |
-| **👤 双向私聊 + 四层反广告护盾** | 按需选配 | 配好 `ADMIN_IDS` 即开（Bot 私聊直推），或话题群发 `/bind`（可选，推荐高频用户） | 免建群即可收发私信（引用推送回复）、面板内直接聊天发图与签名贴纸展示、表情回应双向同步（话题模式下每条访客消息多 1 次 30 天 TTL 的 `tmsg:*` KV 反查写入）、往来图片/链接归档、CAS 与表情包验证；话题群 `/bind` 后自动切换为独立话题收件箱 |
+| **👤 双向私聊 + 五层反广告护盾** | 按需选配 | 配好 `ADMIN_IDS` 即开（Bot 私聊直推），或话题群发 `/bind`（可选，推荐高频用户） | 免建群即可收发私信（引用推送回复）、面板内直接聊天发图与签名贴纸展示（接入 D1 后聊天同步提速 400%+）、表情回应双向同步、往来图片/链接归档、CAS + 表情包验证 + 观察期审核；话题群 `/bind` 后自动切换为独立话题收件箱 |
 | **📡 多协议节点探针** | 按需选配 | 小程序内选类型并填地址 | 支持 **Komari / 哪吒 (v1·v0) / NodeGet / 通用 JSON**；支持节点各线路**延迟与丢包显示**（需在 Komari 后台添加「延迟监测」任务，目前仅支持 Komari），支持「仅自己可见」与可选掉线/高负载告警（默认关闭） |
 | **🛡️ CF Turnstile 严格验证** | 按需选配 | 填入 `TURNSTILE_SITE_KEY` & `SECRET` | 高危广告自动升级核验，或在设置里手动切换 |
 | **🌸 群签到积分与徽章系统** | 按需选配 | `ENABLE_CHECKIN="true"` 或设置内一键开 | 个人名片模式默认关闭，群社区部署时一键开启 |
@@ -300,7 +291,8 @@ npx wrangler dev --ip 127.0.0.1 --port 8787 --persist-to ./.wrangler/state --sho
 
 ---
 
-## 🧧 赞助与支持
+<a id="sponsor"></a>
+## <img src="docs/assets/stickers/heart.webp" width="24" height="24" align="absmiddle" /> 赞助与支持
 
 本项目以 MIT 协议完全免费开源，零付费墙、零数据收集。如果你喜欢 **RosePanel Bot**，或者它帮你挡掉了恼人的 TG 广告骚扰，欢迎请作者喝杯咖啡 / 投喂一点 AI 算力，支持项目持续迭代 ☕✨
 
@@ -337,6 +329,6 @@ npx wrangler dev --ip 127.0.0.1 --port 8787 --persist-to ./.wrangler/state --sho
 
 <div align="center">
   <br />
-  <b>⭐ 如果这个项目对您有帮助，请给个 Star 支持一下！</b><br /><br />
+  <img src="docs/assets/stickers/star.webp" width="20" height="20" align="absmiddle" /> <b>如果这个项目对您有帮助，请给个 Star 支持一下！</b> <img src="docs/assets/stickers/sakura.webp" width="20" height="20" align="absmiddle" /><br /><br />
   <sub>MIT License © 2026 <a href="https://github.com/mango0114">mango0114</a></sub>
 </div>
