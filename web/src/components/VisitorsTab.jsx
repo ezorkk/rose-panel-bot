@@ -326,8 +326,6 @@ export default function VisitorsTab({
         setMsgLoadingMore(true);
       } else {
         setMsgSearching(true);
-        submittedSearchRef.current = searchParams;
-        setSubmittedMsgQuery(searchParams.q);
       }
       const url = buildSearchUrl({
         q: searchParams.q,
@@ -346,6 +344,8 @@ export default function VisitorsTab({
           return [...prev, ...nextItems.filter((x) => !seen.has(`${x.uid}:${x.id}`))];
         });
       } else {
+        submittedSearchRef.current = searchParams;
+        setSubmittedMsgQuery(searchParams.q);
         setMsgResults(nextItems);
       }
       setMsgHasMore(Boolean(res.hasMore));
