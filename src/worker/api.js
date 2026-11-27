@@ -12,6 +12,7 @@ import {
   resolveBotUsername,
   reviewPendingVisitor,
   sendAdminDirectVisitorReply,
+  sendMusicTrackToUser,
   syncTelegramBotSurface,
 } from './bot.js';
 import { getLeaderboard, getMemberTicket, performCheckin } from './checkin.js';
@@ -324,6 +325,30 @@ export async function handleApiRequest(request, env, url, ctx = null) {
     const source = typeof body?.source === 'string' ? body.source : '';
     const chatRes = await initiateChatFromMiniApp(env, url.origin, auth.user, config, { source });
     return json({ ok: true, ...chatRes });
+  }
+
+  // POST /api/music/play — delivers an owner-curated playlist track via Telegram sendAudio (zero CF egress, fileId stays server-side)
+  if (path === '/api/music/play' && method === 'POST') {
+    const body = await readJsonBody(request);
+    const trackId = typeof body?.id === 'string' ? body.id.trim() : '';
+    if (!trackId) {
+      return json({ ok: false, error: '缺少曲目 ID' }, 400);
+    }
+    const playRes = await sendMusicTrackToUser(env, url.origin, auth.user?.id || '', trackId, config, {
+      isAdmin: auth.isAdmin,
+      fromStart: false,
+    });
+    if (!playRes.ok) {
+      return json(
+        {
+          ok: false,
+          error: playRes.error || '发送音频失败',
+          ...(playRes.sourceUrl ? { sourceUrl: playRes.sourceUrl } : {}),
+        },
+        playRes.status || 400
+      );
+    }
+    return json(playRes);
   }
 
   // POST /api/checkin
@@ -757,6 +782,29 @@ export async function handleApiRequest(request, env, url, ctx = null) {
       // /setup is the explicit place that (re)sets it.
       if (/^https:\/\//i.test(url.origin) && !config.siteOrigin) {
         body.siteOrigin = url.origin;
+      }
+      // Never accept client-supplied Telegram fileId / fileUniqueId / sourceUrl on playlist tracks;
+      // savePanelConfig restores server-owned fields by matching existing track IDs and preserves
+      // any newly forwarded tracks newer than `baseAt`.
+      if (body.music && typeof body.music === 'object') {
+        const sanitizedMusic = {
+          ...(body.music.enabled !== undefined ? { enabled: body.music.enabled } : {}),
+          ...(body.music.title !== undefined ? { title: body.music.title } : {}),
+        };
+        if (Array.isArray(body.music.tracks)) {
+          sanitizedMusic.tracks = body.music.tracks
+            .filter((t) => t && typeof t === 'object')
+            .map((t) => ({
+              id: t.id,
+              ...(t.title !== undefined ? { title: t.title } : {}),
+              ...(t.performer !== undefined ? { performer: t.performer } : {}),
+            }));
+          const rawBaseAt = Number(body.music.baseAt);
+          if (Number.isFinite(rawBaseAt) && rawBaseAt > 0) {
+            sanitizedMusic.baseAt = Math.trunc(rawBaseAt);
+          }
+        }
+        body.music = sanitizedMusic;
       }
       const saved = await savePanelConfig(env, body);
       const nextSurfaceSig = JSON.stringify({

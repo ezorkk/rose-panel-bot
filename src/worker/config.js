@@ -15,11 +15,20 @@ import {
   normalizeStatusTone,
 } from '../../web/src/lib/statusPresets.js';
 import { buildMiniAppDirectLink } from './telegram.js';
+import {
+  MAX_MUSIC_TRACKS,
+  loadD1MusicTracks,
+  removeD1MusicTrack,
+  saveD1MusicTracks,
+  upsertD1MusicTrack,
+  withKvMusicLock,
+} from './store/musicStore.js';
 
 export {
   DEFAULT_DOCK_STYLE,
   DEFAULT_THEME_PRESET,
   DOCK_STYLE_IDS,
+  MAX_MUSIC_TRACKS,
   STATUS_STICKER_IDS,
   STATUS_TONES,
   THEME_PRESET_IDS,
@@ -105,6 +114,12 @@ export const DEFAULT_PROBATION = {
   maxMessages: 3, // 1–20
   hours: 24, // 1–168
   allowDomains: [], // 链接白名单，例如 ['github.com', 'example.com']，匹配域名本身及其子域名
+};
+
+export const DEFAULT_MUSIC = {
+  enabled: true, // 默认开启（无曲目时前端自动隐藏）
+  title: '最近在听',
+  tracks: [],
 };
 
 export const DEFAULT_NAV_ORDER = ['profile', 'sites', 'probe', 'visitors', 'leaderboard'];
@@ -236,6 +251,7 @@ export const DEFAULT_CONFIG = {
     branch: 'main',
     githubToken: '', // optional single-repo Fine-grained PAT for in-app 1-click fork sync
   },
+  music: structuredClone(DEFAULT_MUSIC),
   ui: {
     navOrder: [...DEFAULT_NAV_ORDER],
     themePreset: DEFAULT_THEME_PRESET, // rose | ocean | matcha | lavender | mono
@@ -453,6 +469,78 @@ export function normalizeProbation(baseProbation = DEFAULT_PROBATION, override =
   };
 }
 
+export function normalizeMusicSourceUrl(raw = '') {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  const match = s.match(/^https:\/\/t\.me\/([A-Za-z0-9_]{3,64})\/([1-9]\d{0,12})$/);
+  if (!match) return '';
+  return `https://t.me/${match[1]}/${match[2]}`;
+}
+
+export function normalizeMusicTrack(track = {}) {
+  if (!track || typeof track !== 'object') return null;
+  const id = String(track.id || '').trim().toLowerCase();
+  if (!/^[a-z0-9_]{4,24}$/.test(id)) return null;
+  const fileId = String(track.fileId || '').trim().slice(0, 256);
+  if (!fileId) return null;
+  const fileUniqueId = String(track.fileUniqueId || '').trim().slice(0, 128);
+  const title = String(track.title || '').trim().slice(0, 80) || '未命名音频';
+  const performer = String(track.performer || '').trim().slice(0, 60);
+  const rawDuration = Number(track.duration);
+  const duration =
+    Number.isFinite(rawDuration) && rawDuration > 0 ? Math.min(Math.round(rawDuration), 86400) : 0;
+  const sourceUrl = normalizeMusicSourceUrl(track.sourceUrl);
+  const sourceTitle = sourceUrl ? String(track.sourceTitle || '').trim().slice(0, 60) : '';
+  const rawAddedAt = Number(track.addedAt);
+  const addedAt = Number.isFinite(rawAddedAt) && rawAddedAt > 0 ? Math.trunc(rawAddedAt) : Date.now();
+  return {
+    id,
+    fileId,
+    fileUniqueId,
+    title,
+    performer,
+    duration,
+    sourceUrl,
+    sourceTitle,
+    addedAt,
+  };
+}
+
+export function normalizeMusic(baseMusic = DEFAULT_MUSIC, override = null) {
+  const base = baseMusic && typeof baseMusic === 'object' ? baseMusic : DEFAULT_MUSIC;
+  const ov = override && typeof override === 'object' ? override : {};
+  const enabled = (ov.enabled ?? base.enabled) !== false;
+  const rawTitle = ov.title !== undefined ? ov.title : base.title;
+  const title = String(rawTitle ?? '').trim().slice(0, 24) || DEFAULT_MUSIC.title;
+  const rawTracks = Array.isArray(ov.tracks)
+    ? ov.tracks
+    : Array.isArray(base.tracks)
+      ? base.tracks
+      : [];
+  const seen = new Set();
+  const tracks = [];
+  for (const item of rawTracks) {
+    const normalized = normalizeMusicTrack(item);
+    if (!normalized || seen.has(normalized.id)) continue;
+    seen.add(normalized.id);
+    tracks.push(normalized);
+    if (tracks.length >= MAX_MUSIC_TRACKS) break;
+  }
+  return { enabled, title, tracks };
+}
+
+function stripPublicTrackFields(track) {
+  return {
+    id: track.id,
+    title: track.title,
+    performer: track.performer,
+    duration: track.duration,
+    sourceUrl: track.sourceUrl,
+    sourceTitle: track.sourceTitle,
+    addedAt: track.addedAt,
+  };
+}
+
 function resolveAvatarMode(rawMode, avatarUrl) {
   if (AVATAR_MODES.includes(rawMode)) return rawMode;
   return String(avatarUrl || '').trim() ? 'custom' : 'bot';
@@ -475,6 +563,7 @@ export function mergeConfig(base, override) {
     cloned.probe.alerts = normalizeProbeAlerts(DEFAULT_PROBE_ALERTS, cloned.probe.alerts);
     cloned.pmBot.chatRetentionDays = normalizeChatRetentionDays(cloned.pmBot?.chatRetentionDays);
     cloned.pmBot.probation = normalizeProbation(DEFAULT_PROBATION, cloned.pmBot?.probation);
+    cloned.music = normalizeMusic(DEFAULT_MUSIC, cloned.music);
     cloned.ui = {
       navOrder: normalizeNavOrder(cloned.ui?.navOrder),
       themePreset: normalizeThemePreset(cloned.ui?.themePreset),
@@ -571,6 +660,7 @@ export function mergeConfig(base, override) {
       ...base.updater,
       ...(override.updater || {}),
     },
+    music: normalizeMusic(base.music, override.music),
     ui: {
       navOrder: normalizeNavOrder(override.ui?.navOrder ?? base.ui?.navOrder),
       themePreset: normalizeThemePreset(override.ui?.themePreset ?? base.ui?.themePreset),
@@ -634,96 +724,290 @@ export async function loadPanelConfig(env) {
   }
   // NOTE: Intentionally do NOT copy env.GITHUB_UPDATE_TOKEN into merged.updater.githubToken
   // so saving Settings never persists an environment Secret in plaintext inside KV.
+
+  // When D1 is bound, `music_tracks` is the atomic source of truth (seeds once from legacy KV if needed).
+  // Fail open to KV tracks if D1 is transiently unavailable.
+  if (env?.DB) {
+    try {
+      const d1Tracks = await loadD1MusicTracks(env, merged.music.tracks);
+      if (Array.isArray(d1Tracks)) {
+        merged.music = normalizeMusic(DEFAULT_MUSIC, {
+          ...merged.music,
+          tracks: d1Tracks,
+        });
+      }
+    } catch {
+      // Fall back to KV tracks
+    }
+  }
+
   return merged;
 }
 
+function hydrateIncomingMusic(currentMusic, incomingMusic) {
+  if (!incomingMusic || typeof incomingMusic !== 'object' || !Array.isArray(incomingMusic.tracks)) {
+    return { nextMusic: incomingMusic, preserveAfterMs: 0, tracksModified: false };
+  }
+  const currentTracks = Array.isArray(currentMusic?.tracks) ? currentMusic.tracks : [];
+  const existingById = new Map(currentTracks.map((t) => [t.id, t]));
+  const rawBaseAt = Number(incomingMusic.baseAt);
+  const preserveAfterMs = Number.isFinite(rawBaseAt) && rawBaseAt > 0 ? Math.trunc(rawBaseAt) : 0;
+
+  const clientIds = new Set();
+  const hydratedClientTracks = incomingMusic.tracks.map((item) => {
+    if (!item || typeof item !== 'object') return item;
+    const id = String(item.id || '').trim().toLowerCase();
+    if (id) clientIds.add(id);
+    if (item.fileId) return item;
+    const prev = existingById.get(id);
+    if (!prev) return item;
+    return {
+      ...prev,
+      title: item.title !== undefined ? item.title : prev.title,
+      performer: item.performer !== undefined ? item.performer : prev.performer,
+    };
+  });
+
+  // Preserve any songs forwarded AFTER Settings opened (`addedAt > baseAt`) even if client sent an older snapshot.
+  const newerTracks =
+    preserveAfterMs > 0
+      ? currentTracks.filter((t) => !clientIds.has(t.id) && Number(t.addedAt) > preserveAfterMs)
+      : [];
+
+  return {
+    nextMusic: {
+      ...incomingMusic,
+      tracks: [...newerTracks, ...hydratedClientTracks],
+    },
+    preserveAfterMs,
+    tracksModified: true,
+  };
+}
+
 export async function savePanelConfig(env, nextConfig) {
-  const current = await loadPanelConfig(env);
-  const merged = mergeConfig(current, nextConfig);
+  const runSave = async () => {
+    const current = await loadPanelConfig(env);
+    let effectiveNext = nextConfig;
+    let preserveAfterMs = 0;
+    let tracksModified = false;
 
-  // Preserve stored secrets if admin sent masked placeholder
-  if (nextConfig?.probe?.apiKey === '********') {
-    merged.probe.apiKey = current.probe.apiKey;
-  }
-  if (nextConfig?.updater?.githubToken === '********') {
-    merged.updater.githubToken = current.updater.githubToken;
-  }
-  merged.updater.forkRepo = String(merged.updater.forkRepo || '').trim().slice(0, 120);
-  merged.updater.branch = String(merged.updater.branch || 'main').trim().slice(0, 64) || 'main';
-  merged.updater.githubToken = String(merged.updater.githubToken || '').trim().slice(0, 256);
+    if (nextConfig && typeof nextConfig === 'object' && nextConfig.music && typeof nextConfig.music === 'object') {
+      const hydrated = hydrateIncomingMusic(current.music, nextConfig.music);
+      preserveAfterMs = hydrated.preserveAfterMs;
+      tracksModified = hydrated.tracksModified;
+      effectiveNext = {
+        ...nextConfig,
+        music: hydrated.nextMusic,
+      };
+    }
 
-  merged.profile.labelsRev = PROFILE_LABELS_REV;
-  merged.profile.socialsRev = SOCIALS_CLEANUP_REV;
-  merged.profile.statusTone = normalizeStatusTone(merged.profile.statusTone);
-  merged.profile.statusSticker = normalizeStatusSticker(merged.profile.statusSticker);
-  merged.profile.statusText = String(merged.profile.statusText ?? '').trim().slice(0, 48);
-  merged.profile.ownerTag = String(merged.profile.ownerTag ?? '').trim().slice(0, 32);
-  merged.profile.badgeTitle = String(merged.profile.badgeTitle ?? '').trim().slice(0, 32);
-  merged.profile.joinedText = String(merged.profile.joinedText ?? '').trim().slice(0, 48);
-  merged.profile.showVisitCounter = Boolean(merged.profile.showVisitCounter);
-  merged.profile.showPoweredBy =
-    merged.profile.showPoweredBy === undefined ? true : Boolean(merged.profile.showPoweredBy);
+    const merged = mergeConfig(current, effectiveNext);
 
-  // Clamp numeric settings
-  merged.probe.cacheTtlSeconds = Math.min(Math.max(Number(merged.probe.cacheTtlSeconds) || 15, 5), 300);
-  merged.probe.alerts = normalizeProbeAlerts(DEFAULT_PROBE_ALERTS, merged.probe.alerts);
-  const rawSiteOrigin = String(merged.siteOrigin || '').trim().replace(/\/+$/, '');
-  merged.siteOrigin = /^https:\/\/[^\s/]+$/i.test(rawSiteOrigin) ? rawSiteOrigin.slice(0, 200) : '';
-  merged.community.dailyMinPoints = Math.min(Math.max(Number(merged.community.dailyMinPoints) || 10, 1), 1000);
-  merged.community.dailyMaxPoints = Math.min(
-    Math.max(Number(merged.community.dailyMaxPoints) || 25, merged.community.dailyMinPoints),
-    2000
-  );
-  merged.community.streakStepBonus = Math.min(Math.max(Number(merged.community.streakStepBonus) || 0, 0), 100);
-  merged.community.streakMaxBonus = Math.min(Math.max(Number(merged.community.streakMaxBonus) || 0, 0), 500);
-  if (!['emoji', 'sticker_quiz', 'quiz', 'turnstile', 'off'].includes(merged.pmBot.verificationMode)) {
-    merged.pmBot.verificationMode = merged.pmBot.enableVerification ? 'emoji' : 'off';
-  }
-  merged.pmBot.enableVerification = merged.pmBot.verificationMode !== 'off';
-  merged.pmBot.maxVerifyFailures = Math.min(Math.max(Number(merged.pmBot.maxVerifyFailures) || 2, 1), 5);
-  merged.pmBot.cooldownMinutes = Math.min(Math.max(Number(merged.pmBot.cooldownMinutes) || 10, 1), 1440);
-  merged.pmBot.enableCasCheck = merged.pmBot.enableCasCheck !== false;
-  merged.pmBot.smartEscalation = merged.pmBot.smartEscalation !== false;
-  merged.pmBot.blockUnverifiedMedia = merged.pmBot.blockUnverifiedMedia !== false;
-  merged.pmBot.enableHoneypot = merged.pmBot.enableHoneypot !== false;
-  merged.pmBot.honeypotAction = merged.pmBot.honeypotAction === 'ban' ? 'ban' : 'cooldown';
-  merged.pmBot.verifiedDays = Math.min(Math.max(Number(merged.pmBot.verifiedDays) || 30, 1), 3650);
-  merged.pmBot.chatRetentionDays = normalizeChatRetentionDays(merged.pmBot.chatRetentionDays);
-  merged.pmBot.syncBotDescription = merged.pmBot.syncBotDescription !== false;
-  merged.pmBot.showChatMenuButton = merged.pmBot.showChatMenuButton !== false;
-  const rawWelcomeImg = String(merged.pmBot.welcomeImageUrl || '').trim();
-  merged.pmBot.welcomeImageUrl = /^https:\/\/\S+/i.test(rawWelcomeImg) ? rawWelcomeImg.slice(0, 500) : '';
-  merged.pmBot.enableStartWelcome = merged.pmBot.enableStartWelcome !== false;
-  merged.pmBot.showPanelButtonInWelcome = merged.pmBot.showPanelButtonInWelcome !== false;
-  merged.pmBot.autoReplyEnabled = Boolean(merged.pmBot.autoReplyEnabled);
-  merged.pmBot.autoReplyText = String(merged.pmBot.autoReplyText ?? '').trim().slice(0, 2000);
-  merged.pmBot.autoReplyCooldownMinutes = Math.min(
-    Math.max(Number(merged.pmBot.autoReplyCooldownMinutes) || 30, 1),
-    1440
-  );
-  merged.pmBot.statusAutoReplyEnabled = Boolean(merged.pmBot.statusAutoReplyEnabled);
-  merged.pmBot.statusAutoReplyText = String(merged.pmBot.statusAutoReplyText ?? '').trim().slice(0, 2000);
-  merged.pmBot.keywordReplies = Array.isArray(merged.pmBot.keywordReplies)
-    ? merged.pmBot.keywordReplies
-        .map(normalizeKeywordRule)
-        .filter((rule) => hasValidKeywords(rule.keywords) && rule.reply.length > 0)
-        .slice(0, 50)
-    : [];
-  merged.pmBot.showVisitorAvatarInCard = Boolean(merged.pmBot.showVisitorAvatarInCard);
-  merged.pmBot.welcomeText = String(merged.pmBot.welcomeText ?? '').slice(0, 2000);
-  merged.pmBot.blockedKeywords = String(merged.pmBot.blockedKeywords || '').slice(0, 2000);
-  merged.pmBot.stickerChallenges = Array.isArray(merged.pmBot.stickerChallenges)
-    ? merged.pmBot.stickerChallenges.filter((item) => item?.fileId && item?.question && item?.answer).slice(0, 40)
-    : [];
-  merged.pmBot.probation = normalizeProbation(DEFAULT_PROBATION, merged.pmBot.probation);
-  merged.ui = {
-    navOrder: normalizeNavOrder(merged.ui?.navOrder),
-    themePreset: normalizeThemePreset(merged.ui?.themePreset),
-    dockStyle: normalizeDockStyle(merged.ui?.dockStyle),
+    // Preserve stored secrets if admin sent masked placeholder
+    if (nextConfig?.probe?.apiKey === '********') {
+      merged.probe.apiKey = current.probe.apiKey;
+    }
+    if (nextConfig?.updater?.githubToken === '********') {
+      merged.updater.githubToken = current.updater.githubToken;
+    }
+    merged.updater.forkRepo = String(merged.updater.forkRepo || '').trim().slice(0, 120);
+    merged.updater.branch = String(merged.updater.branch || 'main').trim().slice(0, 64) || 'main';
+    merged.updater.githubToken = String(merged.updater.githubToken || '').trim().slice(0, 256);
+
+    merged.profile.labelsRev = PROFILE_LABELS_REV;
+    merged.profile.socialsRev = SOCIALS_CLEANUP_REV;
+    merged.profile.statusTone = normalizeStatusTone(merged.profile.statusTone);
+    merged.profile.statusSticker = normalizeStatusSticker(merged.profile.statusSticker);
+    merged.profile.statusText = String(merged.profile.statusText ?? '').trim().slice(0, 48);
+    merged.profile.ownerTag = String(merged.profile.ownerTag ?? '').trim().slice(0, 32);
+    merged.profile.badgeTitle = String(merged.profile.badgeTitle ?? '').trim().slice(0, 32);
+    merged.profile.joinedText = String(merged.profile.joinedText ?? '').trim().slice(0, 48);
+    merged.profile.showVisitCounter = Boolean(merged.profile.showVisitCounter);
+    merged.profile.showPoweredBy =
+      merged.profile.showPoweredBy === undefined ? true : Boolean(merged.profile.showPoweredBy);
+
+    // Clamp numeric settings
+    merged.probe.cacheTtlSeconds = Math.min(Math.max(Number(merged.probe.cacheTtlSeconds) || 15, 5), 300);
+    merged.probe.alerts = normalizeProbeAlerts(DEFAULT_PROBE_ALERTS, merged.probe.alerts);
+    const rawSiteOrigin = String(merged.siteOrigin || '').trim().replace(/\/+$/, '');
+    merged.siteOrigin = /^https:\/\/[^\s/]+$/i.test(rawSiteOrigin) ? rawSiteOrigin.slice(0, 200) : '';
+    merged.community.dailyMinPoints = Math.min(Math.max(Number(merged.community.dailyMinPoints) || 10, 1), 1000);
+    merged.community.dailyMaxPoints = Math.min(
+      Math.max(Number(merged.community.dailyMaxPoints) || 25, merged.community.dailyMinPoints),
+      2000
+    );
+    merged.community.streakStepBonus = Math.min(Math.max(Number(merged.community.streakStepBonus) || 0, 0), 100);
+    merged.community.streakMaxBonus = Math.min(Math.max(Number(merged.community.streakMaxBonus) || 0, 0), 500);
+    if (!['emoji', 'sticker_quiz', 'quiz', 'turnstile', 'off'].includes(merged.pmBot.verificationMode)) {
+      merged.pmBot.verificationMode = merged.pmBot.enableVerification ? 'emoji' : 'off';
+    }
+    merged.pmBot.enableVerification = merged.pmBot.verificationMode !== 'off';
+    merged.pmBot.maxVerifyFailures = Math.min(Math.max(Number(merged.pmBot.maxVerifyFailures) || 2, 1), 5);
+    merged.pmBot.cooldownMinutes = Math.min(Math.max(Number(merged.pmBot.cooldownMinutes) || 10, 1), 1440);
+    merged.pmBot.enableCasCheck = merged.pmBot.enableCasCheck !== false;
+    merged.pmBot.smartEscalation = merged.pmBot.smartEscalation !== false;
+    merged.pmBot.blockUnverifiedMedia = merged.pmBot.blockUnverifiedMedia !== false;
+    merged.pmBot.enableHoneypot = merged.pmBot.enableHoneypot !== false;
+    merged.pmBot.honeypotAction = merged.pmBot.honeypotAction === 'ban' ? 'ban' : 'cooldown';
+    merged.pmBot.verifiedDays = Math.min(Math.max(Number(merged.pmBot.verifiedDays) || 30, 1), 3650);
+    merged.pmBot.chatRetentionDays = normalizeChatRetentionDays(merged.pmBot.chatRetentionDays);
+    merged.pmBot.syncBotDescription = merged.pmBot.syncBotDescription !== false;
+    merged.pmBot.showChatMenuButton = merged.pmBot.showChatMenuButton !== false;
+    const rawWelcomeImg = String(merged.pmBot.welcomeImageUrl || '').trim();
+    merged.pmBot.welcomeImageUrl = /^https:\/\/\S+/i.test(rawWelcomeImg) ? rawWelcomeImg.slice(0, 500) : '';
+    merged.pmBot.enableStartWelcome = merged.pmBot.enableStartWelcome !== false;
+    merged.pmBot.showPanelButtonInWelcome = merged.pmBot.showPanelButtonInWelcome !== false;
+    merged.pmBot.autoReplyEnabled = Boolean(merged.pmBot.autoReplyEnabled);
+    merged.pmBot.autoReplyText = String(merged.pmBot.autoReplyText ?? '').trim().slice(0, 2000);
+    merged.pmBot.autoReplyCooldownMinutes = Math.min(
+      Math.max(Number(merged.pmBot.autoReplyCooldownMinutes) || 30, 1),
+      1440
+    );
+    merged.pmBot.statusAutoReplyEnabled = Boolean(merged.pmBot.statusAutoReplyEnabled);
+    merged.pmBot.statusAutoReplyText = String(merged.pmBot.statusAutoReplyText ?? '').trim().slice(0, 2000);
+    merged.pmBot.keywordReplies = Array.isArray(merged.pmBot.keywordReplies)
+      ? merged.pmBot.keywordReplies
+          .map(normalizeKeywordRule)
+          .filter((rule) => hasValidKeywords(rule.keywords) && rule.reply.length > 0)
+          .slice(0, 50)
+      : [];
+    merged.pmBot.showVisitorAvatarInCard = Boolean(merged.pmBot.showVisitorAvatarInCard);
+    merged.pmBot.welcomeText = String(merged.pmBot.welcomeText ?? '').slice(0, 2000);
+    merged.pmBot.blockedKeywords = String(merged.pmBot.blockedKeywords || '').slice(0, 2000);
+    merged.pmBot.stickerChallenges = Array.isArray(merged.pmBot.stickerChallenges)
+      ? merged.pmBot.stickerChallenges.filter((item) => item?.fileId && item?.question && item?.answer).slice(0, 40)
+      : [];
+    merged.pmBot.probation = normalizeProbation(DEFAULT_PROBATION, merged.pmBot.probation);
+    merged.music = normalizeMusic(DEFAULT_MUSIC, merged.music);
+    merged.ui = {
+      navOrder: normalizeNavOrder(merged.ui?.navOrder),
+      themePreset: normalizeThemePreset(merged.ui?.themePreset),
+      dockStyle: normalizeDockStyle(merged.ui?.dockStyle),
+    };
+
+    if (env?.DB && tracksModified) {
+      const latestD1Tracks = await saveD1MusicTracks(env, merged.music.tracks, { preserveAfterMs });
+      if (Array.isArray(latestD1Tracks)) {
+        merged.music = normalizeMusic(DEFAULT_MUSIC, {
+          ...merged.music,
+          tracks: latestD1Tracks,
+        });
+      }
+    }
+
+    await safePutJSON(env.TOPIC_MAP, CONFIG_KV_KEY, merged);
+    return merged;
   };
 
-  await safePutJSON(env.TOPIC_MAP, CONFIG_KV_KEY, merged);
-  return merged;
+  if (!env?.DB && env?.TOPIC_MAP) {
+    return withKvMusicLock(env.TOPIC_MAP, runSave);
+  }
+  return runSave();
+}
+
+/**
+ * Concurrency-safe playlist track upsert for zero-command forwarded audio:
+ * - D1 mode: single atomic SQLite batch (`ON CONFLICT(file_unique_id)`) — zero cross-isolate loss
+ * - KV-only mode: serialized via in-isolate async mutex with fresh KV re-read
+ */
+export async function upsertMusicTrack(env, extracted, createId) {
+  if (env?.DB) {
+    const savedKv = await safeGetJSON(env.TOPIC_MAP, CONFIG_KV_KEY, null);
+    const legacyTracks = Array.isArray(savedKv?.music?.tracks) ? savedKv.music.tracks : [];
+    const res = await upsertD1MusicTrack(env, extracted, createId, legacyTracks);
+    return {
+      ...res,
+      enabled: savedKv?.music?.enabled !== false,
+    };
+  }
+
+  return withKvMusicLock(env?.TOPIC_MAP, async () => {
+    const freshCfg = await loadPanelConfig(env);
+    const currentTracks = Array.isArray(freshCfg.music?.tracks) ? [...freshCfg.music.tracks] : [];
+    const matchIdx = currentTracks.findIndex(
+      (t) =>
+        (extracted.fileUniqueId && t.fileUniqueId && t.fileUniqueId === extracted.fileUniqueId) ||
+        t.fileId === extracted.fileId
+    );
+
+    let track;
+    let updatedExisting = false;
+    let nextTracks;
+    const now = Date.now();
+
+    if (matchIdx >= 0) {
+      const prev = currentTracks[matchIdx];
+      updatedExisting = true;
+      track = {
+        ...prev,
+        fileId: extracted.fileId,
+        fileUniqueId: extracted.fileUniqueId || prev.fileUniqueId,
+        title: prev.title && prev.title !== '未命名音频' ? prev.title : extracted.title,
+        performer: prev.performer || extracted.performer,
+        duration: extracted.duration || prev.duration,
+        sourceUrl: extracted.sourceUrl || prev.sourceUrl,
+        sourceTitle: extracted.sourceUrl ? extracted.sourceTitle : prev.sourceTitle,
+        addedAt: now,
+      };
+      currentTracks.splice(matchIdx, 1);
+      nextTracks = [track, ...currentTracks];
+    } else {
+      const usedIds = new Set(currentTracks.map((t) => t.id));
+      let id = createId();
+      while (usedIds.has(id)) {
+        id = createId();
+      }
+      track = {
+        id,
+        ...extracted,
+        addedAt: now,
+      };
+      nextTracks = [track, ...currentTracks];
+    }
+
+    const trimmed = nextTracks.length > MAX_MUSIC_TRACKS;
+    const savedTracks = nextTracks.slice(0, MAX_MUSIC_TRACKS);
+    const updatedCfg = {
+      ...freshCfg,
+      music: normalizeMusic(freshCfg.music, { tracks: savedTracks }),
+    };
+    await safePutJSON(env.TOPIC_MAP, CONFIG_KV_KEY, updatedCfg);
+    return {
+      track,
+      updatedExisting,
+      total: updatedCfg.music.tracks.length,
+      trimmed,
+      enabled: updatedCfg.music.enabled !== false,
+    };
+  });
+}
+
+/**
+ * Concurrency-safe playlist track deletion for the `mus:rm:<id>` quick-undo callback.
+ */
+export async function removeMusicTrack(env, rawTrackId) {
+  const trackId = String(rawTrackId || '').trim().toLowerCase();
+  if (!/^[a-z0-9_]{4,24}$/.test(trackId)) return null;
+
+  if (env?.DB) {
+    const savedKv = await safeGetJSON(env.TOPIC_MAP, CONFIG_KV_KEY, null);
+    const legacyTracks = Array.isArray(savedKv?.music?.tracks) ? savedKv.music.tracks : [];
+    return removeD1MusicTrack(env, trackId, legacyTracks);
+  }
+
+  return withKvMusicLock(env?.TOPIC_MAP, async () => {
+    const freshCfg = await loadPanelConfig(env);
+    const tracks = Array.isArray(freshCfg.music?.tracks) ? freshCfg.music.tracks : [];
+    const target = tracks.find((t) => String(t.id || '').toLowerCase() === trackId);
+    if (!target) return null;
+    const nextTracks = tracks.filter((t) => String(t.id || '').toLowerCase() !== trackId);
+    const updatedCfg = {
+      ...freshCfg,
+      music: normalizeMusic(freshCfg.music, { tracks: nextTracks }),
+    };
+    await safePutJSON(env.TOPIC_MAP, CONFIG_KV_KEY, updatedCfg);
+    return target;
+  });
 }
 
 export function resolveShareUrl(config, env = {}, requestOrigin = '') {
@@ -757,6 +1041,15 @@ export function sanitizePublicConfig(config, env, isAdmin = false, requestOrigin
   };
 
   const probePrivateHidden = config.probe.visibility === 'private' && !isAdmin;
+  const rawMusic = normalizeMusic(DEFAULT_MUSIC, config.music);
+  const publicMusic =
+    !rawMusic.enabled && !isAdmin
+      ? { enabled: false, title: '', tracks: [] }
+      : {
+          enabled: rawMusic.enabled,
+          title: rawMusic.title,
+          tracks: rawMusic.tracks.map(stripPublicTrackFields),
+        };
   const publicVisitStats =
     config.profile?.showVisitCounter === true
       ? { thisMonth: Math.max(0, Number(visitStats?.thisMonth) || 0) }
@@ -816,6 +1109,7 @@ export function sanitizePublicConfig(config, env, isAdmin = false, requestOrigin
       themePreset: normalizeThemePreset(config.ui?.themePreset),
       dockStyle: normalizeDockStyle(config.ui?.dockStyle),
     },
+    music: publicMusic,
     shareUrl: resolveShareUrl(config, env, requestOrigin),
     ...(publicVisitStats ? { visitStats: publicVisitStats } : {}),
   };
@@ -843,6 +1137,17 @@ export function sanitizeAdminConfig(config, env = {}, inboxStatus = {}) {
   }
   cloned.pmBot.turnstileReady = Boolean(env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET);
   cloned.d1Bound = Boolean(env.DB);
+  const normalizedMusic = normalizeMusic(DEFAULT_MUSIC, cloned.music);
+  const maxTrackAddedAt = normalizedMusic.tracks.reduce(
+    (acc, t) => Math.max(acc, Number(t.addedAt) || 0),
+    0
+  );
+  cloned.music = {
+    enabled: normalizedMusic.enabled,
+    title: normalizedMusic.title,
+    tracks: normalizedMusic.tracks.map(stripPublicTrackFields),
+    snapshotAt: Math.max(Date.now(), maxTrackAddedAt),
+  };
   if (inboxStatus && typeof inboxStatus === 'object') {
     if (inboxStatus.inboxMode !== undefined) {
       cloned.inboxMode = inboxStatus.inboxMode;

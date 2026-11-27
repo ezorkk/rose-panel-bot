@@ -10,6 +10,7 @@ import {
   GitFork,
   Globe,
   Lock,
+  Music2,
   Palette,
   Plus,
   RefreshCw,
@@ -53,6 +54,16 @@ import {
 } from './WhatsNewModal.jsx';
 
 const DEFAULT_NAV_ORDER = ['profile', 'sites', 'probe', 'visitors', 'leaderboard'];
+
+function formatTrackDuration(seconds = 0) {
+  const total = Math.round(Number(seconds) || 0);
+  if (!Number.isFinite(total) || total <= 0) return '';
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
 
 function normalizeNavOrderDraft(raw) {
   const list = Array.isArray(raw) ? raw : [];
@@ -141,6 +152,7 @@ export default function SettingsDrawer({
   const [profilePanels, setProfilePanels] = useState({
     appearance: false,
     emblem: false,
+    music: false,
     ticket: false,
     splash: false,
     nav: false,
@@ -674,6 +686,55 @@ export default function SettingsDrawer({
     }));
   };
 
+  const updateMusicField = (key, val) => {
+    setDraft((prev) => ({
+      ...prev,
+      music: {
+        enabled: true,
+        title: '最近在听',
+        tracks: [],
+        ...(prev.music || {}),
+        [key]: val,
+      },
+    }));
+  };
+
+  const handleUpdateMusicTrack = (idx, key, val) => {
+    setDraft((prev) => {
+      const curr = prev.music || { enabled: true, title: '最近在听', tracks: [] };
+      const nextTracks = [...(curr.tracks || [])];
+      if (!nextTracks[idx]) return prev;
+      nextTracks[idx] = { ...nextTracks[idx], [key]: val };
+      return { ...prev, music: { ...curr, tracks: nextTracks } };
+    });
+  };
+
+  const handleMoveMusicTrack = (idx, delta) => {
+    haptic('light');
+    setDraft((prev) => {
+      const curr = prev.music || { enabled: true, title: '最近在听', tracks: [] };
+      const tracks = [...(curr.tracks || [])];
+      const target = idx + delta;
+      if (target < 0 || target >= tracks.length) return prev;
+      [tracks[idx], tracks[target]] = [tracks[target], tracks[idx]];
+      return { ...prev, music: { ...curr, tracks } };
+    });
+  };
+
+  const handleRemoveMusicTrack = (idx) => {
+    haptic('light');
+    setDraft((prev) => {
+      const curr = prev.music || { enabled: true, title: '最近在听', tracks: [] };
+      return {
+        ...prev,
+        music: {
+          ...curr,
+          tracks: (curr.tracks || []).filter((_, i) => i !== idx),
+        },
+      };
+    });
+  };
+
   const handleTestProbe = async () => {
     try {
       setTestingProbe(true);
@@ -702,9 +763,22 @@ export default function SettingsDrawer({
   const handleSave = async () => {
     try {
       setSaving(true);
+      const payload = structuredClone(draft);
+      const tracksChanged =
+        JSON.stringify(draft.music?.tracks || []) !== JSON.stringify(adminConfig?.music?.tracks || []);
+      if (payload.music) {
+        const snapshotAt = Number(adminConfig?.music?.snapshotAt || 0);
+        delete payload.music.snapshotAt;
+        if (tracksChanged) {
+          if (snapshotAt > 0) payload.music.baseAt = snapshotAt;
+        } else {
+          // Omit untouched track snapshot so songs forwarded while Settings was open are never overwritten.
+          delete payload.music.tracks;
+        }
+      }
       const res = await apiRequest('/api/admin/config', {
         method: 'PUT',
-        body: draft,
+        body: payload,
       });
       onToast('✅ 面板配置已实时生效');
       onSaved(res);
@@ -801,6 +875,14 @@ export default function SettingsDrawer({
           };
           const emblemModeLabel =
             emblem.type === 'tg_sticker' ? 'TG 贴纸' : emblem.type === 'url' ? '图片链接' : '内置玫瑰';
+          const musicDraft = draft.music || { enabled: true, title: '最近在听', tracks: [] };
+          const musicTrackList = Array.isArray(musicDraft.tracks) ? musicDraft.tracks : [];
+          const musicBadgeLabel =
+            musicDraft.enabled === false
+              ? `已隐藏${musicTrackList.length ? ` · ${musicTrackList.length} 首` : ''}`
+              : musicTrackList.length > 0
+                ? `${musicTrackList.length} 首`
+                : '转发音频即可添加';
           const splashStyle = draft.profile?.splash?.style || 'emblem';
           const splashStyleLabel =
             splashStyle === 'emoji' ? '表情跳动' : splashStyle === 'skeleton' ? '骨架屏' : '徽章呼吸';
@@ -1275,6 +1357,165 @@ export default function SettingsDrawer({
                             </div>
                           </div>
                         )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Collapsible 1b: Zero-Command Music Playlist */}
+              <div className="card update-fork-card">
+                <button
+                  type="button"
+                  className="update-collapse-head"
+                  aria-expanded={profilePanels.music}
+                  onClick={() => toggleProfilePanel('music')}
+                >
+                  <span className="update-collapse-title">
+                    <Music2 size={14} color="var(--accent)" style={{ flexShrink: 0 }} />
+                    <span>我的歌单 / 最近在听</span>
+                    <span className="update-collapse-badge">{musicBadgeLabel}</span>
+                  </span>
+                  {profilePanels.music ? (
+                    <ChevronDown size={16} style={{ flexShrink: 0 }} />
+                  ) : (
+                    <ChevronRight size={16} style={{ flexShrink: 0 }} />
+                  )}
+                </button>
+
+                {profilePanels.music && (
+                  <div className="update-fork-body">
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: 12,
+                        marginBottom: 12,
+                      }}
+                    >
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600 }}>在名片页公开展示歌单</div>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3, lineHeight: 1.5 }}>
+                          未收录曲目或关闭时访客端自动隐藏；关闭不会删除已转发的歌。
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={musicDraft.enabled !== false}
+                        className={`switch ${musicDraft.enabled !== false ? 'on' : ''}`}
+                        onClick={() => updateMusicField('enabled', !(musicDraft.enabled !== false))}
+                      >
+                        <span className="switch-knob" />
+                      </button>
+                    </div>
+
+                    <div className="field">
+                      <label className="field-label">歌单卡片标题（最多 24 字）</label>
+                      <input
+                        className="input"
+                        maxLength={24}
+                        value={musicDraft.title ?? '最近在听'}
+                        onChange={(e) => updateMusicField('title', e.target.value)}
+                        placeholder="留空默认显示「最近在听」"
+                      />
+                    </div>
+
+                    <div
+                      style={{
+                        fontSize: 12,
+                        color: 'var(--accent)',
+                        background: 'var(--accent-soft)',
+                        borderRadius: 12,
+                        padding: '8px 10px',
+                        marginBottom: 12,
+                        lineHeight: 1.55,
+                      }}
+                    >
+                      💡 <b>零指令添加</b>：把 Telegram 原生音频消息（含音乐频道 / 音乐 Bot 发来的歌）直接转发给机器人私聊即可自动收录（最多 20 首，支持一次多选转发）；仅识别原生音频（不含语音条与普通文件），回复/引用消息不会误收；来自公开频道的曲目会自动附带原帖链接。
+                    </div>
+
+                    {musicTrackList.length === 0 ? (
+                      <div className="empty-state" style={{ padding: '14px 8px', fontSize: 12 }}>
+                        还没有收录歌曲，直接转发一首音频给机器人即可自动出现在这里 🎵
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {musicTrackList.map((track, idx) => {
+                          const durText = formatTrackDuration(track.duration);
+                          return (
+                            <div key={track.id} className="settings-music-item">
+                              <div className="settings-music-head">
+                                <span className="nav-order-idx">{idx + 1}</span>
+                                <span className="settings-music-meta">
+                                  {durText ? `${durText}` : '音频'}
+                                  {track.sourceUrl ? (
+                                    <>
+                                      {' · '}
+                                      <button
+                                        type="button"
+                                        className="settings-music-src-link"
+                                        onClick={() => openExternalUrl(track.sourceUrl)}
+                                      >
+                                        {track.sourceTitle || '频道原帖'} <ExternalLink size={10} />
+                                      </button>
+                                    </>
+                                  ) : null}
+                                </span>
+                                <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                                  <button
+                                    type="button"
+                                    className="icon-btn"
+                                    style={{ width: 28, height: 28 }}
+                                    disabled={idx === 0}
+                                    aria-label="上移"
+                                    onClick={() => handleMoveMusicTrack(idx, -1)}
+                                  >
+                                    <ArrowUp size={13} />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="icon-btn"
+                                    style={{ width: 28, height: 28 }}
+                                    disabled={idx === musicTrackList.length - 1}
+                                    aria-label="下移"
+                                    onClick={() => handleMoveMusicTrack(idx, 1)}
+                                  >
+                                    <ArrowDown size={13} />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="icon-btn"
+                                    style={{ width: 28, height: 28 }}
+                                    aria-label="删除曲目"
+                                    onClick={() => handleRemoveMusicTrack(idx)}
+                                  >
+                                    <Trash2 size={13} color="var(--red)" />
+                                  </button>
+                                </div>
+                              </div>
+                              <div style={{ display: 'grid', gridTemplateColumns: '1.25fr 1fr', gap: 6, marginTop: 6 }}>
+                                <input
+                                  className="input"
+                                  style={{ background: 'var(--bg-elevated)', padding: '7px 10px', fontSize: 12.5 }}
+                                  maxLength={80}
+                                  value={track.title || ''}
+                                  placeholder="歌名（留空默认「未命名音频」）"
+                                  onChange={(e) => handleUpdateMusicTrack(idx, 'title', e.target.value)}
+                                />
+                                <input
+                                  className="input"
+                                  style={{ background: 'var(--bg-elevated)', padding: '7px 10px', fontSize: 12.5 }}
+                                  maxLength={60}
+                                  value={track.performer || ''}
+                                  placeholder="歌手（可选）"
+                                  onChange={(e) => handleUpdateMusicTrack(idx, 'performer', e.target.value)}
+                                />
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
