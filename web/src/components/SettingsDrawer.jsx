@@ -184,6 +184,11 @@ export default function SettingsDrawer({
   const [migratingStorage, setMigratingStorage] = useState(false);
   const [migrationFeedback, setMigrationFeedback] = useState(null);
   const mountedRef = React.useRef(true);
+  const settingsBodyRef = React.useRef(null);
+
+  useEffect(() => {
+    settingsBodyRef.current?.scrollTo?.({ top: 0 });
+  }, [section]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -703,47 +708,50 @@ export default function SettingsDrawer({
 
   return (
     <div className="sheet-backdrop" onClick={handleRequestClose}>
-      <div className="sheet-panel" onClick={(e) => e.stopPropagation()}>
-        <div className="sheet-handle" />
-        <div className="sheet-header">
-          <div className="sheet-title">面板可视化设置</div>
-          <button className="icon-btn" onClick={handleRequestClose}>
-            <X size={16} />
-          </button>
-        </div>
-
-        <div className="chip-row">
-          {[
-            { id: 'profile', label: '名片与徽章' },
-            { id: 'sites', label: '个人小站' },
-            { id: 'probe', label: '节点探针' },
-            { id: 'modes', label: '防骚扰验证' },
-            { id: 'welcome', label: '欢迎与回复' },
-            { id: 'update', label: '版本更新', badge: Boolean(updateInfo?.hasUpdate) },
-          ].map((tab) => (
-            <button
-              key={tab.id}
-              className={`chip ${section === tab.id ? 'active' : ''}`}
-              style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 5 }}
-              onClick={() => setSection(tab.id)}
-            >
-              {tab.label}
-              {tab.badge && (
-                <span
-                  aria-label="有新版本"
-                  style={{
-                    width: 7,
-                    height: 7,
-                    borderRadius: '50%',
-                    background: 'var(--accent)',
-                    display: 'inline-block',
-                  }}
-                />
-              )}
+      <div className="sheet-panel settings-sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="settings-sheet-head">
+          <div className="sheet-handle" />
+          <div className="sheet-header">
+            <div className="sheet-title">面板可视化设置</div>
+            <button className="icon-btn" onClick={handleRequestClose}>
+              <X size={16} />
             </button>
-          ))}
+          </div>
+
+          <div className="chip-row" style={{ marginBottom: 0 }}>
+            {[
+              { id: 'profile', label: '名片与徽章' },
+              { id: 'sites', label: '个人小站' },
+              { id: 'probe', label: '节点探针' },
+              { id: 'modes', label: '防骚扰验证' },
+              { id: 'welcome', label: '欢迎与回复' },
+              { id: 'update', label: '版本更新', badge: Boolean(updateInfo?.hasUpdate) },
+            ].map((tab) => (
+              <button
+                key={tab.id}
+                className={`chip ${section === tab.id ? 'active' : ''}`}
+                style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 5 }}
+                onClick={() => setSection(tab.id)}
+              >
+                {tab.label}
+                {tab.badge && (
+                  <span
+                    aria-label="有新版本"
+                    style={{
+                      width: 7,
+                      height: 7,
+                      borderRadius: '50%',
+                      background: 'var(--accent)',
+                      display: 'inline-block',
+                    }}
+                  />
+                )}
+              </button>
+            ))}
+          </div>
         </div>
 
+        <div className="settings-sheet-body" ref={settingsBodyRef}>
         {/* Section 1: Profile & Ticket Emblem (TG Stickers / Custom Emojis!) */}
         {section === 'profile' && (
           <>
@@ -3292,12 +3300,6 @@ export default function SettingsDrawer({
           );
         })()}
 
-        {(section !== 'update' || isDirty) && (
-          <button className="btn btn-primary btn-block" disabled={saving} onClick={handleSave}>
-            <Check size={16} /> {saving ? '保存中…' : '保存全部设置'}
-          </button>
-        )}
-
         {(section === 'update' || !hideStarStrip) && (
           <StarSupportBanner
             onDismiss={
@@ -3327,6 +3329,16 @@ export default function SettingsDrawer({
             💬 意见反馈
           </button>
         </div>
+        </div>
+
+        {(section !== 'update' || isDirty) && (
+          <div className="settings-sheet-footer">
+            <button className="btn btn-primary btn-block" disabled={saving} onClick={handleSave}>
+              <Check size={16} />{' '}
+              {saving ? '保存中…' : isDirty ? '保存全部设置（有未保存更改）' : '保存全部设置'}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
