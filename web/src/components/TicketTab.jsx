@@ -20,6 +20,14 @@ import { Avatar, StubEmblem, TicketEmblem } from './Emblems.jsx';
 import { apiRequest } from '../lib/api.js';
 import { BRAND_SIGNATURE } from '../lib/brand.js';
 import {
+  STATUS_SCENE_PRESETS,
+  STATUS_STICKERS,
+  STATUS_TONE_OPTIONS,
+  getStatusStickerUrl,
+  normalizeStatusSticker,
+  normalizeStatusTone,
+} from '../lib/statusPresets.js';
+import {
   buildSourceLink,
   closeMiniApp,
   copyText,
@@ -36,6 +44,7 @@ const GetSameCardModal = lazy(() => import('./GetSameCardModal.jsx'));
 export default function TicketTab({
   data,
   onNavigate,
+  onStatusUpdated,
   onCheckin,
   checkinLoading,
   onToast,
@@ -45,14 +54,17 @@ export default function TicketTab({
 
   const {
     config,
+    adminConfig = null,
     isAdmin,
     checkin,
     levels = [],
     visitorSummary = null,
     blockedToday = 0,
     pendingReviewCount: bootPendingReview,
+    awaitingReplyCount: bootAwaitingReply,
   } = data;
   const pendingReviewCount = Number(bootPendingReview ?? visitorSummary?.pendingReview ?? 0);
+  const awaitingReplyCount = Number(bootAwaitingReply ?? visitorSummary?.awaitingReply ?? 0);
   const { profile, community, bot } = config;
   const enableCheckin = Boolean(community.enableCheckin);
   // The top bar already shows displayName, so the card leads with the @handle instead of repeating it.
@@ -97,6 +109,87 @@ export default function TicketTab({
   const [posterData, setPosterData] = useState(null);
   const [showPromoLinks, setShowPromoLinks] = useState(false);
   const [showGetSame, setShowGetSame] = useState(false);
+  const [statusSheetOpen, setStatusSheetOpen] = useState(false);
+  const [statusSaving, setStatusSaving] = useState(false);
+  const [statusInitial, setStatusInitial] = useState(null);
+  const [statusDraft, setStatusDraft] = useState({
+    statusTone: 'online',
+    statusText: '',
+    statusSticker: '',
+    statusAutoReplyEnabled: false,
+    statusAutoReplyText: '',
+  });
+
+  const statusStickerUrl = getStatusStickerUrl(profile.statusSticker);
+
+  const openStatusSheet = () => {
+    if (!isAdmin) return;
+    haptic('light');
+    const initial = {
+      statusTone: normalizeStatusTone(profile.statusTone),
+      statusText: profile.statusText || '在线营业中',
+      statusSticker: normalizeStatusSticker(profile.statusSticker),
+      statusAutoReplyEnabled: Boolean(adminConfig?.pmBot?.statusAutoReplyEnabled),
+      statusAutoReplyText:
+        adminConfig?.pmBot?.statusAutoReplyText || '正在忙碌中，看到消息后会第一时间回复你～',
+    };
+    setStatusInitial(initial);
+    setStatusDraft(initial);
+    setStatusSheetOpen(true);
+  };
+
+  const applyStatusPreset = (preset) => {
+    haptic('light');
+    setStatusDraft((prev) => ({
+      ...prev,
+      statusTone: preset.statusTone,
+      statusText: preset.statusText,
+      statusSticker: preset.statusSticker,
+      statusAutoReplyEnabled: preset.statusAutoReplyEnabled,
+      ...(preset.statusAutoReplyEnabled && preset.statusAutoReplyText
+        ? { statusAutoReplyText: preset.statusAutoReplyText }
+        : {}),
+    }));
+  };
+
+  const handleSaveStatus = async () => {
+    try {
+      setStatusSaving(true);
+      // Only send temporary scene auto-reply fields when modified; permanent Settings auto-reply is never touched.
+      const body = {
+        statusTone: statusDraft.statusTone,
+        statusText: statusDraft.statusText,
+        statusSticker: statusDraft.statusSticker,
+      };
+      if (!statusInitial || statusDraft.statusAutoReplyEnabled !== statusInitial.statusAutoReplyEnabled) {
+        body.statusAutoReplyEnabled = statusDraft.statusAutoReplyEnabled;
+      }
+      if (
+        statusDraft.statusAutoReplyEnabled &&
+        (!statusInitial ||
+          statusDraft.statusAutoReplyText !== statusInitial.statusAutoReplyText ||
+          !adminConfig?.pmBot?.statusAutoReplyText)
+      ) {
+        body.statusAutoReplyText = statusDraft.statusAutoReplyText;
+      }
+      const res = await apiRequest('/api/admin/status', {
+        method: 'POST',
+        body,
+      });
+      onStatusUpdated?.(res);
+      setStatusSheetOpen(false);
+      haptic('success');
+      onToast(
+        statusDraft.statusAutoReplyEnabled
+          ? `已切换状态「${statusDraft.statusText || '忙碌'}」并开启临时回执`
+          : `已更新状态「${statusDraft.statusText || '在线'}」`
+      );
+    } catch (err) {
+      onToast(err.message);
+    } finally {
+      setStatusSaving(false);
+    }
+  };
 
   const resolvedShareUrl =
     String(config.shareUrl || '').trim() ||
@@ -171,29 +264,211 @@ export default function TicketTab({
 
   const renderAdminStatusStrip = () => {
     if (!isAdmin) return null;
-    if (pendingReviewCount > 0) {
-      return (
+    return (
+      <div className="admin-todo-bar" aria-label="站长待办概览">
         <button
           type="button"
-          className="admin-status-strip alert"
-          onClick={() => onNavigate('visitors', { filter: 'pending' })}
+          className={`admin-todo-item ${awaitingReplyCount > 0 ? 'accent' : ''}`}
+          onClick={() => onNavigate('visitors', { filter: awaitingReplyCount > 0 ? 'awaiting' : 'all' })}
         >
-          <span>🛡️ {pendingReviewCount} 位新访客的消息待审核</span>
-          <ChevronRight size={15} />
+          <span className="admin-todo-num">{awaitingReplyCount}</span>
+          <span className="admin-todo-label">待回复</span>
         </button>
-      );
-    }
-    return (
-      <button
-        type="button"
-        className="admin-status-strip calm"
-        onClick={() => onNavigate('visitors')}
-      >
-        <span>🛡️ 防护正常 · 今日拦截 {blockedToday || 0} 次</span>
-        <ChevronRight size={14} />
-      </button>
+        <button
+          type="button"
+          className={`admin-todo-item ${pendingReviewCount > 0 ? 'alert' : ''}`}
+          onClick={() => onNavigate('visitors', { filter: pendingReviewCount > 0 ? 'pending' : 'all' })}
+        >
+          <span className="admin-todo-num">{pendingReviewCount}</span>
+          <span className="admin-todo-label">待审核</span>
+        </button>
+        <button
+          type="button"
+          className="admin-todo-item"
+          onClick={() => onNavigate('visitors')}
+        >
+          <span className="admin-todo-num">{blockedToday || 0}</span>
+          <span className="admin-todo-label">今日拦截</span>
+        </button>
+      </div>
     );
   };
+
+  const renderStatusSheet = () =>
+    isAdmin &&
+    statusSheetOpen && (
+      <div className="sheet-backdrop" onClick={() => setStatusSheetOpen(false)}>
+        <div className="sheet-panel" onClick={(e) => e.stopPropagation()}>
+          <div className="sheet-handle" />
+          <div className="sheet-header">
+            <div className="sheet-title">切换状态与场景预设</div>
+            <button type="button" className="icon-btn" onClick={() => setStatusSheetOpen(false)}>
+              <X size={16} />
+            </button>
+          </div>
+
+          <div className="field-label" style={{ marginBottom: 6 }}>
+            快捷场景（一键联动状态灯与自动回复）
+          </div>
+          <div className="status-scene-grid">
+            {STATUS_SCENE_PRESETS.map((preset) => {
+              const active =
+                statusDraft.statusTone === preset.statusTone &&
+                statusDraft.statusText.trim() === preset.statusText;
+              const presetIcon = getStatusStickerUrl(preset.statusSticker);
+              return (
+                <button
+                  key={preset.id}
+                  type="button"
+                  className={`status-scene-card ${active ? 'selected' : ''}`}
+                  onClick={() => applyStatusPreset(preset)}
+                >
+                  <div className="status-scene-head">
+                    {presetIcon ? (
+                      <img src={presetIcon} alt="" className="status-sticker-icon" />
+                    ) : (
+                      <span
+                        className={`dot ${
+                          preset.statusTone === 'busy'
+                            ? 'amber'
+                            : preset.statusTone === 'away'
+                              ? 'red'
+                              : 'green'
+                        }`}
+                        style={{
+                          color:
+                            preset.statusTone === 'busy'
+                              ? 'var(--amber)'
+                              : preset.statusTone === 'away'
+                                ? 'var(--red)'
+                                : 'var(--green)',
+                        }}
+                      />
+                    )}
+                    <span className="status-scene-label">{preset.label}</span>
+                  </div>
+                  <div className="status-scene-hint">{preset.hint}</div>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="field" style={{ marginTop: 12 }}>
+            <label className="field-label">自定义状态文案</label>
+            <input
+              className="input"
+              maxLength={48}
+              value={statusDraft.statusText}
+              onChange={(e) => setStatusDraft((prev) => ({ ...prev, statusText: e.target.value }))}
+              placeholder="例如：写代码中 / 度假中 / 听歌摸鱼"
+            />
+          </div>
+
+          <div className="field">
+            <label className="field-label">状态色阶</label>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {STATUS_TONE_OPTIONS.map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  className={`pill ${statusDraft.statusTone === opt.id ? opt.dotClass : ''}`}
+                  style={{ cursor: 'pointer' }}
+                  onClick={() => {
+                    haptic('light');
+                    setStatusDraft((prev) => ({ ...prev, statusTone: opt.id }));
+                  }}
+                >
+                  <span className="dot" />
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="field">
+            <label className="field-label">状态动态小表情（内置动图，非 TG 会员也能挂）</label>
+            <div className="status-sticker-strip">
+              <button
+                type="button"
+                className={`status-sticker-opt ${!statusDraft.statusSticker ? 'selected' : ''}`}
+                onClick={() => {
+                  haptic('light');
+                  setStatusDraft((prev) => ({ ...prev, statusSticker: '' }));
+                }}
+              >
+                <span className="dot" style={{ color: 'var(--accent)' }} />
+                <span>圆点</span>
+              </button>
+              {STATUS_STICKERS.map((st) => (
+                <button
+                  key={st.id}
+                  type="button"
+                  className={`status-sticker-opt ${statusDraft.statusSticker === st.id ? 'selected' : ''}`}
+                  title={st.label}
+                  onClick={() => {
+                    haptic('light');
+                    setStatusDraft((prev) => ({ ...prev, statusSticker: st.id }));
+                  }}
+                >
+                  <img src={getStatusStickerUrl(st.id)} alt={st.label} className="status-sticker-icon lg" />
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div
+            className="list-row"
+            style={{ marginTop: 4, paddingTop: 10, borderTop: '1px solid var(--border)' }}
+          >
+            <div className="row-main">
+              <div className="row-title" style={{ fontSize: 13 }}>开启状态临时自动回复</div>
+              <div className="row-desc wrap">
+                仅在当前状态生效并优先于设置里的常驻自动回复，切回「正常营业」时自动关闭并恢复原设置
+              </div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={statusDraft.statusAutoReplyEnabled}
+              className={`switch ${statusDraft.statusAutoReplyEnabled ? 'on' : ''}`}
+              onClick={() =>
+                setStatusDraft((prev) => ({
+                  ...prev,
+                  statusAutoReplyEnabled: !prev.statusAutoReplyEnabled,
+                }))
+              }
+            >
+              <span className="switch-knob" />
+            </button>
+          </div>
+
+          {statusDraft.statusAutoReplyEnabled && (
+            <div className="field" style={{ marginTop: 8, marginBottom: 4 }}>
+              <label className="field-label">临时自动回复话术</label>
+              <textarea
+                className="textarea"
+                rows={2}
+                value={statusDraft.statusAutoReplyText}
+                onChange={(e) =>
+                  setStatusDraft((prev) => ({ ...prev, statusAutoReplyText: e.target.value }))
+                }
+                placeholder="例如：正在专心写代码，看到消息后会尽快回复你～"
+              />
+            </div>
+          )}
+
+          <button
+            type="button"
+            className="btn btn-primary btn-block"
+            style={{ marginTop: 12 }}
+            disabled={statusSaving}
+            onClick={handleSaveStatus}
+          >
+            <Check size={15} /> {statusSaving ? '保存中…' : '保存状态'}
+          </button>
+        </div>
+      </div>
+    );
 
   const renderVisitCounter = () =>
     publicMonthlyVisits !== null && (
@@ -724,10 +999,31 @@ export default function TicketTab({
             </div>
 
             <div style={{ marginTop: 12 }}>
-              <span className={`pill ${statusToneClass}`}>
-                <span className="dot" />
-                {profile.statusText || '在线'}
-              </span>
+              {isAdmin ? (
+                <button
+                  type="button"
+                  className={`pill ${statusToneClass} status-pill-btn`}
+                  title="点击快捷切换状态与场景预设"
+                  onClick={openStatusSheet}
+                >
+                  {statusStickerUrl ? (
+                    <img src={statusStickerUrl} alt="" className="status-sticker-icon" />
+                  ) : (
+                    <span className="dot" />
+                  )}
+                  <span>{profile.statusText || '在线'}</span>
+                  <ChevronDown size={11} style={{ opacity: 0.7 }} />
+                </button>
+              ) : (
+                <span className={`pill ${statusToneClass}`}>
+                  {statusStickerUrl ? (
+                    <img src={statusStickerUrl} alt="" className="status-sticker-icon" />
+                  ) : (
+                    <span className="dot" />
+                  )}
+                  <span>{profile.statusText || '在线'}</span>
+                </span>
+              )}
             </div>
 
             <div className="ticket-caption" style={{ marginTop: 10 }}>
@@ -761,6 +1057,10 @@ export default function TicketTab({
               <Share2 size={13} /> 分享名片
             </button>
           </div>
+
+          {!isAdmin && bot?.pmVerificationRequired && (
+            <div className="pm-verify-hint">🛡️ 首次私聊需 3 秒简单人机验证</div>
+          )}
         </div>
 
         <div className="ticket-right">
@@ -851,6 +1151,7 @@ export default function TicketTab({
 
       {renderVisitCounter()}
       {renderPoweredBy()}
+      {renderStatusSheet()}
       {renderShareSheet()}
       {renderGetSameModal()}
     </>

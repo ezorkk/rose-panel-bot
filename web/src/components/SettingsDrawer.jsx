@@ -37,6 +37,13 @@ import {
   normalizeDockStyle,
   normalizeThemePreset,
 } from '../lib/themes.js';
+import {
+  STATUS_STICKERS,
+  STATUS_TONE_OPTIONS,
+  getStatusStickerUrl,
+  normalizeStatusSticker,
+  normalizeStatusTone,
+} from '../lib/statusPresets.js';
 import { TgStickerMedia, TicketEmblem } from './Emblems.jsx';
 import {
   CHANGELOG_URL,
@@ -851,13 +858,64 @@ export default function SettingsDrawer({
                   />
                 </div>
                 <div className="field">
-                  <label className="field-label">当前状态文案</label>
+                  <label className="field-label">当前状态文案（点名片页状态胶囊也可一键切场景）</label>
                   <input
                     className="input"
+                    maxLength={48}
                     value={draft.profile.statusText}
                     onChange={(e) => updateField('profile', 'statusText', e.target.value)}
-                    placeholder="例如：在线营业中 / 摸鱼中 / 勿扰"
+                    placeholder="例如：在线营业中 / 写代码中 / 度假中"
                   />
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+                    {STATUS_TONE_OPTIONS.map((opt) => {
+                      const activeTone = normalizeStatusTone(draft.profile.statusTone) === opt.id;
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          className={`pill ${activeTone ? opt.dotClass : ''}`}
+                          style={{ cursor: 'pointer', fontSize: 11 }}
+                          onClick={() => {
+                            haptic('light');
+                            updateField('profile', 'statusTone', opt.id);
+                          }}
+                        >
+                          <span className="dot" />
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="status-sticker-strip" style={{ marginTop: 8 }}>
+                    <button
+                      type="button"
+                      className={`status-sticker-opt ${!normalizeStatusSticker(draft.profile.statusSticker) ? 'selected' : ''}`}
+                      onClick={() => {
+                        haptic('light');
+                        updateField('profile', 'statusSticker', '');
+                      }}
+                    >
+                      <span className="dot" style={{ color: 'var(--accent)' }} />
+                      <span>圆点</span>
+                    </button>
+                    {STATUS_STICKERS.map((st) => {
+                      const activeSt = normalizeStatusSticker(draft.profile.statusSticker) === st.id;
+                      return (
+                        <button
+                          key={st.id}
+                          type="button"
+                          className={`status-sticker-opt ${activeSt ? 'selected' : ''}`}
+                          title={st.label}
+                          onClick={() => {
+                            haptic('light');
+                            updateField('profile', 'statusSticker', st.id);
+                          }}
+                        >
+                          <img src={getStatusStickerUrl(st.id)} alt={st.label} className="status-sticker-icon lg" />
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
                 <div className="field">
                   <label className="field-label">个人简介</label>

@@ -761,9 +761,17 @@ async function processVisitorMessage(env, requestOrigin, msg, config = null) {
     forwardToTopic: forwardMessageToTopic,
   });
 
-  // 3. Optional general auto-reply with per-visitor KV cooldown (prevents spamming repeated receipts)
-  const autoText = String(pmBot.autoReplyText || '').trim();
-  if (pmBot.autoReplyEnabled && autoText && msg.from?.id) {
+  // 3. Optional auto-reply with per-visitor KV cooldown (prevents spamming repeated receipts)
+  // Temporary scene status auto-reply takes precedence when enabled, leaving permanent Settings auto-reply untouched.
+  const statusAutoText = String(pmBot.statusAutoReplyText || '').trim();
+  const generalAutoText = String(pmBot.autoReplyText || '').trim();
+  const autoText =
+    pmBot.statusAutoReplyEnabled && statusAutoText
+      ? statusAutoText
+      : pmBot.autoReplyEnabled && generalAutoText
+        ? generalAutoText
+        : '';
+  if (autoText && msg.from?.id) {
     const uid = String(msg.from.id);
     const cdKey = `autoreply_cd:${uid}`;
     const inCooldown = env.TOPIC_MAP ? await env.TOPIC_MAP.get(cdKey) : null;

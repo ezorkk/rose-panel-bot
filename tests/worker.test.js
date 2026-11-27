@@ -9601,3 +9601,229 @@ describe('Pre-release hygiene: unified command menus, dead config removal & stat
     expect(badSaved.profile.statusTone).toBe('online');
   });
 });
+
+describe('Awaiting-reply tracking, scene status quick API & pre-PM verification notice', () => {
+  it.each(['kv', 'd1'])('tracks awaitingReply across visitor/admin turns and filters awaiting visitors [%s]', async (mode) => {
+    const kv = createMemoryKV();
+    const env = mode === 'd1' ? { TOPIC_MAP: kv, DB: createD1Shim() } : { TOPIC_MAP: kv };
+
+    await upsertVisitorProfile(env, { id: 88101, first_name: 'Alice' }, { incrementMsg: false });
+
+    // Visitor sends a message -> lastSender = visitor, awaitingReply = true
+    await recordVisitorExchange(
+      env,
+      '88101',
+      { message_id: 1, text: '你好，请问在吗？' },
+      { sender: 'visitor' }
+    );
+    const list1 = await listVisitors(env, { filter: 'awaiting' });
+    expect(list1.stats.awaitingReply).toBe(1);
+    expect(list1.items).toHaveLength(1);
+    expect(list1.items[0].userId).toBe('88101');
+    expect(list1.items[0].awaitingReply).toBe(true);
+    expect(list1.items[0].lastSender).toBe('visitor');
+
+    // Admin replies -> lastSender flips to admin, awaitingReply drops to 0 and overview cache refreshes
+    await recordVisitorExchange(
+      env,
+      '88101',
+      { message_id: 2, text: '在的，请讲！' },
+      { sender: 'admin' }
+    );
+    const overviewAfterReply = await getVisitorOverview(env);
+    expect(overviewAfterReply.stats.awaitingReply).toBe(0);
+    const list2 = await listVisitors(env, { filter: 'awaiting' });
+    expect(list2.items).toHaveLength(0);
+
+    // Visitor messages again -> flips back to awaitingReply = true, then banning clears awaitingReply
+    await recordVisitorExchange(
+      env,
+      '88101',
+      { message_id: 3, text: '还有个问题' },
+      { sender: 'visitor' }
+    );
+    const overviewAgain = await getVisitorOverview(env);
+    expect(overviewAgain.stats.awaitingReply).toBe(1);
+
+    await applyVisitorAction(env, '88101', 'ban');
+    const overviewBanned = await getVisitorOverview(env);
+    expect(overviewBanned.stats.awaitingReply).toBe(0);
+
+    // Legacy visitor without `last_sender` infers awaitingReply from non-admin `last_preview`
+    await upsertVisitorProfile(
+      env,
+      { id: 88102, first_name: 'LegacyVisitor' },
+      { incrementMsg: true, lastPreview: '升级前发的消息' }
+    );
+    const legacyDetail = await getVisitorDetail(env, '88102');
+    expect(legacyDetail.lastSender).toBe('visitor');
+    expect(legacyDetail.awaitingReply).toBe(true);
+
+    // Legacy visitor whose last_preview starts with `我：` is inferred as replied by admin
+    await upsertVisitorProfile(
+      env,
+      { id: 88103, first_name: 'LegacyReplied' },
+      { incrementMsg: true, lastPreview: '我：已经处理好了' }
+    );
+    const legacyReplied = await getVisitorDetail(env, '88103');
+    expect(legacyReplied.lastSender).toBe('admin');
+    expect(legacyReplied.awaitingReply).toBe(false);
+
+    // `needsAttention` counts the union of pendingReview and awaitingReply without double-counting
+    const overviewUnion = await getVisitorOverview(env);
+    expect(overviewUnion.stats.awaitingReply).toBe(1);
+    expect(overviewUnion.stats.needsAttention).toBe(1);
+  });
+
+  it('isolates temporary statusAutoReply from permanent pmBot.autoReply across coding -> online round-trip', async () => {
+    const kv = createMemoryKV();
+    const env = {
+      TOPIC_MAP: kv,
+      BOT_TOKEN: '123456:TEST_TOKEN',
+      ADMIN_IDS: '9001',
+      SUPERGROUP_ID: '-100777666',
+    };
+    const nowSec = String(Math.floor(Date.now() / 1000));
+    const adminInit = await signInitData(
+      { user: JSON.stringify({ id: 9001, first_name: 'Owner' }), auth_date: nowSec },
+      env.BOT_TOKEN
+    );
+    const guestInit = await signInitData(
+      { user: JSON.stringify({ id: 9002, first_name: 'Guest' }), auth_date: nowSec },
+      env.BOT_TOKEN
+    );
+
+    // Owner already configured a permanent custom auto-reply `X` in Settings
+    await savePanelConfig(env, {
+      pmBot: {
+        autoReplyEnabled: true,
+        autoReplyText: '自定义常驻回执 X',
+        autoReplyCooldownMinutes: 30,
+      },
+    });
+
+    // Non-admin is forbidden
+    const forbidden = await worker.fetch(
+      new Request('https://panel.test/api/admin/status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': guestInit },
+        body: JSON.stringify({ statusTone: 'busy', statusText: '写代码中' }),
+      }),
+      env
+    );
+    expect(forbidden.status).toBe(403);
+
+    // Admin switches to coding preset with animated sticker + temporary status auto-reply
+    const okRes = await worker.fetch(
+      new Request('https://panel.test/api/admin/status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': adminInit },
+        body: JSON.stringify({
+          statusTone: 'busy',
+          statusText: '写代码中',
+          statusSticker: 'sparkle',
+          statusAutoReplyEnabled: true,
+          statusAutoReplyText: '正在写代码，稍后回复～',
+        }),
+      }),
+      env
+    );
+    expect(okRes.status).toBe(200);
+    const body = await okRes.json();
+    expect(body.config.profile.statusTone).toBe('busy');
+    expect(body.config.profile.statusText).toBe('写代码中');
+    expect(body.config.profile.statusSticker).toBe('sparkle');
+    expect(body.adminConfig.pmBot.statusAutoReplyEnabled).toBe(true);
+    expect(body.adminConfig.pmBot.statusAutoReplyText).toBe('正在写代码，稍后回复～');
+    // Permanent Settings auto-reply `X` must remain untouched
+    expect(body.adminConfig.pmBot.autoReplyEnabled).toBe(true);
+    expect(body.adminConfig.pmBot.autoReplyText).toBe('自定义常驻回执 X');
+    expect(body.config.bot.pmVerificationRequired).toBe(true);
+
+    // Invalid statusSticker is sanitized to '', non-string statusText is ignored, and omitted fields are preserved
+    const badRes = await worker.fetch(
+      new Request('https://panel.test/api/admin/status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': adminInit },
+        body: JSON.stringify({ statusSticker: '../evil.png', statusText: { bogus: 1 } }),
+      }),
+      env
+    );
+    const badBody = await badRes.json();
+    expect(badBody.config.profile.statusSticker).toBe('');
+    expect(badBody.config.profile.statusText).toBe('写代码中');
+    expect(badBody.adminConfig.pmBot.statusAutoReplyEnabled).toBe(true);
+    expect(badBody.adminConfig.pmBot.statusAutoReplyText).toBe('正在写代码，稍后回复～');
+    expect(badBody.adminConfig.pmBot.autoReplyText).toBe('自定义常驻回执 X');
+
+    // Verified visitor 40001 messaging while coding receives temporary scene reply
+    await kv.put('verified:40001', 'emoji:v1');
+    await upsertVisitorProfile(env, { id: 40001, first_name: 'Alice' }, { threadId: 61, incrementMsg: false });
+    await kv.put('thread:61', '40001');
+    await kv.put('verified:40002', 'emoji:v1');
+    await upsertVisitorProfile(env, { id: 40002, first_name: 'Bob' }, { threadId: 62, incrementMsg: false });
+    await kv.put('thread:62', '40002');
+
+    const tgCalls = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url, init) => {
+      const method = String(url).split('/').pop();
+      const reqBody = init?.body ? JSON.parse(init.body) : {};
+      tgCalls.push({ method, body: reqBody });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 101 } }), { status: 200 });
+    });
+
+    try {
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 11,
+            from: { id: 40001, first_name: 'Alice' },
+            chat: { id: 40001, type: 'private' },
+            text: '你好呀',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      const reply1 = tgCalls.find((c) => c.method === 'sendMessage' && c.body.chat_id === 40001);
+      expect(reply1?.body?.text).toBe('正在写代码，稍后回复～');
+
+      // Switch back to online preset -> temporary scene reply off, permanent `X` still active & restored
+      const onlineRes = await worker.fetch(
+        new Request('https://panel.test/api/admin/status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': adminInit },
+          body: JSON.stringify({
+            statusTone: 'online',
+            statusText: '在线营业中',
+            statusSticker: '',
+            statusAutoReplyEnabled: false,
+          }),
+        }),
+        env
+      );
+      const onlineBody = await onlineRes.json();
+      expect(onlineBody.adminConfig.pmBot.statusAutoReplyEnabled).toBe(false);
+      expect(onlineBody.adminConfig.pmBot.autoReplyEnabled).toBe(true);
+      expect(onlineBody.adminConfig.pmBot.autoReplyText).toBe('自定义常驻回执 X');
+
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 12,
+            from: { id: 40002, first_name: 'Bob' },
+            chat: { id: 40002, type: 'private' },
+            text: '现在有空吗？',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      const reply2 = tgCalls.find((c) => c.method === 'sendMessage' && c.body.chat_id === 40002);
+      expect(reply2?.body?.text).toBe('自定义常驻回执 X');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+});

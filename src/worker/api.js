@@ -273,6 +273,7 @@ export async function handleApiRequest(request, env, url, ctx = null) {
     let blockedSpamCount = 0;
     let blockedToday = 0;
     let pendingReviewCount = 0;
+    let awaitingReplyCount = 0;
     let inboxStatus = null;
     let visitStats = null;
     if (auth.isAdmin) {
@@ -288,6 +289,7 @@ export async function handleApiRequest(request, env, url, ctx = null) {
       blockedSpamCount = spamCount;
       blockedToday = todaySpamCount;
       pendingReviewCount = Number(overview.stats?.pendingReview || 0);
+      awaitingReplyCount = Number(overview.stats?.awaitingReply || 0);
       inboxStatus = status;
       visitStats = monthlyStats;
     } else if (config.profile?.showVisitCounter === true) {
@@ -308,7 +310,7 @@ export async function handleApiRequest(request, env, url, ctx = null) {
       visitorSummary,
       recentVisitors,
       blockedSpamCount,
-      ...(auth.isAdmin ? { visitStats, blockedToday, pendingReviewCount } : {}),
+      ...(auth.isAdmin ? { visitStats, blockedToday, pendingReviewCount, awaitingReplyCount } : {}),
       appVersion: auth.isAdmin ? APP_VERSION : undefined,
     });
   }
@@ -690,6 +692,46 @@ export async function handleApiRequest(request, env, url, ctx = null) {
     if (path === '/api/admin/config' && method === 'GET') {
       const inboxStatus = await loadAdminInboxStatus(env);
       return json({ ok: true, config: sanitizeAdminConfig(config, env, inboxStatus) });
+    }
+
+    // POST /api/admin/status — 1-tap scene status & auto-reply quick switch from profile card
+    if (path === '/api/admin/status' && method === 'POST') {
+      const body = await readJsonBody(request);
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        return json({ ok: false, error: '无效的状态参数' }, 400);
+      }
+      const profilePatch = {};
+      if (typeof body.statusTone === 'string') profilePatch.statusTone = body.statusTone;
+      if (typeof body.statusText === 'string') profilePatch.statusText = body.statusText;
+      if (typeof body.statusSticker === 'string') profilePatch.statusSticker = body.statusSticker;
+
+      const pmBotPatch = {};
+      if (typeof body.statusAutoReplyEnabled === 'boolean') {
+        pmBotPatch.statusAutoReplyEnabled = body.statusAutoReplyEnabled;
+      }
+      if (typeof body.statusAutoReplyText === 'string') {
+        pmBotPatch.statusAutoReplyText = body.statusAutoReplyText;
+      }
+
+      const patch = {
+        ...(Object.keys(profilePatch).length > 0 ? { profile: profilePatch } : {}),
+        ...(Object.keys(pmBotPatch).length > 0 ? { pmBot: pmBotPatch } : {}),
+      };
+      if (Object.keys(patch).length > 0) {
+        await savePanelConfig(env, patch);
+      }
+      const [latestCfg, inboxStatus] = await Promise.all([
+        loadPanelConfig(env),
+        loadAdminInboxStatus(env),
+      ]);
+      const visitStats = latestCfg.profile?.showVisitCounter
+        ? await getVisitStats(env, latestCfg, new Date(), { includeLastMonth: false })
+        : null;
+      return json({
+        ok: true,
+        config: sanitizePublicConfig(latestCfg, env, true, url.origin, visitStats),
+        adminConfig: sanitizeAdminConfig(latestCfg, env, inboxStatus),
+      });
     }
 
     // PUT /api/admin/config

@@ -1258,6 +1258,8 @@ export function createD1Store(env, hooks = {}) {
           parsed &&
           parsed.stats &&
           typeof parsed.stats.pendingReview === 'number' &&
+          typeof parsed.stats.awaitingReply === 'number' &&
+          typeof parsed.stats.needsAttention === 'number' &&
           Array.isArray(parsed.sourceStats) &&
           Date.now() - Number(parsed.cachedAt || 0) < maxAgeMs
         ) {

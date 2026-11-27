@@ -8,14 +8,24 @@ import {
   normalizeDockStyle,
   normalizeThemePreset,
 } from '../../web/src/lib/themes.js';
+import {
+  STATUS_STICKER_IDS,
+  STATUS_TONES,
+  normalizeStatusSticker,
+  normalizeStatusTone,
+} from '../../web/src/lib/statusPresets.js';
 import { buildMiniAppDirectLink } from './telegram.js';
 
 export {
   DEFAULT_DOCK_STYLE,
   DEFAULT_THEME_PRESET,
   DOCK_STYLE_IDS,
+  STATUS_STICKER_IDS,
+  STATUS_TONES,
   THEME_PRESET_IDS,
   normalizeDockStyle,
+  normalizeStatusSticker,
+  normalizeStatusTone,
   normalizeThemePreset,
 };
 
@@ -125,6 +135,7 @@ export const DEFAULT_CONFIG = {
     tagline: '欢迎来到我的个人面板，这里汇集了我的个人小站与节点探针。',
     statusText: '在线营业中',
     statusTone: 'online', // online | busy | away
+    statusSticker: '', // optional built-in animated status sticker ID (works for non-Premium TG users)
     avatarMode: 'bot', // bot | owner | custom
     avatarUrl: '',
     ownerTag: '个人名片',
@@ -212,6 +223,8 @@ export const DEFAULT_CONFIG = {
     autoReplyEnabled: false,
     autoReplyText: '已收到您的消息 🌸 看到后会第一时间回复，请稍等片刻～',
     autoReplyCooldownMinutes: 30,
+    statusAutoReplyEnabled: false,
+    statusAutoReplyText: '',
     keywordReplies: [],
     verifiedDays: 30,
     chatRetentionDays: 0, // 0 = 永久 | 365 = 1 年 | 180 = 6 个月（仅绑定 D1 时生效）
@@ -452,6 +465,8 @@ export function mergeConfig(base, override) {
     cloned.profile.emblem = normalizeEmblem(cloned.profile.emblem);
     cloned.profile.splash = normalizeSplash(cloned.profile.splash);
     cloned.profile.avatarMode = resolveAvatarMode(cloned.profile.avatarMode, cloned.profile.avatarUrl);
+    cloned.profile.statusTone = normalizeStatusTone(cloned.profile.statusTone);
+    cloned.profile.statusSticker = normalizeStatusSticker(cloned.profile.statusSticker);
     cloned.profile.showVisitCounter = Boolean(cloned.profile.showVisitCounter);
     cloned.profile.showPoweredBy =
       cloned.profile.showPoweredBy === undefined ? true : Boolean(cloned.profile.showPoweredBy);
@@ -491,6 +506,12 @@ export function mergeConfig(base, override) {
     explicitMode !== undefined ? explicitMode : base.profile?.avatarMode && !override.profile?.avatarUrl ? base.profile.avatarMode : undefined,
     mergedProfile.avatarUrl
   );
+  mergedProfile.statusTone = normalizeStatusTone(
+    override.profile?.statusTone ?? base.profile?.statusTone
+  );
+  mergedProfile.statusSticker = normalizeStatusSticker(
+    override.profile?.statusSticker ?? base.profile?.statusSticker
+  );
   mergedProfile.showVisitCounter = Boolean(
     override.profile?.showVisitCounter ?? base.profile?.showVisitCounter ?? false
   );
@@ -525,6 +546,14 @@ export function mergeConfig(base, override) {
         Math.max(Number(override.pmBot?.autoReplyCooldownMinutes ?? base.pmBot?.autoReplyCooldownMinutes) || 30, 1),
         1440
       ),
+      statusAutoReplyEnabled: Boolean(
+        override.pmBot?.statusAutoReplyEnabled ?? base.pmBot?.statusAutoReplyEnabled ?? false
+      ),
+      statusAutoReplyText: String(
+        override.pmBot?.statusAutoReplyText ?? base.pmBot?.statusAutoReplyText ?? ''
+      )
+        .trim()
+        .slice(0, 2000),
       keywordReplies: Array.isArray(override.pmBot?.keywordReplies)
         ? override.pmBot.keywordReplies.map(normalizeKeywordRule).slice(0, 50)
         : Array.isArray(base.pmBot?.keywordReplies)
@@ -625,9 +654,9 @@ export async function savePanelConfig(env, nextConfig) {
 
   merged.profile.labelsRev = PROFILE_LABELS_REV;
   merged.profile.socialsRev = SOCIALS_CLEANUP_REV;
-  merged.profile.statusTone = ['online', 'busy', 'away'].includes(merged.profile.statusTone)
-    ? merged.profile.statusTone
-    : 'online';
+  merged.profile.statusTone = normalizeStatusTone(merged.profile.statusTone);
+  merged.profile.statusSticker = normalizeStatusSticker(merged.profile.statusSticker);
+  merged.profile.statusText = String(merged.profile.statusText ?? '').trim().slice(0, 48);
   merged.profile.ownerTag = String(merged.profile.ownerTag ?? '').trim().slice(0, 32);
   merged.profile.badgeTitle = String(merged.profile.badgeTitle ?? '').trim().slice(0, 32);
   merged.profile.joinedText = String(merged.profile.joinedText ?? '').trim().slice(0, 48);
@@ -672,6 +701,8 @@ export async function savePanelConfig(env, nextConfig) {
     Math.max(Number(merged.pmBot.autoReplyCooldownMinutes) || 30, 1),
     1440
   );
+  merged.pmBot.statusAutoReplyEnabled = Boolean(merged.pmBot.statusAutoReplyEnabled);
+  merged.pmBot.statusAutoReplyText = String(merged.pmBot.statusAutoReplyText ?? '').trim().slice(0, 2000);
   merged.pmBot.keywordReplies = Array.isArray(merged.pmBot.keywordReplies)
     ? merged.pmBot.keywordReplies
         .map(normalizeKeywordRule)
@@ -776,6 +807,9 @@ export function sanitizePublicConfig(config, env, isAdmin = false, requestOrigin
           return h && h !== 'your_bot' && /bot$/i.test(h) ? h : '';
         })(),
       appShortName: env.APP_SHORT_NAME || '',
+      pmVerificationRequired: Boolean(
+        config.pmBot?.enableVerification !== false && config.pmBot?.verificationMode !== 'off'
+      ),
     },
     ui: {
       navOrder: normalizeNavOrder(config.ui?.navOrder),
