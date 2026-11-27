@@ -706,8 +706,12 @@ export async function handleApiRequest(request, env, url, ctx = null) {
       if (typeof body.statusSticker === 'string') profilePatch.statusSticker = body.statusSticker;
 
       const pmBotPatch = {};
-      if (typeof body.autoReplyEnabled === 'boolean') pmBotPatch.autoReplyEnabled = body.autoReplyEnabled;
-      if (typeof body.autoReplyText === 'string') pmBotPatch.autoReplyText = body.autoReplyText;
+      if (typeof body.statusAutoReplyEnabled === 'boolean') {
+        pmBotPatch.statusAutoReplyEnabled = body.statusAutoReplyEnabled;
+      }
+      if (typeof body.statusAutoReplyText === 'string') {
+        pmBotPatch.statusAutoReplyText = body.statusAutoReplyText;
+      }
 
       const patch = {
         ...(Object.keys(profilePatch).length > 0 ? { profile: profilePatch } : {}),

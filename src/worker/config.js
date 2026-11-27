@@ -223,6 +223,8 @@ export const DEFAULT_CONFIG = {
     autoReplyEnabled: false,
     autoReplyText: '已收到您的消息 🌸 看到后会第一时间回复，请稍等片刻～',
     autoReplyCooldownMinutes: 30,
+    statusAutoReplyEnabled: false,
+    statusAutoReplyText: '',
     keywordReplies: [],
     verifiedDays: 30,
     chatRetentionDays: 0, // 0 = 永久 | 365 = 1 年 | 180 = 6 个月（仅绑定 D1 时生效）
@@ -544,6 +546,14 @@ export function mergeConfig(base, override) {
         Math.max(Number(override.pmBot?.autoReplyCooldownMinutes ?? base.pmBot?.autoReplyCooldownMinutes) || 30, 1),
         1440
       ),
+      statusAutoReplyEnabled: Boolean(
+        override.pmBot?.statusAutoReplyEnabled ?? base.pmBot?.statusAutoReplyEnabled ?? false
+      ),
+      statusAutoReplyText: String(
+        override.pmBot?.statusAutoReplyText ?? base.pmBot?.statusAutoReplyText ?? ''
+      )
+        .trim()
+        .slice(0, 2000),
       keywordReplies: Array.isArray(override.pmBot?.keywordReplies)
         ? override.pmBot.keywordReplies.map(normalizeKeywordRule).slice(0, 50)
         : Array.isArray(base.pmBot?.keywordReplies)
@@ -691,6 +701,8 @@ export async function savePanelConfig(env, nextConfig) {
     Math.max(Number(merged.pmBot.autoReplyCooldownMinutes) || 30, 1),
     1440
   );
+  merged.pmBot.statusAutoReplyEnabled = Boolean(merged.pmBot.statusAutoReplyEnabled);
+  merged.pmBot.statusAutoReplyText = String(merged.pmBot.statusAutoReplyText ?? '').trim().slice(0, 2000);
   merged.pmBot.keywordReplies = Array.isArray(merged.pmBot.keywordReplies)
     ? merged.pmBot.keywordReplies
         .map(normalizeKeywordRule)

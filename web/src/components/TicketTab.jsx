@@ -116,8 +116,8 @@ export default function TicketTab({
     statusTone: 'online',
     statusText: '',
     statusSticker: '',
-    autoReplyEnabled: false,
-    autoReplyText: '',
+    statusAutoReplyEnabled: false,
+    statusAutoReplyText: '',
   });
 
   const statusStickerUrl = getStatusStickerUrl(profile.statusSticker);
@@ -129,9 +129,9 @@ export default function TicketTab({
       statusTone: normalizeStatusTone(profile.statusTone),
       statusText: profile.statusText || '在线营业中',
       statusSticker: normalizeStatusSticker(profile.statusSticker),
-      autoReplyEnabled: Boolean(adminConfig?.pmBot?.autoReplyEnabled),
-      autoReplyText:
-        adminConfig?.pmBot?.autoReplyText || '已收到您的消息 🌸 看到后会第一时间回复，请稍等片刻～',
+      statusAutoReplyEnabled: Boolean(adminConfig?.pmBot?.statusAutoReplyEnabled),
+      statusAutoReplyText:
+        adminConfig?.pmBot?.statusAutoReplyText || '正在忙碌中，看到消息后会第一时间回复你～',
     };
     setStatusInitial(initial);
     setStatusDraft(initial);
@@ -145,9 +145,9 @@ export default function TicketTab({
       statusTone: preset.statusTone,
       statusText: preset.statusText,
       statusSticker: preset.statusSticker,
-      autoReplyEnabled: preset.autoReplyEnabled,
-      ...(preset.autoReplyEnabled && preset.autoReplyText
-        ? { autoReplyText: preset.autoReplyText }
+      statusAutoReplyEnabled: preset.statusAutoReplyEnabled,
+      ...(preset.statusAutoReplyEnabled && preset.statusAutoReplyText
+        ? { statusAutoReplyText: preset.statusAutoReplyText }
         : {}),
     }));
   };
@@ -155,21 +155,22 @@ export default function TicketTab({
   const handleSaveStatus = async () => {
     try {
       setStatusSaving(true);
-      // Only send auto-reply fields when actually modified in this sheet so changing a sticker
-      // or status label never clobbers the owner's saved auto-reply configuration.
+      // Only send temporary scene auto-reply fields when modified; permanent Settings auto-reply is never touched.
       const body = {
         statusTone: statusDraft.statusTone,
         statusText: statusDraft.statusText,
         statusSticker: statusDraft.statusSticker,
       };
-      if (!statusInitial || statusDraft.autoReplyEnabled !== statusInitial.autoReplyEnabled) {
-        body.autoReplyEnabled = statusDraft.autoReplyEnabled;
+      if (!statusInitial || statusDraft.statusAutoReplyEnabled !== statusInitial.statusAutoReplyEnabled) {
+        body.statusAutoReplyEnabled = statusDraft.statusAutoReplyEnabled;
       }
       if (
-        statusDraft.autoReplyEnabled &&
-        (!statusInitial || statusDraft.autoReplyText !== statusInitial.autoReplyText)
+        statusDraft.statusAutoReplyEnabled &&
+        (!statusInitial ||
+          statusDraft.statusAutoReplyText !== statusInitial.statusAutoReplyText ||
+          !adminConfig?.pmBot?.statusAutoReplyText)
       ) {
-        body.autoReplyText = statusDraft.autoReplyText;
+        body.statusAutoReplyText = statusDraft.statusAutoReplyText;
       }
       const res = await apiRequest('/api/admin/status', {
         method: 'POST',
@@ -179,8 +180,8 @@ export default function TicketTab({
       setStatusSheetOpen(false);
       haptic('success');
       onToast(
-        statusDraft.autoReplyEnabled
-          ? `已切换状态「${statusDraft.statusText || '忙碌'}」并开启自动回复`
+        statusDraft.statusAutoReplyEnabled
+          ? `已切换状态「${statusDraft.statusText || '忙碌'}」并开启临时回执`
           : `已更新状态「${statusDraft.statusText || '在线'}」`
       );
     } catch (err) {
@@ -420,30 +421,37 @@ export default function TicketTab({
             style={{ marginTop: 4, paddingTop: 10, borderTop: '1px solid var(--border)' }}
           >
             <div className="row-main">
-              <div className="row-title" style={{ fontSize: 13 }}>同步开启私聊自动回复</div>
-              <div className="row-desc wrap">访客发消息时自动回一条状态说明，切回「正常营业」时会自动关闭</div>
+              <div className="row-title" style={{ fontSize: 13 }}>开启状态临时自动回复</div>
+              <div className="row-desc wrap">
+                仅在当前状态生效并优先于设置里的常驻自动回复，切回「正常营业」时自动关闭并恢复原设置
+              </div>
             </div>
             <button
               type="button"
               role="switch"
-              aria-checked={statusDraft.autoReplyEnabled}
-              className={`switch ${statusDraft.autoReplyEnabled ? 'on' : ''}`}
+              aria-checked={statusDraft.statusAutoReplyEnabled}
+              className={`switch ${statusDraft.statusAutoReplyEnabled ? 'on' : ''}`}
               onClick={() =>
-                setStatusDraft((prev) => ({ ...prev, autoReplyEnabled: !prev.autoReplyEnabled }))
+                setStatusDraft((prev) => ({
+                  ...prev,
+                  statusAutoReplyEnabled: !prev.statusAutoReplyEnabled,
+                }))
               }
             >
               <span className="switch-knob" />
             </button>
           </div>
 
-          {statusDraft.autoReplyEnabled && (
+          {statusDraft.statusAutoReplyEnabled && (
             <div className="field" style={{ marginTop: 8, marginBottom: 4 }}>
-              <label className="field-label">自动回复话术</label>
+              <label className="field-label">临时自动回复话术</label>
               <textarea
                 className="textarea"
                 rows={2}
-                value={statusDraft.autoReplyText}
-                onChange={(e) => setStatusDraft((prev) => ({ ...prev, autoReplyText: e.target.value }))}
+                value={statusDraft.statusAutoReplyText}
+                onChange={(e) =>
+                  setStatusDraft((prev) => ({ ...prev, statusAutoReplyText: e.target.value }))
+                }
                 placeholder="例如：正在专心写代码，看到消息后会尽快回复你～"
               />
             </div>

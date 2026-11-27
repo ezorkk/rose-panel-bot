@@ -9675,12 +9675,13 @@ describe('Awaiting-reply tracking, scene status quick API & pre-PM verification 
     expect(overviewUnion.stats.needsAttention).toBe(1);
   });
 
-  it('updates statusTone, statusText, statusSticker & autoReply via POST /api/admin/status without clobbering untouched fields', async () => {
+  it('isolates temporary statusAutoReply from permanent pmBot.autoReply across coding -> online round-trip', async () => {
     const kv = createMemoryKV();
     const env = {
       TOPIC_MAP: kv,
       BOT_TOKEN: '123456:TEST_TOKEN',
       ADMIN_IDS: '9001',
+      SUPERGROUP_ID: '-100777666',
     };
     const nowSec = String(Math.floor(Date.now() / 1000));
     const adminInit = await signInitData(
@@ -9691,6 +9692,15 @@ describe('Awaiting-reply tracking, scene status quick API & pre-PM verification 
       { user: JSON.stringify({ id: 9002, first_name: 'Guest' }), auth_date: nowSec },
       env.BOT_TOKEN
     );
+
+    // Owner already configured a permanent custom auto-reply `X` in Settings
+    await savePanelConfig(env, {
+      pmBot: {
+        autoReplyEnabled: true,
+        autoReplyText: '自定义常驻回执 X',
+        autoReplyCooldownMinutes: 30,
+      },
+    });
 
     // Non-admin is forbidden
     const forbidden = await worker.fetch(
@@ -9703,7 +9713,7 @@ describe('Awaiting-reply tracking, scene status quick API & pre-PM verification 
     );
     expect(forbidden.status).toBe(403);
 
-    // Admin switches to coding preset with animated sticker + auto-reply
+    // Admin switches to coding preset with animated sticker + temporary status auto-reply
     const okRes = await worker.fetch(
       new Request('https://panel.test/api/admin/status', {
         method: 'POST',
@@ -9712,8 +9722,8 @@ describe('Awaiting-reply tracking, scene status quick API & pre-PM verification 
           statusTone: 'busy',
           statusText: '写代码中',
           statusSticker: 'sparkle',
-          autoReplyEnabled: true,
-          autoReplyText: '正在写代码，稍后回复～',
+          statusAutoReplyEnabled: true,
+          statusAutoReplyText: '正在写代码，稍后回复～',
         }),
       }),
       env
@@ -9723,11 +9733,14 @@ describe('Awaiting-reply tracking, scene status quick API & pre-PM verification 
     expect(body.config.profile.statusTone).toBe('busy');
     expect(body.config.profile.statusText).toBe('写代码中');
     expect(body.config.profile.statusSticker).toBe('sparkle');
+    expect(body.adminConfig.pmBot.statusAutoReplyEnabled).toBe(true);
+    expect(body.adminConfig.pmBot.statusAutoReplyText).toBe('正在写代码，稍后回复～');
+    // Permanent Settings auto-reply `X` must remain untouched
     expect(body.adminConfig.pmBot.autoReplyEnabled).toBe(true);
-    expect(body.adminConfig.pmBot.autoReplyText).toBe('正在写代码，稍后回复～');
+    expect(body.adminConfig.pmBot.autoReplyText).toBe('自定义常驻回执 X');
     expect(body.config.bot.pmVerificationRequired).toBe(true);
 
-    // Invalid statusSticker is sanitized to '', non-string statusText is ignored, and omitted auto-reply fields are preserved
+    // Invalid statusSticker is sanitized to '', non-string statusText is ignored, and omitted fields are preserved
     const badRes = await worker.fetch(
       new Request('https://panel.test/api/admin/status', {
         method: 'POST',
@@ -9739,7 +9752,78 @@ describe('Awaiting-reply tracking, scene status quick API & pre-PM verification 
     const badBody = await badRes.json();
     expect(badBody.config.profile.statusSticker).toBe('');
     expect(badBody.config.profile.statusText).toBe('写代码中');
-    expect(badBody.adminConfig.pmBot.autoReplyEnabled).toBe(true);
-    expect(badBody.adminConfig.pmBot.autoReplyText).toBe('正在写代码，稍后回复～');
+    expect(badBody.adminConfig.pmBot.statusAutoReplyEnabled).toBe(true);
+    expect(badBody.adminConfig.pmBot.statusAutoReplyText).toBe('正在写代码，稍后回复～');
+    expect(badBody.adminConfig.pmBot.autoReplyText).toBe('自定义常驻回执 X');
+
+    // Verified visitor 40001 messaging while coding receives temporary scene reply
+    await kv.put('verified:40001', 'emoji:v1');
+    await upsertVisitorProfile(env, { id: 40001, first_name: 'Alice' }, { threadId: 61, incrementMsg: false });
+    await kv.put('thread:61', '40001');
+    await kv.put('verified:40002', 'emoji:v1');
+    await upsertVisitorProfile(env, { id: 40002, first_name: 'Bob' }, { threadId: 62, incrementMsg: false });
+    await kv.put('thread:62', '40002');
+
+    const tgCalls = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url, init) => {
+      const method = String(url).split('/').pop();
+      const reqBody = init?.body ? JSON.parse(init.body) : {};
+      tgCalls.push({ method, body: reqBody });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 101 } }), { status: 200 });
+    });
+
+    try {
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 11,
+            from: { id: 40001, first_name: 'Alice' },
+            chat: { id: 40001, type: 'private' },
+            text: '你好呀',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      const reply1 = tgCalls.find((c) => c.method === 'sendMessage' && c.body.chat_id === 40001);
+      expect(reply1?.body?.text).toBe('正在写代码，稍后回复～');
+
+      // Switch back to online preset -> temporary scene reply off, permanent `X` still active & restored
+      const onlineRes = await worker.fetch(
+        new Request('https://panel.test/api/admin/status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': adminInit },
+          body: JSON.stringify({
+            statusTone: 'online',
+            statusText: '在线营业中',
+            statusSticker: '',
+            statusAutoReplyEnabled: false,
+          }),
+        }),
+        env
+      );
+      const onlineBody = await onlineRes.json();
+      expect(onlineBody.adminConfig.pmBot.statusAutoReplyEnabled).toBe(false);
+      expect(onlineBody.adminConfig.pmBot.autoReplyEnabled).toBe(true);
+      expect(onlineBody.adminConfig.pmBot.autoReplyText).toBe('自定义常驻回执 X');
+
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 12,
+            from: { id: 40002, first_name: 'Bob' },
+            chat: { id: 40002, type: 'private' },
+            text: '现在有空吗？',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      const reply2 = tgCalls.find((c) => c.method === 'sendMessage' && c.body.chat_id === 40002);
+      expect(reply2?.body?.text).toBe('自定义常驻回执 X');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
   });
 });
