@@ -2083,7 +2083,10 @@ export default function SettingsDrawer({
                 })}
               </div>
 
-              {draft.pmBot.verificationMode === 'sticker_quiz' && (
+              {(draft.pmBot.verificationMode === 'sticker_quiz' ||
+                (draft.pmBot.verificationMode === 'turnstile' &&
+                  !draft.pmBot.turnstileReady &&
+                  (draft.pmBot.stickerChallenges || []).length > 0)) && (
                 <div
                   style={{
                     background: 'var(--bg-subtle)',
@@ -2311,9 +2314,9 @@ export default function SettingsDrawer({
                     <span className="update-collapse-title">
                       <span>⚙️ 高级验证参数</span>
                       <span className="update-collapse-badge">
-                        免验 {draft.pmBot.verifiedDays ?? 30}天
+                        免验 {draft.pmBot.verifiedDays || 30}天
                         {draft.pmBot.verificationMode !== 'turnstile'
-                          ? ` · 容错 ${draft.pmBot.maxVerifyFailures ?? 2}次`
+                          ? ` · 容错 ${draft.pmBot.maxVerifyFailures || 2}次`
                           : ''}
                       </span>
                     </span>

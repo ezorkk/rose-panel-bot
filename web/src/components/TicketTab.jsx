@@ -307,7 +307,7 @@ export default function TicketTab({
                 label: '放在频道简介',
                 url: buildSourceLink(`https://t.me/${botUsername}`, 'channel', 'bot'),
               },
-              ...(cardShareLink
+              ...(cardShareLink && cardShareLink !== copyShareUrl
                 ? [{ id: 'card', label: '分享名片直链', url: cardShareLink }]
                 : []),
             ];
