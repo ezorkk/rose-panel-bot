@@ -3157,7 +3157,7 @@ export default function SettingsDrawer({
                       {Number(draft.pmBot?.chatRetentionDays || 0) > 0
                         ? `每日定时任务将分批清理超过 ${
                             Number(draft.pmBot?.chatRetentionDays) === 365 ? '1 年' : '6 个月'
-                          } 的 D1 聊天消息与对应链接（0 KV 写入，KV 旧备份不删）。若同账号多实例共用 rose-panel-bot 库，请先为各实例配置独立的 database_name。`
+                          } 的 D1 聊天消息与对应链接（单次最多约 2,500 条，历史消息较多时会在几天内自动清完；0 KV 写入，KV 旧备份不删）。若同账号多实例共用 rose-panel-bot 库，请先为各实例配置独立的 database_name。`
                         : '默认永久保留全部 D1 聊天记录（KV 旧备份始终不删除）；修改后记得点击下方「保存全部设置」。'}
                     </div>
                   </div>

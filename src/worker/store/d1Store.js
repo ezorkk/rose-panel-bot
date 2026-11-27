@@ -192,19 +192,15 @@ export async function cleanupExpiredMaps(env, nowMs = Date.now(), options = {}) 
     const msgCutoff = ts - retentionDays * 86400 * 1000;
     for (let i = 0; i < maxBatches; i += 1) {
       const batchRes = await db.batch([
-        // 1. Delete message_links belonging to the expired messages batch about to be removed
+        // 1. Delete message_links belonging to the expired messages batch (uses idx_links_uniq via row-value IN)
         db
           .prepare(
             `DELETE FROM message_links
-             WHERE EXISTS (
-               SELECT 1 FROM (
-                 SELECT uid, id FROM messages
-                 WHERE created_at < ?
-                 ORDER BY created_at ASC, rowid ASC
-                 LIMIT ?
-               ) AS expired
-               WHERE message_links.uid = expired.uid
-                 AND message_links.message_id = expired.id
+             WHERE (uid, message_id) IN (
+               SELECT uid, id FROM messages
+               WHERE created_at < ?
+               ORDER BY created_at ASC, rowid ASC
+               LIMIT ?
              )`
           )
           .bind(msgCutoff, batchSize),

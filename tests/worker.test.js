@@ -8895,7 +8895,30 @@ describe('Cloudflare D1 Stage 2 store: cursor pagination, around jump, LIKE sear
       Array.from({ length: 60 }, (_, i) => `m_${i + 1}`)
     );
 
-    // 3. Complete conversation (`hasMore: false`): recall of oldest message m_1 removes it cleanly
+    // 3. Oldest visible message M0 deleted on server (when conversation >60 messages):
+    //    existing = [M0, M1..M59], poll returns [M-1, M1..M59] -> M0 MUST disappear and M-1 MUST come first
+    const sixtyWindow = {
+      messages: Array.from({ length: 60 }, (_, i) => makeMsg(i + 10)), // m_10 .. m_69
+      hasMore: true,
+      oldestCursor: { ts: 1710000010000, id: 10 },
+      newestCursor: { ts: 1710000069000, id: 69 },
+    };
+    const afterM0DeletedPoll = [
+      makeMsg(9), // M-1 (older than m_10, pulled into the 60-msg tail after m_10 was deleted)
+      ...Array.from({ length: 59 }, (_, i) => makeMsg(i + 11)), // m_11 .. m_69
+    ];
+    const afterM0Merged = mergeLatestHistoryTail(sixtyWindow, {
+      messages: afterM0DeletedPoll,
+      hasMore: true,
+      oldestCursor: { ts: 1710000009000, id: 9 },
+      newestCursor: { ts: 1710000069000, id: 69 },
+    });
+    expect(afterM0Merged.messages.some((m) => m.id === 'm_10')).toBe(false);
+    expect(afterM0Merged.messages.slice(0, 3).map((m) => m.id)).toEqual(['m_9', 'm_11', 'm_12']);
+    expect(afterM0Merged.messages).toHaveLength(60);
+    expect(afterM0Merged.oldestCursor).toEqual({ ts: 1710000009000, id: 9 });
+
+    // 4. Complete conversation (`hasMore: false`): recall of oldest message m_1 removes it cleanly
     const smallState = {
       messages: [makeMsg(1), makeMsg(2), makeMsg(3)],
       hasMore: false,
@@ -8945,6 +8968,12 @@ describe('Cloudflare D1 Stage 2 store: cursor pagination, around jump, LIKE sear
       { text: 'Hello', match: true },
       { text: ' Rose ', match: false },
       { text: 'hello', match: true },
+    ]);
+    // Unicode characters whose .toLowerCase() changes string length (e.g. Turkish İ) must not shift indices
+    expect(splitHighlightSegments('İstanbul rose test', 'rose')).toEqual([
+      { text: 'İstanbul ', match: false },
+      { text: 'rose', match: true },
+      { text: ' test', match: false },
     ]);
   });
 });

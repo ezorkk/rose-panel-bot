@@ -2873,6 +2873,21 @@ select {
   vertical-align: baseline;
 }
 
+.search-migrate-hint {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 11px;
+  margin-bottom: 10px;
+  border-radius: 12px;
+  background: var(--amber-soft);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .chat-history-top,
 .chat-history-bottom {
   display: flex;

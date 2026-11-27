@@ -44,21 +44,50 @@ export function mergeLatestHistoryTail(existingState = {}, latestRes = {}) {
     };
   }
 
-  const latestIds = new Set(latest.map((m) => m?.id).filter(Boolean));
-  const cutIdx = existing.findIndex((m) => latestIds.has(m?.id));
-
-  // Overlap starts after scrolled-up older messages: keep older prefix untouched, replace tail window.
-  if (cutIdx > 0) {
+  // Fast exact match on the oldest message of the polled tail (`latest[0]`):
+  // Since `existing` is strictly ordered `(created_at ASC, rowid ASC)`, everything strictly before
+  // `firstLatestIdx` is guaranteed older than `latest[0]` (even with identical millisecond timestamps).
+  const firstLatestIdx = existing.findIndex((m) => m?.id === latest[0]?.id);
+  if (firstLatestIdx > 0) {
     return {
-      messages: [...existing.slice(0, cutIdx), ...latest],
+      messages: [...existing.slice(0, firstLatestIdx), ...latest],
       hasMore: Boolean(existingState?.hasMore),
       oldestCursor: existingState?.oldestCursor || latestOldest,
       newestCursor: latestNewest,
     };
   }
+  if (firstLatestIdx === 0) {
+    return {
+      messages: latest,
+      hasMore: latestHasMore,
+      oldestCursor: latestOldest,
+      newestCursor: latestNewest,
+    };
+  }
 
-  // Overlap starts at index 0 (no older prefix loaded) OR completely disjoint (>60 new messages arrived):
-  // adopt the latest server window directly so there is never an invisible unscrollable gap.
+  // `latest[0]` is not in `existing` (e.g. `existing[0]` was deleted on the server so the 60-message tail
+  // shifted backward to an unloaded older message `M-1`, or >60 brand-new messages arrived).
+  // Only retain messages from `existing` strictly older than `latest[0]`'s timestamp (`latestStartTs`),
+  // dropping any deleted boundary messages that were >= `latestStartTs`.
+  const latestIds = new Set(latest.map((m) => m?.id).filter(Boolean));
+  const hasOverlap = existing.some((m) => latestIds.has(m?.id));
+  const latestStartTs = Number(latestOldest?.ts) || Date.parse(latest[0]?.at || '');
+  if (hasOverlap && Number.isFinite(latestStartTs) && latestStartTs > 0) {
+    const strictlyOlder = existing.filter((m) => {
+      if (latestIds.has(m?.id)) return false;
+      const ts = Date.parse(m?.at || '');
+      return Number.isFinite(ts) && ts < latestStartTs;
+    });
+    if (strictlyOlder.length > 0) {
+      return {
+        messages: [...strictlyOlder, ...latest],
+        hasMore: Boolean(existingState?.hasMore),
+        oldestCursor: existingState?.oldestCursor || latestOldest,
+        newestCursor: latestNewest,
+      };
+    }
+  }
+
   return {
     messages: latest,
     hasMore: latestHasMore,
@@ -144,28 +173,31 @@ export function buildSearchUrl(options = {}) {
 
 /**
  * Splits text into plain & matched segments for safe React highlighting (no raw HTML injection).
+ * Uses an escaped case-insensitive RegExp directly against `source` so indices always stay aligned
+ * in UTF-16 coordinates even for Unicode characters whose `.toLowerCase()` length differs (e.g. `İ`).
  */
 export function splitHighlightSegments(text = '', query = '') {
   const source = String(text || '');
   const needle = String(query || '').trim();
   if (!source || !needle) return [{ text: source, match: false }];
 
-  const lowerSource = source.toLowerCase();
-  const lowerNeedle = needle.toLowerCase();
+  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(escaped, 'gi');
   const segments = [];
   let pos = 0;
+  let match;
 
-  while (pos < source.length) {
-    const idx = lowerSource.indexOf(lowerNeedle, pos);
-    if (idx < 0) {
-      segments.push({ text: source.slice(pos), match: false });
-      break;
+  while ((match = re.exec(source)) !== null) {
+    if (match[0].length === 0) break;
+    if (match.index > pos) {
+      segments.push({ text: source.slice(pos, match.index), match: false });
     }
-    if (idx > pos) {
-      segments.push({ text: source.slice(pos, idx), match: false });
-    }
-    segments.push({ text: source.slice(idx, idx + needle.length), match: true });
-    pos = idx + needle.length;
+    segments.push({ text: match[0], match: true });
+    pos = match.index + match[0].length;
+  }
+
+  if (pos < source.length) {
+    segments.push({ text: source.slice(pos), match: false });
   }
 
   return segments.length > 0 ? segments : [{ text: source, match: false }];

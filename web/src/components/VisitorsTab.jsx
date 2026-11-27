@@ -127,6 +127,8 @@ export default function VisitorsTab({
   const [msgLoadingMore, setMsgLoadingMore] = useState(false);
   const [msgSearchError, setMsgSearchError] = useState('');
   const [msgHasSearched, setMsgHasSearched] = useState(false);
+  const [unmigratedVisitorsCount, setUnmigratedVisitorsCount] = useState(0);
+  const storageCheckedRef = useRef(false);
   const searchSeqRef = useRef(0);
   const msgSearchInputRef = useRef(null);
 
@@ -184,6 +186,24 @@ export default function VisitorsTab({
     if (!d1Bound && searchMode === 'messages') {
       setSearchMode('visitors');
     }
+  }, [d1Bound, searchMode]);
+
+  useEffect(() => {
+    if (!d1Bound || searchMode !== 'messages' || storageCheckedRef.current) return undefined;
+    storageCheckedRef.current = true;
+    let cancelled = false;
+    apiRequest('/api/admin/storage')
+      .then((res) => {
+        if (cancelled) return;
+        const pending = Math.max(0, Number(res?.total || 0) - Number(res?.done || 0));
+        setUnmigratedVisitorsCount(pending);
+      })
+      .catch(() => {
+        storageCheckedRef.current = false;
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [d1Bound, searchMode]);
 
   useEffect(
@@ -1083,6 +1103,23 @@ export default function VisitorsTab({
               </button>
             )}
           </div>
+
+          {!msgUidFilter && unmigratedVisitorsCount > 0 && (
+            <div className="search-migrate-hint">
+              <span>
+                尚有 <b>{unmigratedVisitorsCount}</b> 位老访客未迁入 D1，暂不参与跨访客全局搜索
+              </span>
+              {onOpenSettings && (
+                <button
+                  type="button"
+                  className="search-inline-link"
+                  onClick={() => onOpenSettings('update')}
+                >
+                  <Database size={11} /> 去一键迁移
+                </button>
+              )}
+            </div>
+          )}
 
           {msgSearchError && (
             <div className="card" style={{ color: 'var(--red)', fontSize: 13, marginBottom: 10 }}>
