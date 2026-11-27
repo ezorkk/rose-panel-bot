@@ -52,6 +52,7 @@ import {
   getVisitorHistory,
   getVisitorOverview,
   listVisitors,
+  markAllVisitorsRead,
   recallAdminVisitorMessage,
   searchVisitorMessages,
 } from './visitors.js';
@@ -399,6 +400,12 @@ export async function handleApiRequest(request, env, url, ctx = null) {
         getVisitStats(env, config),
       ]);
       return json({ ok: true, ...data, blockedSpamCount, blockedToday, visitStats });
+    }
+
+    // POST /api/admin/visitors/mark-all-read — batch clear all awaitingReply markers
+    if (path === '/api/admin/visitors/mark-all-read' && method === 'POST') {
+      const res = await markAllVisitorsRead(env);
+      return json({ ok: true, ...res });
     }
 
     // GET /api/admin/visitors/:userId

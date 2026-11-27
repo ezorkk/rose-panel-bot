@@ -777,15 +777,10 @@ export async function getVisitorDetail(env, userId, knownSupergroupId = null, kn
     base.visitor_msg_count !== undefined ? Number(base.visitor_msg_count || 0) : totalMsgs;
   const adminMsgs = Number(base.admin_msg_count || 0);
   const pendingReview = filterFreshPendingReview(base.pendingReview);
-  // Backfill `last_sender` for legacy pre-v2.3 records created before the field existed
+  // Only count explicitly recorded `last_sender === 'visitor'` as awaiting reply so legacy pre-v2.1
+  // historical conversations never retroactively light up as false unread/awaiting badges on upgrade.
   const previewText = String(base.last_preview || '');
-  const inferredLastSender =
-    base.last_sender ||
-    (visitorMsgs > 0 && previewText
-      ? previewText.startsWith('我：')
-        ? 'admin'
-        : 'visitor'
-      : '');
+  const explicitLastSender = String(base.last_sender || '');
 
   return {
     userId: uid,
@@ -804,8 +799,8 @@ export async function getVisitorDetail(env, userId, knownSupergroupId = null, kn
     photo_count: Number(base.photo_count || 0),
     link_count: Number(base.link_count || 0),
     last_preview: previewText,
-    lastSender: inferredLastSender,
-    awaitingReply: inferredLastSender === 'visitor' && !isBanned && !isClosed,
+    lastSender: explicitLastSender,
+    awaitingReply: explicitLastSender === 'visitor' && !isBanned && !isClosed,
     note: base.note || '',
     source: base.source || '',
     source_at: base.source_at || null,
@@ -1091,8 +1086,19 @@ export async function applyVisitorAction(env, userId, action, payload = {}) {
       rec.note = String(payload.note || '').slice(0, 300);
       recordDirty = true;
       break;
+    case 'mark_read':
+      if (rec.last_sender === 'visitor') {
+        rec.last_sender = 'read';
+        recordDirty = true;
+      }
+      break;
     default:
       throw new Error(`Unsupported action: ${action}`);
+  }
+
+  // No-op fast path for idempotent `mark_read` when already read/replied (0 writes, 0 cache churn)
+  if (action === 'mark_read' && !recordDirty) {
+    return await getVisitorDetail(env, uid, null, existingRec || null);
   }
 
   // In D1 mode, ensure visitors acted upon via ban/trust (e.g. direct ban/trust by UID) exist in
@@ -1105,11 +1111,65 @@ export async function applyVisitorAction(env, userId, action, payload = {}) {
     await store.putVisitor(uid, rec);
   }
 
-  if (store.mode === 'kv') {
+  if (store.mode === 'kv' && action !== 'mark_read') {
     await addToVisitorIndex(env, uid);
   }
   await invalidateVisitorSummaryCache(env);
   return await getVisitorDetail(env, uid, null, recordDirty || existingRec || shouldCreateD1Stub ? rec : null);
+}
+
+/**
+ * Lightweight helper to clear `awaitingReply` when the owner views chat messages or reacts with an emoji.
+ * Idempotent: performs zero writes when the visitor is not currently marked `last_sender === 'visitor'`.
+ */
+export async function markVisitorRead(env, userId) {
+  const uid = String(userId || '');
+  if ((!env?.TOPIC_MAP && !env?.DB) || !/^\d+$/.test(uid)) return false;
+  const store = getStore(env);
+  const existing = await store.getVisitor(uid);
+  if (!existing || existing.last_sender !== 'visitor') return false;
+  await store.putVisitor(uid, { ...existing, last_sender: 'read' });
+  await invalidateVisitorSummaryCache(env);
+  return true;
+}
+
+/**
+ * Clears `awaitingReply` across all currently awaiting visitors (batch "全部标为已读").
+ */
+export async function markAllVisitorsRead(env) {
+  if (!env?.TOPIC_MAP && !env?.DB) return { updatedCount: 0 };
+  const store = getStore(env);
+  let pairs = [];
+  if (store.mode === 'd1') {
+    const rows = await store.listVisitorRecords({ limit: 500 });
+    pairs = rows
+      .filter((r) => r?.uid && r?.record)
+      .map((r) => ({ uid: String(r.uid), rec: r.record }));
+  } else {
+    const indexedRaw = await safeGetJSON(env.TOPIC_MAP, VISITOR_INDEX_KEY, []);
+    const ids = Array.from(new Set((Array.isArray(indexedRaw) ? indexedRaw : []).map(String))).slice(0, 500);
+    const loaded = await Promise.all(
+      ids.map(async (uid) => ({ uid, rec: await store.getVisitor(uid) }))
+    );
+    pairs = loaded.filter((item) => item.rec);
+  }
+
+  const candidates = pairs.filter((item) => item.rec.last_sender === 'visitor' && !item.rec.closed);
+  if (candidates.length === 0) return { updatedCount: 0 };
+
+  // Exclude banned visitors so `updatedCount` matches the visible `awaitingReply` count exactly
+  const kv = env?.TOPIC_MAP || null;
+  const bannedFlags = kv
+    ? await Promise.all(candidates.map(({ uid }) => kv.get(`banned:${uid}`).catch(() => null)))
+    : candidates.map(() => null);
+  const awaiting = candidates.filter((_, idx) => bannedFlags[idx] !== '1');
+  if (awaiting.length === 0) return { updatedCount: 0 };
+
+  await Promise.all(
+    awaiting.map(({ uid, rec }) => store.putVisitor(uid, { ...rec, last_sender: 'read' }))
+  );
+  await invalidateVisitorSummaryCache(env);
+  return { updatedCount: awaiting.length };
 }
 
 /**

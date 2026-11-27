@@ -57,6 +57,7 @@ import {
   formatSourceLabel,
   getVisitorDetail,
   invalidateVisitorSummaryCache,
+  markVisitorRead,
   normalizeSourceParam,
   recallAdminVisitorMessage,
   recordVisitorExchange,
@@ -2394,6 +2395,9 @@ export async function handleMessageReaction(env, reaction) {
         await updateVisitorMessageReaction(env, dmEntry.uid, dmEntry.pmMessageId, 'owner', panelReaction).catch(
           () => {}
         );
+        if (panelReaction) {
+          await markVisitorRead(env, dmEntry.uid).catch(() => {});
+        }
         return;
       }
 
@@ -2467,6 +2471,9 @@ export async function handleMessageReaction(env, reaction) {
         reaction: tgReactionPayload,
       }).catch(() => {});
       await updateVisitorMessageReaction(env, targetUid, targetPmId, 'owner', panelReaction).catch(() => {});
+      if (panelReaction) {
+        await markVisitorRead(env, targetUid).catch(() => {});
+      }
     }
   } catch {
     // Reaction sync is strictly best-effort and must never disrupt webhook handling

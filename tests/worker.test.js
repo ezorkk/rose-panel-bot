@@ -9661,30 +9661,81 @@ describe('Awaiting-reply tracking, scene status quick API & pre-PM verification 
     const overviewBanned = await getVisitorOverview(env);
     expect(overviewBanned.stats.awaitingReply).toBe(0);
 
-    // Legacy visitor without `last_sender` infers awaitingReply from non-admin `last_preview`
+    // Legacy pre-v2.1 visitors without explicit `last_sender` must NOT retroactively become `awaitingReply`
     await upsertVisitorProfile(
       env,
       { id: 88102, first_name: 'LegacyVisitor' },
       { incrementMsg: true, lastPreview: '升级前发的消息' }
     );
     const legacyDetail = await getVisitorDetail(env, '88102');
-    expect(legacyDetail.lastSender).toBe('visitor');
-    expect(legacyDetail.awaitingReply).toBe(true);
+    expect(legacyDetail.lastSender).toBe('');
+    expect(legacyDetail.awaitingReply).toBe(false);
 
-    // Legacy visitor whose last_preview starts with `我：` is inferred as replied by admin
     await upsertVisitorProfile(
       env,
       { id: 88103, first_name: 'LegacyReplied' },
       { incrementMsg: true, lastPreview: '我：已经处理好了' }
     );
     const legacyReplied = await getVisitorDetail(env, '88103');
-    expect(legacyReplied.lastSender).toBe('admin');
+    expect(legacyReplied.lastSender).toBe('');
     expect(legacyReplied.awaitingReply).toBe(false);
 
-    // `needsAttention` counts the union of pendingReview and awaitingReply without double-counting
-    const overviewUnion = await getVisitorOverview(env);
-    expect(overviewUnion.stats.awaitingReply).toBe(1);
-    expect(overviewUnion.stats.needsAttention).toBe(1);
+    // Explicit `mark_read` clears `awaitingReply` without closing the chat, and a new visitor message re-sets it
+    await upsertVisitorProfile(env, { id: 88104, first_name: 'ReadTest' }, { incrementMsg: false });
+    await recordVisitorExchange(env, '88104', { message_id: 21, text: '你好有空吗' }, { sender: 'visitor' });
+    expect((await getVisitorDetail(env, '88104')).awaitingReply).toBe(true);
+    const readDetail = await applyVisitorAction(env, '88104', 'mark_read');
+    expect(readDetail.awaitingReply).toBe(false);
+    expect(readDetail.lastSender).toBe('read');
+    expect(readDetail.isClosed).toBe(false);
+
+    await recordVisitorExchange(env, '88104', { message_id: 22, text: '再问一个问题' }, { sender: 'visitor' });
+    expect((await getVisitorDetail(env, '88104')).awaitingReply).toBe(true);
+
+    // Batch mark-all-read endpoint clears all awaiting visitors at once
+    const batchEnv = { ...env, BOT_TOKEN: '123456:MARK_READ_TOK', ADMIN_IDS: '9001' };
+    const nowSec = String(Math.floor(Date.now() / 1000));
+    const adminInit = await signInitData(
+      { user: JSON.stringify({ id: 9001, first_name: 'Owner' }), auth_date: nowSec },
+      batchEnv.BOT_TOKEN
+    );
+    const markAllRes = await worker.fetch(
+      new Request('https://panel.test/api/admin/visitors/mark-all-read', {
+        method: 'POST',
+        headers: { 'X-Telegram-Init-Data': adminInit },
+      }),
+      batchEnv
+    );
+    expect(markAllRes.status).toBe(200);
+    const markAllBody = await markAllRes.json();
+    expect(markAllBody.updatedCount).toBe(1);
+    const overviewAfterMarkAll = await getVisitorOverview(env);
+    expect(overviewAfterMarkAll.stats.awaitingReply).toBe(0);
+    expect(overviewAfterMarkAll.stats.needsAttention).toBe(0);
+
+    // Owner adding an Emoji reaction in Telegram (DM mode) also clears `awaitingReply`
+    await recordVisitorExchange(env, '88104', { message_id: 23, text: '谢谢大佬！' }, { sender: 'visitor', pmMessageId: 23 });
+    expect((await getVisitorDetail(env, '88104')).awaitingReply).toBe(true);
+    await saveDmMessageMap(batchEnv, 9901, '88104', 23);
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({ ok: true, result: true }), { status: 200 }));
+    try {
+      await handleTelegramUpdate(
+        {
+          message_reaction: {
+            chat: { id: 9001, type: 'private' },
+            message_id: 9901,
+            user: { id: 9001, first_name: 'Owner' },
+            new_reaction: [{ type: 'emoji', emoji: '👍' }],
+          },
+        },
+        batchEnv,
+        'https://panel.test'
+      );
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+    expect((await getVisitorDetail(env, '88104')).awaitingReply).toBe(false);
   });
 
   it('isolates temporary statusAutoReply from permanent pmBot.autoReply across coding -> online round-trip', async () => {

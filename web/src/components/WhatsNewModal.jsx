@@ -11,6 +11,22 @@ export const SEEN_VERSION_STORAGE_KEY = 'rose_seen_version';
 
 export const RECENT_RELEASES = [
   {
+    version: '2.1.1',
+    url: 'https://github.com/mango0114/rose-panel-bot/releases/tag/v2.1.1',
+    items: [
+      {
+        tag: '修复',
+        tone: 'fix',
+        text: '不再将升级前的历史访客倒推标为「待回复」，避免更新后出现已查看旧消息的红点',
+      },
+      {
+        tag: '改进',
+        tone: 'imp',
+        text: '点开访客「聊过」查看最新消息、或在 TG 给访客消息点 Emoji 回应时自动消除「待回复」，并新增「全部标为已读」按钮',
+      },
+    ],
+  },
+  {
     version: '2.1.0',
     url: 'https://github.com/mango0114/rose-panel-bot/releases/tag/v2.1.0',
     items: [
@@ -276,7 +292,7 @@ export function StarSupportBanner({ onDismiss = null, style = undefined }) {
 }
 
 export default function WhatsNewModal({
-  appVersion = '2.1.0',
+  appVersion = '2.1.1',
   previousVersion = '',
   mode = 'auto',
   onClose,

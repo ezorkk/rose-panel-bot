@@ -183,6 +183,10 @@ export default function VisitorsTab({
   const historyInFlightRef = useRef(0);
   const hasNewerRef = useRef(false);
   const historyStateRef = useRef(EMPTY_HISTORY);
+  const statsRef = useRef(stats);
+  statsRef.current = stats;
+  const markedReadSigRef = useRef(new Set());
+  const [markingAllRead, setMarkingAllRead] = useState(false);
   const scrollIntentRef = useRef({ type: 'none' });
   const highlightTimerRef = useRef(null);
 
@@ -743,6 +747,79 @@ export default function VisitorsTab({
       tg?.offEvent?.('activated', refreshOnResume);
     };
   }, [drawerView, activeVisitor?.userId, historyData.hasNewer]);
+
+  // Auto-clear `awaitingReply` as soon as the owner opens and views the visitor's latest messages in chat.
+  useEffect(() => {
+    if (drawerView !== 'chat' || !activeVisitor?.userId || !activeVisitor.awaitingReply || historyData.hasNewer) {
+      return;
+    }
+    const uid = String(activeVisitor.userId);
+    const sig = `${uid}:${activeVisitor.last_seen_at || ''}`;
+    if (markedReadSigRef.current.has(sig)) return;
+    markedReadSigRef.current.add(sig);
+
+    const hasPendingReview = (activeVisitor.pendingReview?.length || 0) > 0;
+    apiRequest(`/api/admin/visitors/${encodeURIComponent(uid)}/action`, {
+      method: 'POST',
+      body: { action: 'mark_read' },
+    })
+      .then((res) => {
+        const updatedVisitor = res?.visitor;
+        setActiveVisitor((prev) =>
+          prev && String(prev.userId) === uid
+            ? { ...(updatedVisitor || prev), awaitingReply: false, lastSender: 'read' }
+            : prev
+        );
+        setVisitors((prev) =>
+          prev.map((v) =>
+            String(v.userId) === uid ? { ...v, awaitingReply: false, lastSender: 'read' } : v
+          )
+        );
+        const curStats = statsRef.current || {};
+        const nextAwaiting = Math.max(0, Number(curStats.awaitingReply || 0) - 1);
+        const curNeeds = Number(curStats.needsAttention ?? curStats.awaitingReply ?? 0);
+        const nextNeeds = hasPendingReview
+          ? curNeeds
+          : Math.max(Number(curStats.pendingReview || 0), Math.max(0, curNeeds - 1));
+        const nextStats = {
+          ...curStats,
+          awaitingReply: nextAwaiting,
+          needsAttention: nextNeeds,
+        };
+        setStats(nextStats);
+        onStatsSync?.({
+          visitorSummary: nextStats,
+          pendingReviewCount: Number(nextStats.pendingReview || 0),
+          awaitingReplyCount: nextAwaiting,
+        });
+      })
+      .catch(() => {
+        markedReadSigRef.current.delete(sig);
+      });
+  }, [
+    drawerView,
+    activeVisitor?.userId,
+    activeVisitor?.awaitingReply,
+    activeVisitor?.last_seen_at,
+    activeVisitor?.pendingReview?.length,
+    historyData.hasNewer,
+  ]);
+
+  const handleMarkAllRead = async () => {
+    if (markingAllRead) return;
+    try {
+      setMarkingAllRead(true);
+      haptic('light');
+      const res = await apiRequest('/api/admin/visitors/mark-all-read', { method: 'POST' });
+      const count = Number(res?.updatedCount || 0);
+      await loadList(search, filter);
+      onToast(count > 0 ? `✅ 已将 ${count} 位访客标为已读` : '✅ 当前没有待回复消息');
+    } catch (err) {
+      onToast(err.message || '标为已读失败');
+    } finally {
+      setMarkingAllRead(false);
+    }
+  };
 
   const sendReplyRequest = async (pending) => {
     const { uid, text, photo, localId } = pending;
@@ -1383,6 +1460,32 @@ export default function VisitorsTab({
               </button>
             ))}
           </div>
+
+          {filter === 'awaiting' && stats.awaitingReply > 0 && (
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 8,
+                marginBottom: 8,
+                padding: '0 2px',
+              }}
+            >
+              <span style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>
+                点开「聊过」查看消息会自动消掉待回复
+              </span>
+              <button
+                type="button"
+                className="btn btn-soft btn-sm"
+                style={{ flexShrink: 0 }}
+                disabled={markingAllRead}
+                onClick={handleMarkAllRead}
+              >
+                <CheckCircle2 size={13} /> {markingAllRead ? '处理中…' : '全部标为已读'}
+              </button>
+            </div>
+          )}
 
           {loading ? (
             <div className="card empty-state">
