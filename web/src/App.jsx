@@ -408,6 +408,12 @@ export default function App() {
   const defaultTab = orderedNavItems[0]?.id || 'profile';
   const effectiveTab =
     activeTab && orderedNavItems.some((item) => item.id === activeTab) ? activeTab : defaultTab;
+  const switchTab = (nextTab) => {
+    if (nextTab !== effectiveTab) {
+      window.scrollTo?.(0, 0);
+    }
+    setActiveTab(nextTab);
+  };
 
   return (
     <div className="app-shell">
@@ -460,7 +466,7 @@ export default function App() {
               if (tab === 'visitors' && opts?.filter) {
                 setVisitorFilterPreset(opts.filter);
               }
-              setActiveTab(tab);
+              switchTab(tab);
             }}
             onCheckin={handleCheckin}
             checkinLoading={checkinLoading}
@@ -553,7 +559,7 @@ export default function App() {
                   className={`dock-item ${active ? 'active' : ''}`}
                   onClick={() => {
                     haptic('light');
-                    setActiveTab(item.id);
+                    switchTab(item.id);
                   }}
                 >
                   <Icon size={20} strokeWidth={active ? 2.2 : 1.9} />
