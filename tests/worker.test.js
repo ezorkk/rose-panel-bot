@@ -34,6 +34,7 @@ import {
   WEBHOOK_UPDATES_REV_KEY,
   buildVisitorCardCaption,
   buildVisitorCardText,
+  checkRateLimit,
   completeTurnstileVerification,
   ensureWebhookReactionSubscription,
   formatSafeReviewPreviewHtml,
@@ -67,6 +68,7 @@ import {
   getOwnerChatId,
   lookupDmMessageMap,
   resolveInboxMode,
+  saveDmMessageMap,
 } from '../src/worker/inbox.js';
 import worker, { WEBHOOK_ALLOWED_UPDATES } from '../src/worker/index.js';
 import { apiRequest } from '../web/src/lib/api.js';
@@ -140,9 +142,11 @@ import {
   SCHEMA_VERSION,
   cleanupExpiredMaps,
   ensureSchema,
+  ensureVisitorsBackfilled,
   escapeLikePattern,
   getStorageStatus,
   getStore,
+  isVisitorsBackfilled,
   migrateVisitor,
   migrateVisitorsBatch,
   shouldRunDailyCleanup,
@@ -367,6 +371,9 @@ describe('Visitor profiles & moderation (telegram_private_chatbot KV compatibili
     const ov2 = await getVisitorOverview(env);
     expect(ov2.cached).toBe(true);
     expect(ov2.stats.total).toBe(2);
+    if (storageMode === 'd1') {
+      expect(await kv.get('cache:visitor_summary')).toBeNull();
+    }
 
     await applyVisitorAction(env, '88802', 'ban');
     const ov3 = await getVisitorOverview(env);
@@ -3193,7 +3200,9 @@ describe('Mini App in-panel visitor chat log, direct text/photo reply & recall',
     if (storageMode === 'kv') {
       expect(getSpy).toHaveBeenCalledWith('history:95959', expect.objectContaining({ cacheTtl: HISTORY_CACHE_TTL_SECONDS, type: 'json' }));
     } else {
-      expect(getSpy).toHaveBeenCalledTimes(1);
+      // Lazy first-read migration inspects legacy KV `history:95959` (+ `user:95959` before backfill), then 0 KV reads after
+      expect(getSpy.mock.calls.length).toBeGreaterThanOrEqual(1);
+      expect(getSpy.mock.calls.length).toBeLessThanOrEqual(2);
       getSpy.mockClear();
       await getVisitorHistory(env, '95959');
       expect(getSpy).not.toHaveBeenCalled();
@@ -3432,7 +3441,7 @@ describe('Bot DM direct push inbox (dm-inbox)', () => {
   it('delivers owner quote-replies to visitor, records admin exchange, and chains replies to own reply', async () => {
     const kv = createMemoryKV();
     const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123:DM_REPLY', ADMIN_IDS: '10001' });
-    await kv.put(`${DM_MAP_PREFIX}502`, '20001');
+    await saveDmMessageMap(env, 502, '20001');
     await upsertVisitorProfile(env, { id: 20001, first_name: 'Alice' }, { incrementMsg: false });
 
     const { calls, fetchMock } = createMockTg({ nextMsgStart: 800 });
@@ -3548,9 +3557,9 @@ describe('Bot DM direct push inbox (dm-inbox)', () => {
     const kv = createMemoryKV();
     const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123:DM_CMD', ADMIN_IDS: '10001' });
     await upsertVisitorProfile(env, { id: 20001, first_name: 'Alice', username: 'alice_tg' }, { incrementMsg: false });
-    await kv.put(`${DM_MAP_PREFIX}502`, '20001'); // pushed visitor msg
-    await kv.put(`${DM_MAP_PREFIX}601`, '20001'); // owner reply #1
-    await kv.put(`${DM_MAP_PREFIX}602`, '20001'); // owner reply #2
+    await saveDmMessageMap(env, 502, '20001'); // pushed visitor msg
+    await saveDmMessageMap(env, 601, '20001'); // owner reply #1
+    await saveDmMessageMap(env, 602, '20001'); // owner reply #2
     await recordVisitorExchange(
       env,
       '20001',
@@ -4065,7 +4074,7 @@ describe('Bot DM direct push inbox (dm-inbox)', () => {
   it('does not forward an unknown command to the visitor when the owner quotes a push', async () => {
     const kv = createMemoryKV();
     const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123:DM_UNKNOWN_CMD', ADMIN_IDS: '10001' });
-    await kv.put(`${DM_MAP_PREFIX}42`, '20001');
+    await saveDmMessageMap(env, 42, '20001');
 
     const { calls, fetchMock } = createMockTg();
     await withFetch(fetchMock, async () => {
@@ -5225,19 +5234,22 @@ describe('Monthly unique visitor counter (v1.8)', () => {
 
     const putSpy = vi.spyOn(kv, 'put');
 
-    // Open #1 -> writes visit:seen:* and visit:count:* (2 writes)
+    // Open #1 -> KV mode writes visit:seen:* and visit:count:* (2 writes); D1 mode writes visit_seen (0 KV writes)
     const r1 = await worker.fetch(
       new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': visitorInit } }),
       env
     );
     expect(r1.status).toBe(200);
-    expect(putSpy).toHaveBeenCalledTimes(2);
-
-    // Verify TTLs on both KV keys
-    const seenCall = putSpy.mock.calls.find(([k]) => k.startsWith('visit:seen:'));
-    const countCall = putSpy.mock.calls.find(([k]) => k.startsWith('visit:count:'));
-    expect(seenCall?.[2]).toEqual({ expirationTtl: VISIT_SEEN_TTL_SECONDS });
-    expect(countCall?.[2]).toEqual({ expirationTtl: VISIT_COUNT_TTL_SECONDS });
+    if (storageMode === 'kv') {
+      expect(putSpy).toHaveBeenCalledTimes(2);
+      // Verify TTLs on both KV keys
+      const seenCall = putSpy.mock.calls.find(([k]) => k.startsWith('visit:seen:'));
+      const countCall = putSpy.mock.calls.find(([k]) => k.startsWith('visit:count:'));
+      expect(seenCall?.[2]).toEqual({ expirationTtl: VISIT_SEEN_TTL_SECONDS });
+      expect(countCall?.[2]).toEqual({ expirationTtl: VISIT_COUNT_TTL_SECONDS });
+    } else {
+      expect(putSpy).not.toHaveBeenCalled();
+    }
 
     // Opens #2 & #3 -> ZERO KV writes
     putSpy.mockClear();
@@ -5355,7 +5367,7 @@ describe('Monthly unique visitor counter (v1.8)', () => {
     const cfgDefault = await loadPanelConfig(env);
     expect(cfgDefault.profile.showVisitCounter).toBe(false);
 
-    // Seed this month + last month totals
+    // Seed this month + last month totals in KV (verifies KV mode AND D1 mid-month upgrade continuity!)
     const { thisMonthKey, lastMonthKey } = getMonthKeys(new Date(), cfgDefault.community.timezoneOffsetHours);
     await kv.put(`visit:count:${thisMonthKey}`, JSON.stringify({ n: 42 }));
     await kv.put(`visit:count:${lastMonthKey}`, JSON.stringify({ n: 31 }));
@@ -5980,8 +5992,8 @@ describe('Bidirectional Telegram reaction sync & panel display (v1.9)', () => {
   it('Direction B (DM mode): syncs owner reactions on visitor copy, skips legacy plain-uid dmmap without error', async () => {
     const kv = createMemoryKV();
     const env = makeEnv({ TOPIC_MAP: kv, BOT_TOKEN: '123456:DIR_B_DM', ADMIN_IDS: '10001' });
-    await kv.put(`${DM_MAP_PREFIX}501`, '30020'); // legacy plain uid (or header card)
-    await kv.put(`${DM_MAP_PREFIX}502`, JSON.stringify({ u: '30020', p: 77 }));
+    await saveDmMessageMap(env, 501, '30020'); // legacy plain uid / header card (pm_message_id = null)
+    await saveDmMessageMap(env, 502, '30020', 77);
     await kv.put(
       'history:30020',
       JSON.stringify({
@@ -7484,7 +7496,7 @@ describe('Cloudflare D1 storage layer, schema idempotency, map fallback & daily 
     expect(db._stats.batches).toBe(1);
 
     const versionVal = await db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).first('value');
-    expect(versionVal).toBe('1');
+    expect(versionVal).toBe(String(SCHEMA_VERSION));
 
     const tablesRes = await db
       .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
@@ -7495,7 +7507,10 @@ describe('Cloudflare D1 storage layer, schema idempotency, map fallback & daily 
       'messages',
       'meta',
       'migrated_visitors',
+      'rate_limits',
       'topic_map',
+      'visit_seen',
+      'visitors',
     ]);
 
     // Second call on the same DB binding uses the per-isolate Promise cache (0 extra batches)
@@ -7518,7 +7533,9 @@ describe('Cloudflare D1 storage layer, schema idempotency, map fallback & daily 
     const hist = await getStore(env).getHistory('88001');
     expect(hist.messages).toHaveLength(1);
     expect(hist.messages[0].text).toBe('hello d1');
-    expect(await db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).first('value')).toBe('1');
+    expect(await db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).first('value')).toBe(
+      String(SCHEMA_VERSION)
+    );
   });
 
   it('retains >60 messages in D1 without writing history:* to KV while returning newest 60 by default', async () => {
@@ -7556,28 +7573,43 @@ describe('Cloudflare D1 storage layer, schema idempotency, map fallback & daily 
     expect(fullHist.messages[74].text).toBe('msg #75');
   });
 
-  it('falls back to KV for legacy tmsg:* and dmmap:* entries on D1 miss and returns null when absent in both', async () => {
+  it('time-gates KV fallback for legacy tmsg:* (30d) and dmmap:* (7d) using meta.d1_since, then stops with 0 KV reads', async () => {
     const kv = createMemoryKV();
     const db = createD1Shim();
     const env = { TOPIC_MAP: kv, DB: db };
     const store = getStore(env);
+    await ensureSchema(env);
 
-    // Seed pre-upgrade mappings in KV only
+    const d1Since = Number(await db.prepare(`SELECT value FROM meta WHERE key = 'd1_since'`).first('value'));
+    expect(d1Since).toBeGreaterThan(0);
+
+    // Pre-upgrade KV keys exist
     await kv.put(`${TOPIC_MSG_MAP_PREFIX}901`, JSON.stringify({ g: '-100555', u: '70001', p: 42 }));
     await kv.put(`${DM_MAP_PREFIX}801`, JSON.stringify({ u: '70002', p: 55 }));
     await kv.put(`${DM_MAP_PREFIX}802`, '70003');
 
-    // D1 miss -> KV fallback succeeds
-    expect(await store.getTopicMap('-100555', 901)).toEqual({ uid: '70001', pmMessageId: 42 });
-    // Group mismatch on KV fallback still rejected
-    expect(await store.getTopicMap('-100999', 901)).toBeNull();
+    // Within 7d/30d of d1_since -> fallback succeeds so straight v1.11 -> v2.2 upgrades never lose recent replies/reactions
+    expect(await store.getTopicMap('-100555', 901, d1Since + 1000)).toEqual({ uid: '70001', pmMessageId: 42 });
+    expect(await store.getTopicMap('-100999', 901, d1Since + 1000)).toBeNull();
+    expect(await store.getDmMap(801, d1Since + 1000)).toEqual({ uid: '70002', pmMessageId: 55 });
+    expect(await store.getDmMap(802, d1Since + 1000)).toEqual({ uid: '70003', pmMessageId: null });
 
-    expect(await store.getDmMap(801)).toEqual({ uid: '70002', pmMessageId: 55 });
-    expect(await store.getDmMap(802)).toEqual({ uid: '70003', pmMessageId: null });
+    // Past 7d -> dm_map stops reading KV; past 30d -> topic_map stops reading KV (0 KV reads on miss)
+    const kvGetSpy = vi.spyOn(kv, 'get');
+    const after7d = d1Since + 7 * 86400 * 1000 + 1;
+    const after30d = d1Since + 30 * 86400 * 1000 + 1;
+    expect(await store.getDmMap(801, after7d)).toBeNull();
+    expect(await store.getTopicMap('-100555', 901, after30d)).toBeNull();
+    expect(kvGetSpy).not.toHaveBeenCalled();
 
-    // Neither D1 nor KV has entry -> returns null cleanly
-    expect(await store.getTopicMap('-100555', 9999)).toBeNull();
-    expect(await store.getDmMap(9999)).toBeNull();
+    // Direct D1 hits always work with 0 KV reads & 0 KV writes
+    const kvPutSpy = vi.spyOn(kv, 'put');
+    await store.putTopicMap('-100555', 905, '70005', 45);
+    await store.putDmMap(805, '70006', 66);
+    expect(await store.getTopicMap('-100555', 905)).toEqual({ uid: '70005', pmMessageId: 45 });
+    expect(await store.getDmMap(805)).toEqual({ uid: '70006', pmMessageId: 66 });
+    expect(kvPutSpy).not.toHaveBeenCalled();
+    expect(kvGetSpy).not.toHaveBeenCalled();
   });
 
   it('purges only expired topic_map (>30d) and dm_map (>7d) rows once daily on scheduled cron even with probe alerts off', async () => {
@@ -8997,5 +9029,429 @@ describe('Cloudflare D1 Stage 2 store: cursor pagination, around jump, LIKE sear
       { text: 'rose', match: true },
       { text: ' test', match: false },
     ]);
+  });
+});
+
+describe('Cloudflare D1 Stage 3: visitors, atomic rate_limits, visit_seen & visitor card resilience (v2.2)', () => {
+  it('upgrades an existing v1 D1 database to schema_version 2 without data loss and creates Stage 3 tables & indexes', async () => {
+    const db = createD1Shim();
+    // Simulate a live v2.0/v2.1 D1 database with schema_version = '1' and an existing message row
+    await db.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+      INSERT INTO meta (key, value) VALUES ('schema_version', '1');
+      CREATE TABLE messages (
+        id TEXT NOT NULL, uid TEXT NOT NULL, sender TEXT NOT NULL, pm_message_id INTEGER,
+        topic_msg_id INTEGER, topic_copy_id INTEGER, topic_thread_id INTEGER, topic_chat_id TEXT,
+        dm_msg_id INTEGER, dm_copy_id INTEGER, text TEXT, media_tag TEXT, photo_file_id TEXT,
+        thumb_file_id TEXT, sticker_file_id TEXT, sticker_format TEXT, visitor_reaction TEXT,
+        owner_reaction TEXT, created_at INTEGER NOT NULL, PRIMARY KEY (uid, id)
+      );
+      INSERT INTO messages (id, uid, sender, text, created_at) VALUES ('m_old_1', '93100', 'visitor', 'pre-v2.2 msg', 1700000000000);
+    `);
+
+    const env = { TOPIC_MAP: createMemoryKV(), DB: db };
+    const version = await ensureSchema(env);
+    expect(version).toBe(2);
+    expect(await db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).first('value')).toBe('2');
+
+    // Existing v1 data preserved
+    const preserved = await db.prepare(`SELECT text FROM messages WHERE uid = '93100'`).first('text');
+    expect(preserved).toBe('pre-v2.2 msg');
+
+    // Stage 3 tables & indexes exist
+    const indexes = (
+      await db.prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%' ORDER BY name`).all()
+    ).results.map((r) => r.name);
+    expect(indexes).toContain('idx_visitors_last_seen');
+    expect(indexes).toContain('idx_rate_limits_expires');
+  });
+
+  it('stores visitors in D1 with 0 KV churn, supports lazy single-visitor fallback & one-time KV backfill without deleting KV', async () => {
+    const kv = createMemoryKV();
+    const db = createD1Shim();
+    const env = { TOPIC_MAP: kv, DB: db, SUPERGROUP_ID: '-100777888' };
+
+    // Pre-seed legacy KV visitor profiles + index + orphan banned:* key
+    await kv.put('user:93001', JSON.stringify({ first_name: 'LegacyOne', thread_id: 11, msg_count: 5, last_seen_at: '2026-01-01T00:00:00.000Z' }));
+    await kv.put('user:93002', JSON.stringify({ first_name: 'LegacyTwo', source: 'site', last_seen_at: '2026-01-02T00:00:00.000Z' }));
+    await kv.put('visitors:index', JSON.stringify(['93001', '93002']));
+    await kv.put('banned:93003', '1'); // pre-v1.5.3 orphan ban without user:93003
+
+    expect(await isVisitorsBackfilled(env)).toBe(false);
+
+    // 1. Lazy single-visitor read BEFORE full backfill imports 93001 from KV without deleting KV
+    const kvPutSpy = vi.spyOn(kv, 'put');
+    const kvDelSpy = vi.spyOn(kv, 'delete');
+    const detail1 = await getVisitorDetail(env, '93001');
+    expect(detail1?.displayName).toBe('LegacyOne');
+    expect(detail1?.msg_count).toBe(5);
+    expect(await kv.get('user:93001')).not.toBeNull();
+    expect(kvPutSpy).not.toHaveBeenCalled();
+    expect(kvDelSpy).not.toHaveBeenCalled();
+
+    // 2. Writing a fresh visitor in D1 performs 0 KV writes to user:*, visitors:index, or cache:visitor_summary
+    await upsertVisitorProfile(
+      env,
+      { id: 93004, first_name: 'FreshD1', username: 'fresh_d1' },
+      { incrementMsg: true, lastPreview: 'D1 hello' }
+    );
+    await recordVisitorExchange(
+      env,
+      '93004',
+      { message_id: 10, text: 'hello D1 visitors' },
+      { sender: 'visitor', pmMessageId: 10, preview: 'hello D1 visitors' }
+    );
+    expect(await kv.get('user:93004')).toBeNull();
+    expect(await kv.get('cache:visitor_summary')).toBeNull();
+    expect(kvPutSpy).not.toHaveBeenCalled();
+
+    // 3. First listVisitors runs one-time backfill (importing 93002 + orphan banned 93003) and marks meta flag
+    const listed1 = await listVisitors(env);
+    expect(await isVisitorsBackfilled(env)).toBe(true);
+    expect(listed1.stats.total).toBe(4);
+    expect(listed1.items.map((v) => v.userId).sort()).toEqual(['93001', '93002', '93003', '93004']);
+    expect(listed1.items.find((v) => v.userId === '93003')?.isBanned).toBe(true);
+    // Legacy KV backups are NEVER deleted
+    expect(await kv.get('user:93001')).not.toBeNull();
+    expect(await kv.get('user:93002')).not.toBeNull();
+    expect(await kv.get('visitors:index')).not.toBeNull();
+    expect(await kv.get('cache:visitor_summary')).toBeNull();
+    expect(kvPutSpy).not.toHaveBeenCalled();
+
+    // 4. Subsequent getVisitorOverview hits D1 meta cache with 0 kv.list, 0 kv.get, and 0 kv.put calls,
+    //    AND stays cache-warm across routine messages from existing visitors!
+    const listSpy = vi.spyOn(kv, 'list');
+    const getSpy = vi.spyOn(kv, 'get');
+    const ov = await getVisitorOverview(env);
+    expect(ov.stats.total).toBe(4);
+    expect(ov.cached).toBe(true);
+    expect(listSpy).not.toHaveBeenCalled();
+    expect(getSpy).not.toHaveBeenCalled();
+    expect(kvPutSpy).not.toHaveBeenCalled();
+
+    // Routine message from existing visitor 93004 must NOT invalidate overview cache
+    await upsertVisitorProfile(env, { id: 93004, first_name: 'FreshD1', username: 'fresh_d1' }, { incrementMsg: true, lastPreview: 'second msg' });
+    await recordVisitorExchange(env, '93004', { message_id: 11, text: 'second msg' }, { sender: 'visitor', pmMessageId: 11, preview: 'second msg' });
+    getSpy.mockClear();
+    const ovStillWarm = await getVisitorOverview(env);
+    expect(ovStillWarm.cached).toBe(true);
+    expect(getSpy).not.toHaveBeenCalled();
+    expect(kvPutSpy).not.toHaveBeenCalled();
+
+    // 5. Direct ban action on an unseen UID ensures it is inserted into D1 `visitors` with non-null last_seen_at
+    const bannedNew = await applyVisitorAction(env, '93005', 'ban');
+    expect(bannedNew.isBanned).toBe(true);
+    expect(bannedNew.last_seen_at).toBeTruthy();
+    // Orphan banned placeholder 93003 also received non-null last_seen_at so it never drops off the bottom
+    const orphanRow = await db.prepare(`SELECT last_seen_at FROM visitors WHERE uid = '93003'`).first();
+    expect(orphanRow?.last_seen_at).toBeGreaterThan(0);
+    // Overview cache was invalidated immediately on mutation
+    const ovAfterBan = await getVisitorOverview(env);
+    expect(ovAfterBan.cached).toBe(false);
+    expect(ovAfterBan.stats.banned).toBe(2);
+    const bannedList = await listVisitors(env, { filter: 'banned' });
+    expect(bannedList.items.map((v) => v.userId).sort()).toEqual(['93003', '93005']);
+
+    // 6. Backfill advances cleanly past 350 stale `visitors:index` entries and finishes within bounded runs
+    const staleKv = createMemoryKV();
+    const staleIds = Array.from({ length: 350 }, (_, i) => String(800000 + i));
+    await staleKv.put('visitors:index', JSON.stringify(staleIds));
+    await staleKv.put('user:800349', JSON.stringify({ first_name: 'TailSurvivor', last_seen_at: '2026-02-01T00:00:00.000Z' }));
+    const staleDb = createD1Shim();
+    const staleEnv = { TOPIC_MAP: staleKv, DB: staleDb };
+    const r1 = await ensureVisitorsBackfilled(staleEnv);
+    expect(r1.finished).toBe(false);
+    const r2 = await ensureVisitorsBackfilled(staleEnv);
+    expect(r2.finished).toBe(false);
+    const r3 = await ensureVisitorsBackfilled(staleEnv);
+    expect(r3.finished).toBe(true);
+    expect(await isVisitorsBackfilled(staleEnv)).toBe(true);
+    expect((await getVisitorDetail(staleEnv, '800349'))?.displayName).toBe('TailSurvivor');
+
+    // 7. Large legacy KV (>900 `user:*` keys): list backfill stops at 6-run cap (0 further kv.list calls),
+    //    while `visitors_kv_migrated` stays false so lazy single-visitor fallback still recovers user #1000!
+    const bigStore = new Map();
+    for (let i = 1; i <= 1000; i += 1) {
+      const u = String(900000 + i);
+      bigStore.set(
+        `user:${u}`,
+        JSON.stringify({ first_name: `Old_${i}`, thread_id: i, msg_count: i, note: `note_${i}`, last_seen_at: '2026-01-10T00:00:00.000Z' })
+      );
+    }
+    const bigKv = {
+      async get(key, opts) {
+        if (!bigStore.has(key)) return null;
+        const raw = bigStore.get(key);
+        return opts === 'json' || opts?.type === 'json' ? JSON.parse(raw) : raw;
+      },
+      async put(key, val) {
+        bigStore.set(key, String(val));
+      },
+      async delete(key) {
+        bigStore.delete(key);
+      },
+      async list({ prefix = '', limit = 1000, cursor } = {}) {
+        const all = Array.from(bigStore.keys()).filter((k) => k.startsWith(prefix));
+        const start = cursor ? Number(cursor) : 0;
+        const page = all.slice(start, start + limit);
+        const next = start + page.length;
+        const complete = next >= all.length;
+        return {
+          keys: page.map((name) => ({ name })),
+          list_complete: complete,
+          ...(complete ? {} : { cursor: String(next) }),
+        };
+      },
+    };
+    const bigDb = createD1Shim();
+    const bigEnv = { TOPIC_MAP: bigKv, DB: bigDb };
+    let lastRes = null;
+    for (let run = 1; run <= 6; run += 1) {
+      lastRes = await ensureVisitorsBackfilled(bigEnv);
+    }
+    expect(lastRes?.stoppedByCap).toBe(true);
+    expect(lastRes?.finished).toBe(false);
+    expect(await isVisitorsBackfilled(bigEnv)).toBe(false);
+
+    // 7th call is a no-op with 0 kv.list calls
+    const bigListSpy = vi.spyOn(bigKv, 'list');
+    const afterCap = await ensureVisitorsBackfilled(bigEnv);
+    expect(afterCap.alreadyDone).toBe(true);
+    expect(bigListSpy).not.toHaveBeenCalled();
+
+    // Visitor #1000 (beyond 6 * 150 = 900 cap) is still recovered cleanly via lazy fallback (no duplicate topic!)
+    const detail1000 = await getVisitorDetail(bigEnv, '901000');
+    expect(detail1000?.displayName).toBe('Old_1000');
+    expect(detail1000?.thread_id).toBe(1000);
+    expect(detail1000?.msg_count).toBe(1000);
+    expect(detail1000?.note).toBe('note_1000');
+
+    // 8. migrateVisitor also imports KV `user:{uid}` when migrating a visitor on a fresh DB
+    const db2 = createD1Shim();
+    const env2 = { TOPIC_MAP: kv, DB: db2 };
+    await migrateVisitor(env2, '93002');
+    const row2 = await db2.prepare(`SELECT uid, source FROM visitors WHERE uid = ?`).bind('93002').first();
+    expect(row2).toEqual({ uid: '93002', source: 'site' });
+    expect(await kv.get('user:93002')).not.toBeNull();
+  });
+
+  it('enforces atomic D1 rate_limits under concurrency, resets after expiry, and purges expired rows on daily cron', async () => {
+    const kv = createMemoryKV();
+    const db = createD1Shim();
+    const env = { TOPIC_MAP: kv, DB: db };
+    const kvPutSpy = vi.spyOn(kv, 'put');
+
+    const t0 = Date.UTC(2026, 6, 1, 12, 0, 0);
+    // 25 concurrent requests against limit = 10 -> strictly 10 allowed, 15 blocked
+    const burst = await Promise.all(
+      Array.from({ length: 25 }, () => checkRateLimit(env, 'rl:msg:94001', 10, 60, t0))
+    );
+    expect(burst.filter(Boolean)).toHaveLength(10);
+    expect(burst.filter((ok) => !ok)).toHaveLength(15);
+    expect(kvPutSpy).not.toHaveBeenCalled();
+
+    // Still blocked 1ms before expiry
+    expect(await checkRateLimit(env, 'rl:msg:94001', 10, 60, t0 + 59_999)).toBe(false);
+
+    // Atomically resets to count = 1 at exact expiry boundary
+    expect(await checkRateLimit(env, 'rl:msg:94001', 10, 60, t0 + 60_000)).toBe(true);
+    const activeRow = await db.prepare(`SELECT count, expires_at FROM rate_limits WHERE key = ?`).bind('rl:msg:94001').first();
+    expect(activeRow).toEqual({ count: 1, expires_at: t0 + 120_000 });
+
+    // Seed an already-expired rate_limit row and verify daily cron purges ONLY expired rows
+    await checkRateLimit(env, 'rl:msg:94002', 5, 60, t0 - 120_000);
+    const midnightUtc = Date.UTC(2026, 6, 1, 12, 1, 30); // activeRow expires at 12:02:00; 94002 expired at 11:59:00
+    const cleaned = await cleanupExpiredMaps(env, midnightUtc);
+    expect(cleaned.deletedRateLimits).toBe(1);
+    const remainingKeys = (await db.prepare(`SELECT key FROM rate_limits ORDER BY key`).all()).results.map((r) => r.key);
+    expect(remainingKeys).toEqual(['rl:msg:94001']);
+    expect(kvPutSpy).not.toHaveBeenCalled();
+
+    // Fail-open on transient D1 error so visitor messages are never silently dropped
+    const brokenEnv = {
+      TOPIC_MAP: kv,
+      DB: {
+        prepare() {
+          throw new Error('D1 transient error');
+        },
+        async batch() {
+          throw new Error('D1 transient error');
+        },
+      },
+    };
+    expect(await checkRateLimit(brokenEnv, 'rl:msg:94009', 10, 60, t0)).toBe(true);
+  });
+
+  it('preserves mid-month KV visit counts without double-counting, purges old visit_seen months, and fails open', async () => {
+    const kv = createMemoryKV();
+    const db = createD1Shim();
+    const botToken = '123456:D1_VISIT_CONC';
+    const env = { TOPIC_MAP: kv, DB: db, BOT_TOKEN: botToken, ADMIN_IDS: '900001' };
+    const cfg = { community: { timezoneOffsetHours: 8 } };
+    const julyDate = new Date('2026-07-15T08:00:00Z'); // 202607
+    const augDate = new Date('2026-08-02T08:00:00Z'); // 202608
+    const sepDate = new Date('2026-09-02T08:00:00Z'); // 202609
+
+    // Pre-upgrade KV counts: June had 15, July already had 10 (including returning visitor 96000)
+    await kv.put('visit:count:202606', JSON.stringify({ n: 15 }));
+    await kv.put('visit:count:202607', JSON.stringify({ n: 10 }));
+    await kv.put('visit:seen:202607:96000', '1');
+
+    const kvPutSpy = vi.spyOn(kv, 'put');
+
+    // 20 distinct visitors (96000 is already in KV, 96001..96019 are 19 brand-new) + 10 duplicates
+    const uids = [
+      ...Array.from({ length: 20 }, (_, i) => String(96000 + i)),
+      ...Array.from({ length: 10 }, (_, i) => String(96000 + i)),
+    ];
+    await Promise.all(uids.map((uid) => recordMonthlyVisit(env, uid, cfg, julyDate)));
+    // Exact continuity: July = 10 (KV) + 19 (new in D1, 96000 flagged in_kv=1) = 29; June = 15 (KV)
+    expect(await getVisitStats(env, cfg, julyDate)).toEqual({ thisMonth: 29, lastMonth: 15 });
+    expect(kvPutSpy).not.toHaveBeenCalled();
+
+    // Repeat visit by 96000 in July hits D1 first -> 0 KV reads
+    const kvGetSpy = vi.spyOn(kv, 'get');
+    await recordMonthlyVisit(env, '96000', cfg, julyDate);
+    expect(kvGetSpy).not.toHaveBeenCalled();
+
+    // Next month (Aug > visit_d1_since 202607): pure D1 with 0 KV reads for August, keeps July = 29 as lastMonth
+    await recordMonthlyVisit(env, '96000', cfg, augDate);
+    kvGetSpy.mockClear();
+    expect(await getVisitStats(env, cfg, augDate, { includeLastMonth: false })).toEqual({ thisMonth: 1 });
+    expect(kvGetSpy).not.toHaveBeenCalled();
+    expect(await getVisitStats(env, cfg, augDate)).toEqual({ thisMonth: 1, lastMonth: 29 });
+
+    // Daily cleanup in Nov 2026 purges visit_seen months < 202609 (202607 & 202608 deleted; 202609 preserved)
+    await recordMonthlyVisit(env, '96001', cfg, sepDate);
+    const cleaned = await cleanupExpiredMaps(env, Date.UTC(2026, 10, 5, 0, 2, 0)); // 2026-11-05 UTC -> cutoff 202609
+    expect(cleaned.deletedVisitSeen).toBe(21); // 20 July rows + 1 Aug row
+    const remainingMonths = (await db.prepare(`SELECT DISTINCT month FROM visit_seen`).all()).results.map((r) => r.month);
+    expect(remainingMonths).toEqual(['202609']);
+
+    // Fail-open when D1 throws during /api/bootstrap
+    const brokenDb = {
+      prepare() {
+        throw new Error('D1 transient unavailable');
+      },
+      async batch() {
+        throw new Error('D1 transient unavailable');
+      },
+    };
+    const brokenEnv = { TOPIC_MAP: kv, DB: brokenDb, BOT_TOKEN: botToken, ADMIN_IDS: '900001' };
+    const guestInit = await signInitData(
+      { user: JSON.stringify({ id: 96999, first_name: 'FailOpen' }), auth_date: Math.floor(Date.now() / 1000) },
+      botToken
+    );
+    const res = await worker.fetch(
+      new Request('https://panel.test/api/bootstrap', { headers: { 'X-Telegram-Init-Data': guestInit } }),
+      brokenEnv
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json()).ok).toBe(true);
+  });
+
+  it('delivers username-less visitor card with 400-only mention fallback, no duplicate on 500, and 0 KV writes on repeat topic PMs', async () => {
+    const kv = createMemoryKV();
+    const db = createD1Shim();
+    const env = {
+      TOPIC_MAP: kv,
+      DB: db,
+      BOT_TOKEN: '123456:CARD_FALLBACK',
+      ADMIN_IDS: '10001',
+      SUPERGROUP_ID: '-100555666',
+    };
+    await kv.put('verified:95001', 'emoji:v1');
+
+    const origFetch = globalThis.fetch;
+    const calls = [];
+    let simulate500 = false;
+    globalThis.fetch = vi.fn(async (url, init) => {
+      const method = String(url).split('/').pop();
+      const body = init?.body ? JSON.parse(init.body) : {};
+      calls.push({ method, body });
+      if (method === 'createForumTopic') {
+        return new Response(JSON.stringify({ ok: true, result: { message_thread_id: 777 } }), { status: 200 });
+      }
+      if (simulate500 && method === 'sendMessage' && String(body.text || '').includes('访客资料卡')) {
+        return new Response(JSON.stringify({ ok: false, error_code: 500, description: 'Internal Server Error' }), {
+          status: 500,
+        });
+      }
+      // Simulate Telegram rejecting tg://user?id= mention on the first card sendMessage (400)
+      if (method === 'sendMessage' && String(body.text || '').includes('tg://user?id=95001')) {
+        return new Response(
+          JSON.stringify({ ok: false, error_code: 400, description: 'Bad Request: BUTTON_USER_PRIVACY_RESTRICTED' }),
+          { status: 400 }
+        );
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: calls.length + 100 } }), { status: 200 });
+    });
+
+    try {
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 1,
+            from: { id: 95001, first_name: 'NoHandle' },
+            chat: { id: 95001, type: 'private' },
+            text: '你好，我没有用户名',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+
+      const fallbackCard = calls.find(
+        (c) =>
+          c.method === 'sendMessage' &&
+          c.body.chat_id === '-100555666' &&
+          c.body.message_thread_id === 777 &&
+          String(c.body.text || '').includes('访客资料卡') &&
+          !String(c.body.text || '').includes('tg://user?id=95001')
+      );
+      expect(fallbackCard).toBeTruthy();
+      expect(fallbackCard.body.text).toContain('<b>NoHandle</b>');
+      expect(fallbackCard.body.text).toContain('<i>未设置</i>');
+      expect(calls.some((c) => c.method === 'copyMessage' && c.body.message_thread_id === 777)).toBe(true);
+
+      // Second PM from same visitor in existing topic performs 0 KV puts (no redundant `thread:777` rewrite!)
+      const kvPutSpy = vi.spyOn(kv, 'put');
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 2,
+            from: { id: 95001, first_name: 'NoHandle' },
+            chat: { id: 95001, type: 'private' },
+            text: '第二条消息',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(kvPutSpy).not.toHaveBeenCalled();
+
+      // A 500 error on sendVisitorCardMessage must NOT trigger a duplicate fallback sendMessage
+      simulate500 = true;
+      calls.length = 0;
+      await kv.put('verified:95002', 'emoji:v1');
+      await expect(
+        handleTelegramUpdate(
+          {
+            message: {
+              message_id: 10,
+              from: { id: 95002, first_name: 'Err500' },
+              chat: { id: 95002, type: 'private' },
+              text: '触发500',
+            },
+          },
+          env,
+          'https://panel.test'
+        )
+      ).rejects.toThrow(/Internal Server Error/);
+      const cardAttempts = calls.filter((c) => c.method === 'sendMessage' && String(c.body.text || '').includes('访客资料卡'));
+      expect(cardAttempts).toHaveLength(1);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
   });
 });
