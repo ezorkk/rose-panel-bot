@@ -103,6 +103,7 @@ import {
   KEYWORD_PRESET_GROUPS,
   addBlockedKeywordGroup,
   hasBlockedKeyword,
+  removeBlockedKeywordGroup,
   toggleBlockedKeyword,
 } from '../web/src/lib/keywordPresets.js';
 import pkg from '../package.json' with { type: 'json' };
@@ -7067,6 +7068,22 @@ describe('Blocked keyword presets & normalization matching (v1.10)', () => {
     for (const kw of cryptoGroup) {
       expect(hasBlockedKeyword(grouped.value, kw)).toBe(true);
     }
+
+    // Whole group remove removes only that group's words while preserving custom entries & other groups
+    const withSecondGroup = addBlockedKeywordGroup(grouped.value, ['刷单', 'CRYPTO SIGNAL']);
+    const removedGroup = removeBlockedKeywordGroup(withSecondGroup.value, cryptoGroup);
+    expect(removedGroup.removedCount).toBe(cryptoGroup.length);
+    for (const kw of cryptoGroup) {
+      expect(hasBlockedKeyword(removedGroup.value, kw)).toBe(false);
+    }
+    expect(hasBlockedKeyword(removedGroup.value, '自定义词A')).toBe(true);
+    expect(hasBlockedKeyword(removedGroup.value, '刷单')).toBe(true);
+    expect(hasBlockedKeyword(removedGroup.value, 'crypto signal')).toBe(true);
+
+    // Removing English preset group matches case-insensitively
+    const enRemoved = removeBlockedKeywordGroup(removedGroup.value, ['crypto signal', 'forex signal']);
+    expect(enRemoved.removedCount).toBe(1);
+    expect(enRemoved.value).toBe('自定义词A, 刷单');
 
     // Respects 2000-char limit
     const nearCap = 'a'.repeat(BLOCKED_KEYWORD_MAX_LENGTH - 2);

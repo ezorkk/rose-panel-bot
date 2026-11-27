@@ -26,6 +26,7 @@ import {
   KEYWORD_PRESET_GROUPS,
   addBlockedKeywordGroup,
   hasBlockedKeyword,
+  removeBlockedKeywordGroup,
   toggleBlockedKeyword,
 } from '../lib/keywordPresets.js';
 import { buildSourceLink, confirmDialog, copyText, haptic, openExternalUrl } from '../lib/telegram.js';
@@ -2388,9 +2389,24 @@ export default function SettingsDrawer({
                 })()}
 
                 <div className="field" style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
-                  <label className="field-label" style={{ marginBottom: 8 }}>
-                    广告屏蔽关键词（自动去零宽/全角/同形字混淆）
-                  </label>
+                  <div className="kw-field-head">
+                    <label className="field-label" style={{ marginBottom: 0 }}>
+                      广告屏蔽关键词（自动去零宽/全角/同形字混淆）
+                    </label>
+                    {Boolean((draft.pmBot.blockedKeywords || '').trim()) && (
+                      <button
+                        type="button"
+                        className="kw-preset-group-add remove"
+                        onClick={() => {
+                          updateField('pmBot', 'blockedKeywords', '');
+                          haptic('light');
+                          onToast('已清空屏蔽关键词（记得点击保存生效）');
+                        }}
+                      >
+                        清空全部
+                      </button>
+                    )}
+                  </div>
 
                   <div className="kw-preset-box">
                     {KEYWORD_PRESET_GROUPS.map((group) => {
@@ -2402,9 +2418,17 @@ export default function SettingsDrawer({
                             <span className="kw-preset-group-label">{group.label}</span>
                             <button
                               type="button"
-                              className="kw-preset-group-add"
-                              disabled={allAdded}
+                              className={`kw-preset-group-add ${allAdded ? 'remove' : ''}`}
                               onClick={() => {
+                                if (allAdded) {
+                                  const res = removeBlockedKeywordGroup(rawKw, group.keywords);
+                                  updateField('pmBot', 'blockedKeywords', res.value);
+                                  haptic('light');
+                                  if (res.removedCount > 0) {
+                                    onToast(`已移除「${group.label}」${res.removedCount} 个词`);
+                                  }
+                                  return;
+                                }
                                 const res = addBlockedKeywordGroup(rawKw, group.keywords, BLOCKED_KEYWORD_MAX_LENGTH);
                                 updateField('pmBot', 'blockedKeywords', res.value);
                                 haptic('light');
@@ -2415,7 +2439,7 @@ export default function SettingsDrawer({
                                 }
                               }}
                             >
-                              {allAdded ? '已全添加' : '+ 整组添加'}
+                              {allAdded ? '移除整组' : '+ 整组添加'}
                             </button>
                           </div>
                           <div className="kw-preset-pills">

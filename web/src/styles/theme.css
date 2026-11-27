@@ -2629,6 +2629,14 @@ select {
 }
 
 /* Grouped anti-spam blocked keyword presets */
+.kw-field-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
 .kw-preset-box {
   display: flex;
   flex-direction: column;
@@ -2665,6 +2673,19 @@ select {
   font-weight: 600;
   color: var(--accent);
   cursor: pointer;
+}
+
+.kw-preset-group-add.remove {
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  padding: 2px 8px;
+}
+
+.kw-preset-group-add.remove:hover,
+.kw-preset-group-add.remove:active {
+  color: var(--red);
+  border-color: var(--red-soft);
 }
 
 .kw-preset-group-add:disabled {
