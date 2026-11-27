@@ -32,23 +32,30 @@ export function mergeLatestHistoryTail(existingState = {}, latestRes = {}) {
       oldestCursor: null,
       newestCursor: null,
       prepended: false,
+      anchorId: '',
     };
   }
 
-  const computePrepended = (nextMessages) => {
-    if (existing.length === 0 || nextMessages.length === 0) return false;
+  const computePrependInfo = (nextMessages) => {
+    if (existing.length === 0 || nextMessages.length === 0) {
+      return { prepended: false, anchorId: '' };
+    }
     const nextIndexById = new Map();
     for (let i = 0; i < nextMessages.length; i += 1) {
       if (nextMessages[i]?.id) nextIndexById.set(nextMessages[i].id, i);
     }
     for (let i = 0; i < existing.length; i += 1) {
-      const idxInNext = nextIndexById.get(existing[i]?.id);
+      const id = existing[i]?.id;
+      const idxInNext = id ? nextIndexById.get(id) : undefined;
       if (idxInNext !== undefined) {
         // More messages now sit above the first surviving message than before -> content was inserted above
-        return idxInNext > i;
+        return {
+          prepended: idxInNext > i,
+          anchorId: idxInNext > i ? id : '',
+        };
       }
     }
-    return false;
+    return { prepended: false, anchorId: '' };
   };
 
   // Server returned the entire conversation (no older messages exist).
@@ -58,7 +65,7 @@ export function mergeLatestHistoryTail(existingState = {}, latestRes = {}) {
       hasMore: latestHasMore,
       oldestCursor: latestOldest,
       newestCursor: latestNewest,
-      prepended: computePrepended(latest),
+      ...computePrependInfo(latest),
     };
   }
 
@@ -74,6 +81,7 @@ export function mergeLatestHistoryTail(existingState = {}, latestRes = {}) {
       oldestCursor: existingState?.oldestCursor || latestOldest,
       newestCursor: latestNewest,
       prepended: false,
+      anchorId: '',
     };
   }
   if (firstLatestIdx === 0) {
@@ -83,6 +91,7 @@ export function mergeLatestHistoryTail(existingState = {}, latestRes = {}) {
       oldestCursor: latestOldest,
       newestCursor: latestNewest,
       prepended: false,
+      anchorId: '',
     };
   }
 
@@ -108,6 +117,7 @@ export function mergeLatestHistoryTail(existingState = {}, latestRes = {}) {
         oldestCursor: existingState?.oldestCursor || latestOldest,
         newestCursor: latestNewest,
         prepended: false,
+        anchorId: '',
       };
     }
   }
@@ -117,7 +127,7 @@ export function mergeLatestHistoryTail(existingState = {}, latestRes = {}) {
     hasMore: latestHasMore,
     oldestCursor: latestOldest,
     newestCursor: latestNewest,
-    prepended: computePrepended(latest),
+    ...computePrependInfo(latest),
   };
 }
 

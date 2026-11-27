@@ -8937,6 +8937,7 @@ describe('Cloudflare D1 Stage 2 store: cursor pagination, around jump, LIKE sear
     expect(expandedPoll.messages).toHaveLength(60);
     expect(expandedPoll.messages[0].id).toBe('m_41');
     expect(expandedPoll.prepended).toBe(true);
+    expect(expandedPoll.anchorId).toBe('m_67');
     expect(expandedPoll.oldestCursor).toEqual({ ts: 1710000041000, id: 41 });
 
     // 4. Complete conversation (`hasMore: false`): recall of oldest message m_1 removes it cleanly

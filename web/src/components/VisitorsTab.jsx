@@ -132,6 +132,7 @@ export default function VisitorsTab({
   const [msgHasSearched, setMsgHasSearched] = useState(false);
   const [unmigratedVisitorsCount, setUnmigratedVisitorsCount] = useState(0);
   const storageCheckedRef = useRef(false);
+  const submittedSearchRef = useRef(null);
   const searchSeqRef = useRef(0);
   const msgSearchInputRef = useRef(null);
 
@@ -269,41 +270,53 @@ export default function VisitorsTab({
   } = {}) => {
     // Strictly never call `/api/admin/search` when D1 is not bound
     if (!d1Bound) return;
-    const rawQuery = queryOverride !== undefined ? queryOverride : msgQuery;
-    const trimmed = String(rawQuery || '').trim();
-    if (!trimmed) {
-      searchSeqRef.current += 1;
-      setSubmittedMsgQuery('');
-      setMsgResults([]);
-      setMsgHasMore(false);
-      setMsgNextCursor(null);
-      setMsgSearchError('');
-      setMsgHasSearched(false);
-      return;
-    }
 
-    const activeUid = uidOverride !== undefined ? uidOverride : msgUidFilter;
-    const activeRange = timeRangeOverride !== undefined ? timeRangeOverride : msgTimeRange;
-    const activeFromDate = dateFromOverride !== undefined ? dateFromOverride : msgDateFrom;
-    const activeToDate = dateToOverride !== undefined ? dateToOverride : msgDateTo;
+    let searchParams;
+    if (append) {
+      // Reuse the exact frozen `{ q, uid, from, to }` snapshot from the initial search so
+      // editing custom dates or letting relative 7d/30d bounds drift never skews page 2+.
+      const snap = submittedSearchRef.current;
+      if (!snap?.q) return;
+      searchParams = snap;
+    } else {
+      const rawQuery = queryOverride !== undefined ? queryOverride : msgQuery;
+      const trimmed = String(rawQuery || '').trim();
+      if (!trimmed) {
+        searchSeqRef.current += 1;
+        submittedSearchRef.current = null;
+        setSubmittedMsgQuery('');
+        setMsgResults([]);
+        setMsgHasMore(false);
+        setMsgNextCursor(null);
+        setMsgSearchError('');
+        setMsgHasSearched(false);
+        return;
+      }
 
-    const now = Date.now();
-    let from = null;
-    let to = null;
-    if (activeRange === '7d') {
-      from = now - 7 * 86400 * 1000;
-    } else if (activeRange === '30d') {
-      from = now - 30 * 86400 * 1000;
-    } else if (activeRange === 'custom') {
-      const f = activeFromDate ? new Date(`${activeFromDate}T00:00:00`).getTime() : null;
-      const t = activeToDate ? new Date(`${activeToDate}T23:59:59.999`).getTime() : null;
-      from = Number.isFinite(f) && f > 0 ? Math.trunc(f) : null;
-      to = Number.isFinite(t) && t > 0 ? Math.trunc(t) : null;
-    }
+      const activeUid = uidOverride !== undefined ? uidOverride : msgUidFilter;
+      const activeRange = timeRangeOverride !== undefined ? timeRangeOverride : msgTimeRange;
+      const activeFromDate = dateFromOverride !== undefined ? dateFromOverride : msgDateFrom;
+      const activeToDate = dateToOverride !== undefined ? dateToOverride : msgDateTo;
 
-    if (from && to && from > to) {
-      setMsgSearchError('开始日期不能晚于结束日期');
-      return;
+      const now = Date.now();
+      let from = null;
+      let to = null;
+      if (activeRange === '7d') {
+        from = now - 7 * 86400 * 1000;
+      } else if (activeRange === '30d') {
+        from = now - 30 * 86400 * 1000;
+      } else if (activeRange === 'custom') {
+        const f = activeFromDate ? new Date(`${activeFromDate}T00:00:00`).getTime() : null;
+        const t = activeToDate ? new Date(`${activeToDate}T23:59:59.999`).getTime() : null;
+        from = Number.isFinite(f) && f > 0 ? Math.trunc(f) : null;
+        to = Number.isFinite(t) && t > 0 ? Math.trunc(t) : null;
+      }
+
+      if (from && to && from > to) {
+        setMsgSearchError('开始日期不能晚于结束日期');
+        return;
+      }
+      searchParams = { q: trimmed, uid: activeUid, from, to };
     }
 
     const seq = ++searchSeqRef.current;
@@ -313,13 +326,14 @@ export default function VisitorsTab({
         setMsgLoadingMore(true);
       } else {
         setMsgSearching(true);
-        setSubmittedMsgQuery(trimmed);
+        submittedSearchRef.current = searchParams;
+        setSubmittedMsgQuery(searchParams.q);
       }
       const url = buildSearchUrl({
-        q: trimmed,
-        uid: activeUid,
-        from,
-        to,
+        q: searchParams.q,
+        uid: searchParams.uid,
+        from: searchParams.from,
+        to: searchParams.to,
         limit: 30,
         cursor: append ? cursor : null,
       });
@@ -354,6 +368,7 @@ export default function VisitorsTab({
     if (!d1Bound || searchMode !== 'messages') return;
     if (!msgQuery.trim()) {
       searchSeqRef.current += 1;
+      submittedSearchRef.current = null;
       setSubmittedMsgQuery('');
       setMsgResults([]);
       setMsgHasMore(false);
@@ -362,6 +377,26 @@ export default function VisitorsTab({
       setMsgHasSearched(false);
     }
   }, [d1Bound, searchMode, msgQuery]);
+
+  const measureScrollAnchor = (el, anchorId) => {
+    if (!el) return null;
+    let anchorOffsetTop = null;
+    if (anchorId) {
+      const node = Array.from(el.querySelectorAll('[data-msg-id]')).find(
+        (n) => n.getAttribute('data-msg-id') === anchorId
+      );
+      if (node) {
+        anchorOffsetTop = node.offsetTop;
+      }
+    }
+    return {
+      type: 'preserve-top',
+      prevScrollHeight: el.scrollHeight,
+      prevScrollTop: el.scrollTop,
+      anchorId: anchorOffsetTop !== null ? anchorId : '',
+      anchorOffsetTop,
+    };
+  };
 
   const loadVisitorHistory = async (uid, { silent = false, force = false } = {}) => {
     const targetUid = String(uid);
@@ -393,13 +428,9 @@ export default function VisitorsTab({
         if (wasNearBottom && hasNewTailMsg) {
           scrollIntentRef.current = { type: 'bottom' };
         } else if (previewMerged.prepended && el) {
-          // If the polled latest window expanded upward (e.g. after jumping via `around` to a recent
-          // message within the last 30 items), preserve visual scrollTop so the highlighted bubble stays put.
-          scrollIntentRef.current = {
-            type: 'preserve-top',
-            prevScrollHeight: el.scrollHeight,
-            prevScrollTop: el.scrollTop,
-          };
+          // Anchor on the first surviving message's `offsetTop` so simultaneous bottom additions or
+          // recalls during the same 6s poll cannot skew the preserved viewport position.
+          scrollIntentRef.current = measureScrollAnchor(el, previewMerged.anchorId) || { type: 'none' };
         }
         setHistoryData((prev) => {
           const merged = mergeLatestHistoryTail(prev, res);
@@ -444,8 +475,7 @@ export default function VisitorsTab({
     const targetUid = String(activeVisitor.userId);
     const cursor = historyData.oldestCursor;
     const el = chatStreamRef.current;
-    const prevScrollHeight = el ? el.scrollHeight : 0;
-    const prevScrollTop = el ? el.scrollTop : 0;
+    const anchorSnapshot = measureScrollAnchor(el, historyStateRef.current?.messages?.[0]?.id || '');
     const seq = ++historySeqRef.current;
     historyInFlightRef.current += 1;
 
@@ -460,7 +490,7 @@ export default function VisitorsTab({
         { timeoutMs: HISTORY_TIMEOUT_MS }
       );
       if (seq !== historySeqRef.current || activeUidRef.current !== targetUid) return;
-      scrollIntentRef.current = { type: 'preserve-top', prevScrollHeight, prevScrollTop };
+      scrollIntentRef.current = anchorSnapshot || { type: 'none' };
       setHistoryData((prev) => ({
         ...prev,
         messages: prependOlderHistory(prev.messages, res.messages || []),
@@ -633,6 +663,17 @@ export default function VisitorsTab({
     if (!el || !intent || intent.type === 'none') return;
 
     if (intent.type === 'preserve-top') {
+      if (intent.anchorId && intent.anchorOffsetTop !== null && intent.anchorOffsetTop !== undefined) {
+        const anchorNode = Array.from(el.querySelectorAll('[data-msg-id]')).find(
+          (node) => node.getAttribute('data-msg-id') === intent.anchorId
+        );
+        if (anchorNode) {
+          const anchorDelta = anchorNode.offsetTop - intent.anchorOffsetTop;
+          el.scrollTop = Math.max(0, (intent.prevScrollTop || 0) + anchorDelta);
+          scrollIntentRef.current = { type: 'none' };
+          return;
+        }
+      }
       const delta = el.scrollHeight - (intent.prevScrollHeight || 0);
       el.scrollTop = Math.max(0, (intent.prevScrollTop || 0) + delta);
       scrollIntentRef.current = { type: 'none' };
@@ -1276,13 +1317,7 @@ export default function VisitorsTab({
                     type="button"
                     className="btn btn-subtle btn-sm btn-block"
                     disabled={msgLoadingMore}
-                    onClick={() =>
-                      runMessageSearch({
-                        append: true,
-                        cursor: msgNextCursor,
-                        queryOverride: submittedMsgQuery || msgQuery,
-                      })
-                    }
+                    onClick={() => runMessageSearch({ append: true, cursor: msgNextCursor })}
                   >
                     {msgLoadingMore ? (
                       <>
