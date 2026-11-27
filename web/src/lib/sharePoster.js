@@ -33,6 +33,9 @@ function readThemePalette() {
         accentSoft: 'rgba(229, 107, 146, 0.15)',
         accentLine: 'rgba(229, 107, 146, 0.24)',
         border: 'rgba(255, 224, 235, 0.10)',
+        accentRgb: '229, 107, 146',
+        shadowRgb: '0, 0, 0',
+        onAccent: '#ffffff',
       }
     : {
         bg: '#faf4f5',
@@ -45,6 +48,9 @@ function readThemePalette() {
         accentSoft: '#fae9ee',
         accentLine: 'rgba(163, 41, 82, 0.16)',
         border: 'rgba(163, 41, 82, 0.09)',
+        accentRgb: '163, 41, 82',
+        shadowRgb: '140, 38, 72',
+        onAccent: '#ffffff',
       };
 
   if (typeof window === 'undefined' || typeof getComputedStyle !== 'function') {
@@ -66,6 +72,9 @@ function readThemePalette() {
     accentSoft: pickVar('--accent-soft', fallback.accentSoft),
     accentLine: pickVar('--accent-line', fallback.accentLine),
     border: pickVar('--border', fallback.border),
+    accentRgb: pickVar('--accent-rgb', fallback.accentRgb),
+    shadowRgb: pickVar('--shadow-rgb', fallback.shadowRgb),
+    onAccent: pickVar('--on-accent', fallback.onAccent),
   };
 }
 
@@ -325,7 +334,7 @@ function drawQrCode(ctx, qr, cx, topY, boxSize, palette) {
 
   ctx.save();
   // Pure white quiet-zone card guarantees reliable camera scanning in both light & dark themes
-  ctx.shadowColor = palette.isDark ? 'rgba(0, 0, 0, 0.32)' : 'rgba(140, 38, 72, 0.10)';
+  ctx.shadowColor = palette.isDark ? 'rgba(0, 0, 0, 0.32)' : `rgba(${palette.shadowRgb}, 0.10)`;
   ctx.shadowBlur = 24;
   ctx.shadowOffsetY = 8;
   drawRoundedRectPath(ctx, left, topY, boxSize, boxSize, 28);
@@ -455,28 +464,28 @@ export async function generateSharePoster({
   const posterHeight = cardY + cardH + 104;
   canvas.height = posterHeight; // resizing resets context state; everything below sets its own styles
 
-  // 1. Background canvas + subtle rose ambient glows
+  // 1. Background canvas + subtle theme ambient glows
   ctx.fillStyle = palette.bg;
   ctx.fillRect(0, 0, POSTER_WIDTH, posterHeight);
 
   const glowTop = ctx.createRadialGradient(890, 140, 20, 890, 140, 520);
-  glowTop.addColorStop(0, palette.isDark ? 'rgba(229, 107, 146, 0.16)' : 'rgba(163, 41, 82, 0.10)');
+  glowTop.addColorStop(0, `rgba(${palette.accentRgb}, ${palette.isDark ? 0.16 : 0.10})`);
   glowTop.addColorStop(1, 'rgba(0, 0, 0, 0)');
   ctx.fillStyle = glowTop;
   ctx.fillRect(0, 0, POSTER_WIDTH, posterHeight);
 
   const glowBottomY = posterHeight - 170;
   const glowBottom = ctx.createRadialGradient(180, glowBottomY, 20, 180, glowBottomY, 480);
-  glowBottom.addColorStop(0, palette.isDark ? 'rgba(229, 107, 146, 0.12)' : 'rgba(217, 107, 144, 0.09)');
+  glowBottom.addColorStop(0, `rgba(${palette.accentRgb}, ${palette.isDark ? 0.12 : 0.08})`);
   glowBottom.addColorStop(1, 'rgba(0, 0, 0, 0)');
   ctx.fillStyle = glowBottom;
   ctx.fillRect(0, 0, POSTER_WIDTH, posterHeight);
 
-  // 2. Elevated main rose-porcelain ticket card
+  // 2. Elevated main porcelain ticket card
   const notchR = 22;
 
   ctx.save();
-  ctx.shadowColor = palette.isDark ? 'rgba(0, 0, 0, 0.48)' : 'rgba(140, 38, 72, 0.10)';
+  ctx.shadowColor = palette.isDark ? 'rgba(0, 0, 0, 0.48)' : `rgba(${palette.shadowRgb}, 0.10)`;
   ctx.shadowBlur = 44;
   ctx.shadowOffsetY = 18;
   drawRoundedRectPath(ctx, cardX, cardY, cardW, cardH, 46);
@@ -493,7 +502,7 @@ export async function generateSharePoster({
   drawRoundedRectPath(ctx, cardX, cardY, cardW, cardH, 46);
   ctx.clip();
   const topTint = ctx.createLinearGradient(cardX, cardY, cardX + cardW, cardY + 220);
-  topTint.addColorStop(0, palette.isDark ? 'rgba(229, 107, 146, 0.10)' : 'rgba(250, 233, 238, 0.65)');
+  topTint.addColorStop(0, `rgba(${palette.accentRgb}, ${palette.isDark ? 0.10 : 0.08})`);
   topTint.addColorStop(1, 'rgba(0, 0, 0, 0)');
   ctx.fillStyle = topTint;
   ctx.fillRect(cardX, cardY, cardW, 240);
