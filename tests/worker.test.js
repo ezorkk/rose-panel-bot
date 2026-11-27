@@ -90,6 +90,14 @@ import {
 } from '../src/worker/visitStats.js';
 import { BRAND_NAME, BRAND_SIGNATURE } from '../web/src/lib/brand.js';
 import {
+  appendNewerHistory,
+  buildHistoryUrl,
+  buildSearchUrl,
+  mergeLatestHistoryTail,
+  prependOlderHistory,
+  splitHighlightSegments,
+} from '../web/src/lib/chatHistory.js';
+import {
   ALL_KEYWORD_PRESETS,
   BLOCKED_KEYWORD_MAX_LENGTH,
   KEYWORD_PRESET_GROUPS,
@@ -8798,5 +8806,126 @@ describe('Cloudflare D1 Stage 2 store: cursor pagination, around jump, LIKE sear
     const directSearch = await searchVisitorMessages({ TOPIC_MAP: directKv }, { q: 'anything' });
     expect(directSearch.supported).toBe(false);
     expect(directGetSpy).not.toHaveBeenCalled();
+  });
+
+  it('replaces overlapping tail window on live poll (syncing recalls & reactions) while preserving scrolled-up older messages', () => {
+    const makeMsg = (n, extra = {}) => ({
+      id: `m_${n}`,
+      sender: n % 2 === 0 ? 'admin' : 'visitor',
+      text: `msg-${n}`,
+      at: new Date(1710000000000 + n * 1000).toISOString(),
+      ...extra,
+    });
+
+    // 1. User scrolled up to load m_1..m_120 (`m_1..m_60` older page + `m_61..m_120` initial tail)
+    const olderState = {
+      messages: Array.from({ length: 120 }, (_, i) => makeMsg(i + 1)),
+      hasMore: true,
+      oldestCursor: { ts: 1710000001000, id: 1 },
+      newestCursor: { ts: 1710000120000, id: 120 },
+    };
+
+    // Next 6s poll fetches newest 60: m_118 was recalled, m_119 gained reactions, m_121 arrived
+    const polledTail = [];
+    for (let n = 62; n <= 121; n += 1) {
+      if (n === 118) continue; // recalled
+      if (n === 119) {
+        polledTail.push(makeMsg(n, { visitorReaction: '❤️', ownerReaction: '👍' }));
+      } else {
+        polledTail.push(makeMsg(n));
+      }
+    }
+    const merged = mergeLatestHistoryTail(olderState, {
+      messages: polledTail,
+      hasMore: true,
+      oldestCursor: { ts: 1710000062000, id: 62 },
+      newestCursor: { ts: 1710000121000, id: 121 },
+    });
+
+    // Older scrolled-up messages m_1..m_61 are untouched, oldestCursor preserved
+    expect(merged.messages.slice(0, 61).map((m) => m.id)).toEqual(
+      Array.from({ length: 61 }, (_, i) => `m_${i + 1}`)
+    );
+    expect(merged.hasMore).toBe(true);
+    expect(merged.oldestCursor).toEqual({ ts: 1710000001000, id: 1 });
+    expect(merged.newestCursor).toEqual({ ts: 1710000121000, id: 121 });
+
+    // Recalled m_118 is gone, m_119 reactions synced, m_121 appended
+    expect(merged.messages.some((m) => m.id === 'm_118')).toBe(false);
+    expect(merged.messages.find((m) => m.id === 'm_119')).toMatchObject({
+      visitorReaction: '❤️',
+      ownerReaction: '👍',
+    });
+    expect(merged.messages.at(-1).id).toBe('m_121');
+
+    // 2. Reaction cleared & boundary message m_61 recalled (latest now starts at m_60)
+    const boundaryTail = [makeMsg(60)];
+    for (let n = 62; n <= 121; n += 1) {
+      if (n === 118) continue;
+      boundaryTail.push(makeMsg(n)); // m_119 reactions cleared
+    }
+    const afterBoundaryRecall = mergeLatestHistoryTail(merged, {
+      messages: boundaryTail,
+      hasMore: true,
+      oldestCursor: { ts: 1710000060000, id: 60 },
+      newestCursor: { ts: 1710000121000, id: 121 },
+    });
+    expect(afterBoundaryRecall.messages.some((m) => m.id === 'm_61')).toBe(false);
+    expect(afterBoundaryRecall.messages.find((m) => m.id === 'm_119')?.visitorReaction).toBeUndefined();
+    expect(afterBoundaryRecall.messages.slice(0, 60).map((m) => m.id)).toEqual(
+      Array.from({ length: 60 }, (_, i) => `m_${i + 1}`)
+    );
+
+    // 3. Complete conversation (`hasMore: false`): recall of oldest message m_1 removes it cleanly
+    const smallState = {
+      messages: [makeMsg(1), makeMsg(2), makeMsg(3)],
+      hasMore: false,
+      oldestCursor: { ts: 1710000001000, id: 1 },
+      newestCursor: { ts: 1710000003000, id: 3 },
+    };
+    const smallAfter = mergeLatestHistoryTail(smallState, {
+      messages: [makeMsg(2), makeMsg(3)],
+      hasMore: false,
+      oldestCursor: { ts: 1710000002000, id: 2 },
+      newestCursor: { ts: 1710000003000, id: 3 },
+    });
+    expect(smallAfter.messages.map((m) => m.id)).toEqual(['m_2', 'm_3']);
+
+    // 4. Disjoint burst (>60 new messages, zero overlap) resets to latest window without leaving an invisible gap
+    const disjoint = mergeLatestHistoryTail(olderState, {
+      messages: [makeMsg(201), makeMsg(202)],
+      hasMore: true,
+      oldestCursor: { ts: 1710000201000, id: 201 },
+      newestCursor: { ts: 1710000202000, id: 202 },
+    });
+    expect(disjoint.messages.map((m) => m.id)).toEqual(['m_201', 'm_202']);
+    expect(disjoint.oldestCursor).toEqual({ ts: 1710000201000, id: 201 });
+
+    // 5. History cleared on server -> empty list
+    expect(mergeLatestHistoryTail(olderState, { messages: [], hasMore: false }).messages).toEqual([]);
+
+    // 6. Prepend / append dedup, cursor URL formatting & highlight segmentation
+    expect(prependOlderHistory([makeMsg(3), makeMsg(4)], [makeMsg(1), makeMsg(2), makeMsg(3)]).map((m) => m.id)).toEqual([
+      'm_1',
+      'm_2',
+      'm_3',
+      'm_4',
+    ]);
+    expect(appendNewerHistory([makeMsg(1), makeMsg(2)], [makeMsg(2), makeMsg(3)]).map((m) => m.id)).toEqual([
+      'm_1',
+      'm_2',
+      'm_3',
+    ]);
+    expect(buildHistoryUrl('92401', { limit: 60, beforeCursor: { ts: 1710000001000, id: 42 }, messagesOnly: true })).toBe(
+      '/api/admin/visitors/92401/history?limit=60&before=1710000001000&beforeId=42&messagesOnly=1'
+    );
+    expect(buildSearchUrl({ q: '50%', uid: '92401', cursor: { before: 1710000001000, beforeId: 9 } })).toBe(
+      '/api/admin/search?q=50%25&uid=92401&before=1710000001000&beforeId=9'
+    );
+    expect(splitHighlightSegments('Hello Rose hello', 'hello')).toEqual([
+      { text: 'Hello', match: true },
+      { text: ' Rose ', match: false },
+      { text: 'hello', match: true },
+    ]);
   });
 });

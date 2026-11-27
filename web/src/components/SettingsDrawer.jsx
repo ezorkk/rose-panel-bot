@@ -3093,6 +3093,43 @@ export default function SettingsDrawer({
                     {migrationFeedback.text}
                   </div>
                 )}
+
+                {storageStatus.d1Bound && (
+                  <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+                    <label className="field-label" style={{ marginBottom: 6 }}>
+                      聊天记录保留时长（D1 自动清理）
+                    </label>
+                    <div className="chip-row" style={{ marginBottom: 6 }}>
+                      {[
+                        { days: 0, label: '永久保留' },
+                        { days: 365, label: '保留 1 年' },
+                        { days: 180, label: '保留 6 个月' },
+                      ].map((opt) => {
+                        const active = Number(draft.pmBot?.chatRetentionDays || 0) === opt.days;
+                        return (
+                          <button
+                            key={opt.days}
+                            type="button"
+                            className={`chip ${active ? 'active' : ''}`}
+                            onClick={() => {
+                              haptic('light');
+                              updateField('pmBot', 'chatRetentionDays', opt.days);
+                            }}
+                          >
+                            {opt.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <div className="row-desc wrap" style={{ lineHeight: 1.5 }}>
+                      {Number(draft.pmBot?.chatRetentionDays || 0) > 0
+                        ? `每日定时任务将分批清理超过 ${
+                            Number(draft.pmBot?.chatRetentionDays) === 365 ? '1 年' : '6 个月'
+                          } 的 D1 聊天消息与对应链接（0 KV 写入，KV 旧备份不删）。若同账号多实例共用 rose-panel-bot 库，请先为各实例配置独立的 database_name。`
+                        : '默认永久保留全部 D1 聊天记录（KV 旧备份始终不删除）；修改后记得点击下方「保存全部设置」。'}
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="card update-fork-card">
