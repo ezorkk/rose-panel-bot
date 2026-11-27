@@ -19,11 +19,13 @@ import {
   clearBoundSupergroupId,
   loadPanelConfig,
   normalizeMusicSourceUrl,
+  removeMusicTrack,
   resolveSupergroupId,
   safeGetJSON,
   safePutJSON,
   saveBoundSupergroupId,
   savePanelConfig,
+  upsertMusicTrack,
 } from './config.js';
 import {
   clearOwnerUnreachable,
@@ -2169,19 +2171,18 @@ async function handleCallbackQuery(env, requestOrigin, cq, config) {
 
   // 5. Admin quick-remove playlist track button: mus:rm:<trackId>
   if (data.startsWith('mus:rm:')) {
-    const isAdmin = await isUserAdmin(env, cq.from.id, tgCall);
-    if (!isAdmin) {
+    const canManageMusic = await isMusicOwner(env, cq.from.id);
+    if (!canManageMusic) {
       await tgCall(env, 'answerCallbackQuery', {
         callback_query_id: cq.id,
-        text: '仅管理员可执行此操作',
+        text: '仅站长本人可执行此操作',
         show_alert: true,
       });
       return;
     }
     const trackId = data.slice('mus:rm:'.length).trim().toLowerCase();
-    const tracks = Array.isArray(config?.music?.tracks) ? config.music.tracks : [];
-    const target = tracks.find((t) => String(t.id || '').toLowerCase() === trackId);
-    if (!target) {
+    const removed = await removeMusicTrack(env, trackId);
+    if (!removed) {
       await tgCall(env, 'answerCallbackQuery', {
         callback_query_id: cq.id,
         text: '该曲目已不在歌单中',
@@ -2195,8 +2196,6 @@ async function handleCallbackQuery(env, requestOrigin, cq, config) {
       }
       return;
     }
-    const nextTracks = tracks.filter((t) => String(t.id || '').toLowerCase() !== trackId);
-    await savePanelConfig(env, { music: { tracks: nextTracks } });
     await tgCall(env, 'answerCallbackQuery', {
       callback_query_id: cq.id,
       text: '🗑️ 已从面板歌单移出',
@@ -2205,7 +2204,7 @@ async function handleCallbackQuery(env, requestOrigin, cq, config) {
       await tgCall(env, 'editMessageText', {
         chat_id: cq.message.chat.id,
         message_id: cq.message.message_id,
-        text: `🗑️ <b>已从面板歌单移出</b>：${escapeHtml(target.title)}`,
+        text: `🗑️ <b>已从面板歌单移出</b>：${escapeHtml(removed.title)}`,
         parse_mode: 'HTML',
       }).catch(() => {});
     }
@@ -2785,9 +2784,15 @@ export async function handleTelegramUpdate(update, env, requestOrigin) {
         }
       }
 
-      // Zero-command playlist capture: admin forwards/sends native audio directly to bot (non-reply, non-command)
-      if (msg.audio?.file_id && !msg.reply_to_message && !extractCommand(msg.caption || '')) {
-        await handleAdminAudioCapture(env, requestOrigin, msg, config);
+      // Zero-command playlist capture: primary owner forwards/sends native audio directly to bot (non-reply, non-command).
+      // Restricting to the primary owner when ADMIN_IDS is configured preserves co-admin DM mode hints.
+      if (
+        msg.audio?.file_id &&
+        !msg.reply_to_message &&
+        !extractCommand(msg.caption || '') &&
+        (await isMusicOwner(env, msg.from.id))
+      ) {
+        await handleAdminAudioCapture(env, requestOrigin, msg);
         return;
       }
     }
@@ -3474,54 +3479,21 @@ export function extractMusicTrackFromMessage(msg) {
   };
 }
 
-async function handleAdminAudioCapture(env, requestOrigin, msg, config) {
+async function isMusicOwner(env, userId) {
+  const ownerId = getOwnerChatId(env);
+  if (ownerId) return String(userId) === ownerId;
+  return isUserAdmin(env, userId, tgCall);
+}
+
+async function handleAdminAudioCapture(env, requestOrigin, msg) {
   const extracted = extractMusicTrackFromMessage(msg);
   if (!extracted) return;
 
-  const currentTracks = Array.isArray(config?.music?.tracks) ? [...config.music.tracks] : [];
-  const matchIdx = currentTracks.findIndex(
-    (t) =>
-      (extracted.fileUniqueId && t.fileUniqueId && t.fileUniqueId === extracted.fileUniqueId) ||
-      t.fileId === extracted.fileId
+  const { track, updatedExisting, total, trimmed, enabled } = await upsertMusicTrack(
+    env,
+    extracted,
+    () => randomId(8)
   );
-
-  let track;
-  let updatedExisting = false;
-  let nextTracks;
-
-  if (matchIdx >= 0) {
-    const prev = currentTracks[matchIdx];
-    updatedExisting = true;
-    track = {
-      ...prev,
-      fileId: extracted.fileId,
-      fileUniqueId: extracted.fileUniqueId || prev.fileUniqueId,
-      title: prev.title && prev.title !== '未命名音频' ? prev.title : extracted.title,
-      performer: prev.performer || extracted.performer,
-      duration: extracted.duration || prev.duration,
-      sourceUrl: extracted.sourceUrl || prev.sourceUrl,
-      sourceTitle: extracted.sourceUrl ? extracted.sourceTitle : prev.sourceTitle,
-      addedAt: Date.now(),
-    };
-    currentTracks.splice(matchIdx, 1);
-    nextTracks = [track, ...currentTracks];
-  } else {
-    const usedIds = new Set(currentTracks.map((t) => t.id));
-    let id = randomId(8);
-    while (usedIds.has(id)) {
-      id = randomId(8);
-    }
-    track = {
-      id,
-      ...extracted,
-      addedAt: Date.now(),
-    };
-    nextTracks = [track, ...currentTracks];
-  }
-
-  const trimmed = nextTracks.length > MAX_MUSIC_TRACKS;
-  const savedTracks = nextTracks.slice(0, MAX_MUSIC_TRACKS);
-  await savePanelConfig(env, { music: { tracks: savedTracks } });
 
   const durStr = formatTrackDuration(track.duration);
   const metaLine = [
@@ -3532,8 +3504,8 @@ async function handleAdminAudioCapture(env, requestOrigin, msg, config) {
     .join(' · ');
   const lines = [
     updatedExisting
-      ? `🎵 <b>已置顶更新面板歌单</b>（共 ${savedTracks.length} 首）`
-      : `🎵 <b>已加入面板歌单</b>（共 ${savedTracks.length} 首）`,
+      ? `🎵 <b>已置顶更新面板歌单</b>（共 ${total} 首）`
+      : `🎵 <b>已加入面板歌单</b>（共 ${total} 首）`,
     `${metaLine}${durStr ? ` <code>${durStr}</code>` : ''}`,
   ];
   if (track.sourceUrl) {
@@ -3544,7 +3516,7 @@ async function handleAdminAudioCapture(env, requestOrigin, msg, config) {
   if (trimmed) {
     lines.push(`<i>歌单已满 ${MAX_MUSIC_TRACKS} 首，最早收录的 1 首已自动移出。</i>`);
   }
-  if (config?.music?.enabled === false) {
+  if (enabled === false) {
     lines.push(`<i>提示：当前面板歌单展示处于关闭状态，可在设置中重新开启。</i>`);
   }
 
@@ -3595,9 +3567,7 @@ export async function sendMusicTrackToUser(
   }
 
   if (!env.BOT_TOKEN || !/^\d+$/.test(uid)) {
-    const botUsername =
-      String(env.BOT_USERNAME || '').trim().replace(/^@/, '') ||
-      String(cfg.botUsername || '').trim().replace(/^@/, '');
+    const botUsername = await resolveBotUsername(env, cfg);
     return {
       ok: true,
       delivered: false,

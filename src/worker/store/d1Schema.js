@@ -2,7 +2,7 @@
 // Deployers never need to run manual SQL migrations: `ensureSchema(env)` runs idempotently
 // via `env.DB.batch([...])` and caches the resolved Promise per `env.DB` binding instance.
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 const SCHEMA_DDL_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS meta (
@@ -83,6 +83,20 @@ const SCHEMA_DDL_STATEMENTS = [
     in_kv INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (month, uid)
   )`,
+  `CREATE TABLE IF NOT EXISTS music_tracks (
+    id             TEXT PRIMARY KEY,
+    file_id        TEXT NOT NULL,
+    file_unique_id TEXT NOT NULL DEFAULT '',
+    title          TEXT NOT NULL,
+    performer      TEXT NOT NULL DEFAULT '',
+    duration       INTEGER NOT NULL DEFAULT 0,
+    source_url     TEXT NOT NULL DEFAULT '',
+    source_title   TEXT NOT NULL DEFAULT '',
+    sort_order     INTEGER NOT NULL DEFAULT 0,
+    added_at       INTEGER NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_music_tracks_order ON music_tracks(sort_order, added_at DESC)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_music_tracks_uniq_nonempty ON music_tracks(file_unique_id) WHERE file_unique_id != ''`,
 ];
 
 const schemaInitCache = new WeakMap();

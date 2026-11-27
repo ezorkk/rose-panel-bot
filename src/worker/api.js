@@ -784,18 +784,27 @@ export async function handleApiRequest(request, env, url, ctx = null) {
         body.siteOrigin = url.origin;
       }
       // Never accept client-supplied Telegram fileId / fileUniqueId / sourceUrl on playlist tracks;
-      // savePanelConfig restores server-owned fields by matching existing track IDs.
-      if (body.music && typeof body.music === 'object' && Array.isArray(body.music.tracks)) {
-        body.music = {
-          ...body.music,
-          tracks: body.music.tracks
+      // savePanelConfig restores server-owned fields by matching existing track IDs and preserves
+      // any newly forwarded tracks newer than `baseAt`.
+      if (body.music && typeof body.music === 'object') {
+        const sanitizedMusic = {
+          ...(body.music.enabled !== undefined ? { enabled: body.music.enabled } : {}),
+          ...(body.music.title !== undefined ? { title: body.music.title } : {}),
+        };
+        if (Array.isArray(body.music.tracks)) {
+          sanitizedMusic.tracks = body.music.tracks
             .filter((t) => t && typeof t === 'object')
             .map((t) => ({
               id: t.id,
               ...(t.title !== undefined ? { title: t.title } : {}),
               ...(t.performer !== undefined ? { performer: t.performer } : {}),
-            })),
-        };
+            }));
+          const rawBaseAt = Number(body.music.baseAt);
+          if (Number.isFinite(rawBaseAt) && rawBaseAt > 0) {
+            sanitizedMusic.baseAt = Math.trunc(rawBaseAt);
+          }
+        }
+        body.music = sanitizedMusic;
       }
       const saved = await savePanelConfig(env, body);
       const nextSurfaceSig = JSON.stringify({

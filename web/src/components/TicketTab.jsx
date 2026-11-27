@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useState } from 'react';
+import React, { Suspense, lazy, useRef, useState } from 'react';
 import {
   Award,
   Check,
@@ -116,6 +116,7 @@ export default function TicketTab({
 
   const [openingPm, setOpeningPm] = useState(false);
   const [playingTrackId, setPlayingTrackId] = useState('');
+  const playingTrackRef = useRef('');
   const [musicExpanded, setMusicExpanded] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [posterLoading, setPosterLoading] = useState(false);
@@ -281,7 +282,8 @@ export default function TicketTab({
   const visibleMusicTracks = musicExpanded ? musicTracks : musicTracks.slice(0, 3);
 
   const handlePlayTrack = async (track) => {
-    if (!track?.id || playingTrackId) return;
+    if (!track?.id || playingTrackRef.current) return;
+    playingTrackRef.current = track.id;
     haptic('medium');
     const rawBot = String(bot?.username || '').replace(/^@/, '').trim();
     const cleanHandle = String(profile.handle || '').replace(/^@/, '').trim();
@@ -290,12 +292,16 @@ export default function TicketTab({
     const songDeepLink = uname ? `https://t.me/${uname}?start=song_${encodeURIComponent(track.id)}` : '';
 
     if (!getTelegramInitData()) {
-      if (songDeepLink) {
-        openExternalUrl(songDeepLink);
-      } else if (track.sourceUrl) {
-        openExternalUrl(track.sourceUrl);
-      } else {
-        onToast('请在 Telegram 内打开面板收听音频');
+      try {
+        if (songDeepLink) {
+          openExternalUrl(songDeepLink);
+        } else if (track.sourceUrl) {
+          openExternalUrl(track.sourceUrl);
+        } else {
+          onToast('请在 Telegram 内打开面板收听音频');
+        }
+      } finally {
+        playingTrackRef.current = '';
       }
       return;
     }
@@ -331,6 +337,7 @@ export default function TicketTab({
         onToast(err.message || '发送音频失败，请稍后重试');
       }
     } finally {
+      playingTrackRef.current = '';
       setPlayingTrackId('');
     }
   };

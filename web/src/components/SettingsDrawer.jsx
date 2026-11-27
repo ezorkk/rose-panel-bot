@@ -763,9 +763,22 @@ export default function SettingsDrawer({
   const handleSave = async () => {
     try {
       setSaving(true);
+      const payload = structuredClone(draft);
+      const tracksChanged =
+        JSON.stringify(draft.music?.tracks || []) !== JSON.stringify(adminConfig?.music?.tracks || []);
+      if (payload.music) {
+        const snapshotAt = Number(adminConfig?.music?.snapshotAt || 0);
+        delete payload.music.snapshotAt;
+        if (tracksChanged) {
+          if (snapshotAt > 0) payload.music.baseAt = snapshotAt;
+        } else {
+          // Omit untouched track snapshot so songs forwarded while Settings was open are never overwritten.
+          delete payload.music.tracks;
+        }
+      }
       const res = await apiRequest('/api/admin/config', {
         method: 'PUT',
-        body: draft,
+        body: payload,
       });
       onToast('✅ 面板配置已实时生效');
       onSaved(res);
@@ -1405,7 +1418,7 @@ export default function SettingsDrawer({
                         maxLength={24}
                         value={musicDraft.title ?? '最近在听'}
                         onChange={(e) => updateMusicField('title', e.target.value)}
-                        placeholder="例如：最近在听 / 我的歌单"
+                        placeholder="留空默认显示「最近在听」"
                       />
                     </div>
 
@@ -1420,7 +1433,7 @@ export default function SettingsDrawer({
                         lineHeight: 1.55,
                       }}
                     >
-                      💡 <b>零指令添加</b>：把任意 Telegram 音频（含音乐频道 / 音乐 Bot 发来的歌）直接转发给机器人私聊（非回复访客），即可自动收录进歌单（最多 20 首）；来自公开频道的曲目会自动附带原帖链接。
+                      💡 <b>零指令添加</b>：把 Telegram 原生音频消息（含音乐频道 / 音乐 Bot 发来的歌）直接转发给机器人私聊即可自动收录（最多 20 首，支持一次多选转发）；仅识别原生音频（不含语音条与普通文件），回复/引用消息不会误收；来自公开频道的曲目会自动附带原帖链接。
                     </div>
 
                     {musicTrackList.length === 0 ? (
@@ -1488,7 +1501,7 @@ export default function SettingsDrawer({
                                   style={{ background: 'var(--bg-elevated)', padding: '7px 10px', fontSize: 12.5 }}
                                   maxLength={80}
                                   value={track.title || ''}
-                                  placeholder="歌名"
+                                  placeholder="歌名（留空默认「未命名音频」）"
                                   onChange={(e) => handleUpdateMusicTrack(idx, 'title', e.target.value)}
                                 />
                                 <input

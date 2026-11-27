@@ -7526,6 +7526,7 @@ describe('Cloudflare D1 storage layer, schema idempotency, map fallback & daily 
       'messages',
       'meta',
       'migrated_visitors',
+      'music_tracks',
       'rate_limits',
       'topic_map',
       'visit_seen',
@@ -9157,19 +9158,23 @@ describe('Cloudflare D1 Stage 3: visitors, atomic rate_limits, visit_seen & visi
 
     const env = { TOPIC_MAP: createMemoryKV(), DB: db };
     const version = await ensureSchema(env);
-    expect(version).toBe(2);
-    expect(await db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).first('value')).toBe('2');
+    expect(version).toBe(SCHEMA_VERSION);
+    expect(await db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).first('value')).toBe(
+      String(SCHEMA_VERSION)
+    );
 
     // Existing v1 data preserved
     const preserved = await db.prepare(`SELECT text FROM messages WHERE uid = '93100'`).first('text');
     expect(preserved).toBe('pre-v2.2 msg');
 
-    // Stage 3 tables & indexes exist
+    // Stage 3 + music_tracks tables & indexes exist
     const indexes = (
       await db.prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%' ORDER BY name`).all()
     ).results.map((r) => r.name);
     expect(indexes).toContain('idx_visitors_last_seen');
     expect(indexes).toContain('idx_rate_limits_expires');
+    expect(indexes).toContain('idx_music_tracks_order');
+    expect(indexes).toContain('idx_music_tracks_uniq_nonempty');
   });
 
   it('stores visitors in D1 with 0 KV churn, supports lazy single-visitor fallback & one-time KV backfill without deleting KV', async () => {
@@ -10412,8 +10417,262 @@ describe('Zero-command music playlist (PR #28)', () => {
       expect(rateRes.ok).toBe(false);
       expect(rateRes.status).toBe(429);
       expect(rateRes.rateLimited).toBe(true);
+
+      // 7. Banned user sending `/start song_<id>` receives zero messages
+      tgCalls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 24,
+            from: { id: 55003, first_name: 'Banned' },
+            chat: { id: 55003, type: 'private' },
+            text: '/start song_play1234',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(tgCalls).toHaveLength(0);
+
+      // 8. When music.enabled === false, non-admin gets 404 while admin can still test-play
+      await savePanelConfig(env, { music: { enabled: false } });
+      const adminInit = await signInitData(
+        { user: JSON.stringify({ id: 99999, first_name: 'Owner' }), auth_date: nowSec },
+        env.BOT_TOKEN
+      );
+      const guestDisabledRes = await worker.fetch(
+        new Request('https://panel.test/api/music/play', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': guestInit },
+          body: JSON.stringify({ id: 'play1234' }),
+        }),
+        env
+      );
+      expect(guestDisabledRes.status).toBe(404);
+
+      const adminDisabledRes = await worker.fetch(
+        new Request('https://panel.test/api/music/play', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': adminInit },
+          body: JSON.stringify({ id: 'play1234' }),
+        }),
+        env
+      );
+      expect(adminDisabledRes.status).toBe(200);
+      expect((await adminDisabledRes.json()).delivered).toBe(true);
+
+      // 9. Anonymous preview POST /api/music/play (no initData, DEV_PREVIEW) returns needsDeepLink
+      await savePanelConfig(env, { music: { enabled: true } });
+      const anonEnv = { ...env, BOT_TOKEN: '', DEV_PREVIEW: 'true' };
+      const anonRes = await worker.fetch(
+        new Request('https://panel.test/api/music/play', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: 'play1234' }),
+        }),
+        anonEnv
+      );
+      expect(anonRes.status).toBe(200);
+      const anonBody = await anonRes.json();
+      expect(anonBody.needsDeepLink).toBe(true);
+      expect(anonBody.deepLink).toBe('https://t.me/RoseTestBot?start=song_play1234');
     } finally {
       globalThis.fetch = origFetch;
     }
   });
+
+  it.each(['kv', 'd1'])(
+    'preserves concurrent multi-select forwarded songs and songs forwarded while Settings is open [%s]',
+    async (mode) => {
+      const kv = createMemoryKV();
+      const env = {
+        BOT_TOKEN: '123456:TEST_TOKEN',
+        BOT_USERNAME: 'RoseTestBot',
+        ADMIN_IDS: '99999,88888',
+        TOPIC_MAP: kv,
+        ...(mode === 'd1' ? { DB: createD1Shim() } : {}),
+      };
+
+      const tgCalls = [];
+      const origFetch = globalThis.fetch;
+      globalThis.fetch = vi.fn(async (url, init) => {
+        const method = String(url).split('/').pop();
+        const body = init?.body ? JSON.parse(init.body) : {};
+        tgCalls.push({ method, body });
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 700 + tgCalls.length } }), {
+          status: 200,
+        });
+      });
+
+      try {
+        // P1-2: Multi-select concurrent forward of 3 songs preserves all 3 tracks
+        await Promise.all([
+          handleTelegramUpdate(
+            {
+              message: {
+                message_id: 31,
+                from: { id: 99999, first_name: 'Owner' },
+                chat: { id: 99999, type: 'private' },
+                audio: { file_id: 'CONC_F1', file_unique_id: 'CONC_U1', title: '并发曲1', duration: 180 },
+              },
+            },
+            env,
+            'https://panel.test'
+          ),
+          handleTelegramUpdate(
+            {
+              message: {
+                message_id: 32,
+                from: { id: 99999, first_name: 'Owner' },
+                chat: { id: 99999, type: 'private' },
+                audio: { file_id: 'CONC_F2', file_unique_id: 'CONC_U2', title: '并发曲2', duration: 190 },
+              },
+            },
+            env,
+            'https://panel.test'
+          ),
+          handleTelegramUpdate(
+            {
+              message: {
+                message_id: 33,
+                from: { id: 99999, first_name: 'Owner' },
+                chat: { id: 99999, type: 'private' },
+                audio: { file_id: 'CONC_F3', file_unique_id: 'CONC_U3', title: '并发曲3', duration: 200 },
+              },
+            },
+            env,
+            'https://panel.test'
+          ),
+        ]);
+
+        let cfg = await loadPanelConfig(env);
+        expect(cfg.music.tracks).toHaveLength(3);
+        expect(new Set(cfg.music.tracks.map((t) => t.title))).toEqual(new Set(['并发曲1', '并发曲2', '并发曲3']));
+
+        // P2-1: Co-admin (88888) in DM mode cannot add to owner playlist or click mus:rm
+        tgCalls.length = 0;
+        const firstTrackId = cfg.music.tracks[0].id;
+        await handleTelegramUpdate(
+          {
+            message: {
+              message_id: 34,
+              from: { id: 88888, first_name: 'CoAdmin' },
+              chat: { id: 88888, type: 'private' },
+              audio: { file_id: 'COADMIN_F', file_unique_id: 'COADMIN_U', title: '协管误发' },
+            },
+          },
+          env,
+          'https://panel.test'
+        );
+        expect((await loadPanelConfig(env)).music.tracks).toHaveLength(3);
+        expect(tgCalls.some((c) => c.method === 'sendMessage' && c.body.chat_id === 88888 && c.body.text.includes('只有主人'))).toBe(true);
+
+        await handleTelegramUpdate(
+          {
+            callback_query: {
+              id: 'cq-coadmin',
+              from: { id: 88888, first_name: 'CoAdmin' },
+              message: { message_id: 701, chat: { id: 99999, type: 'private' } },
+              data: `mus:rm:${firstTrackId}`,
+            },
+          },
+          env,
+          'https://panel.test'
+        );
+        expect((await loadPanelConfig(env)).music.tracks).toHaveLength(3);
+
+        // P2-6: `/add` question step takes priority over audio capture
+        await kv.put(
+          'await_verify_quiz:99999',
+          JSON.stringify({ step: 'question', sticker: { fileId: 'STK_1', format: 'webp' } })
+        );
+        await handleTelegramUpdate(
+          {
+            message: {
+              message_id: 35,
+              from: { id: 99999, first_name: 'Owner' },
+              chat: { id: 99999, type: 'private' },
+              audio: { file_id: 'AUDIO_IN_QUIZ_Q', file_unique_id: 'UNIQ_QUIZ_Q', title: '猜题阶段音频' },
+            },
+          },
+          env,
+          'https://panel.test'
+        );
+        await kv.delete('await_verify_quiz:99999');
+        expect((await loadPanelConfig(env)).music.tracks).toHaveLength(3);
+
+        // P1-1: Admin opens Settings (snapshotAt), forwards Song 4 while Settings is open, then saves:
+        //   (a) unrelated settings with `music.tracks` omitted -> Song 4 preserved
+        //   (b) stale track edit (deleting one old track) with `baseAt: snapshotAt` -> deleted old track gone, Song 4 preserved!
+        const adminSnapshot = sanitizeAdminConfig(await loadPanelConfig(env), env);
+        const snapshotAt = adminSnapshot.music.snapshotAt;
+        // Ensure new track addedAt is strictly greater than snapshotAt
+        await new Promise((r) => setTimeout(r, 10));
+        await handleTelegramUpdate(
+          {
+            message: {
+              message_id: 36,
+              from: { id: 99999, first_name: 'Owner' },
+              chat: { id: 99999, type: 'private' },
+              audio: { file_id: 'LATE_F4', file_unique_id: 'LATE_U4', title: '设置期间新转的歌', duration: 210 },
+            },
+          },
+          env,
+          'https://panel.test'
+        );
+
+        const nowSec = String(Math.floor(Date.now() / 1000));
+        const adminInit = await signInitData(
+          { user: JSON.stringify({ id: 99999, first_name: 'Owner' }), auth_date: nowSec },
+          env.BOT_TOKEN
+        );
+
+        // (a) Save unrelated profile edit (tracks omitted from music)
+        const resA = await worker.fetch(
+          new Request('https://panel.test/api/admin/config', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': adminInit },
+            body: JSON.stringify({
+              profile: { tagline: '更新简介不丢歌' },
+              music: { enabled: true, title: '我的音乐角' },
+            }),
+          }),
+          env
+        );
+        expect(resA.status).toBe(200);
+        cfg = await loadPanelConfig(env);
+        expect(cfg.music.tracks).toHaveLength(4);
+        expect(cfg.music.tracks[0].title).toBe('设置期间新转的歌');
+
+        // (b) Save stale track list (removing 1 old track from original 3) with `baseAt: snapshotAt`
+        const keptTwoOld = adminSnapshot.music.tracks.slice(0, 2).map((t) => ({
+          id: t.id,
+          title: t.title,
+          performer: t.performer,
+        }));
+        const resB = await worker.fetch(
+          new Request('https://panel.test/api/admin/config', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': adminInit },
+            body: JSON.stringify({
+              music: {
+                enabled: true,
+                title: '我的音乐角',
+                baseAt: snapshotAt,
+                tracks: keptTwoOld,
+              },
+            }),
+          }),
+          env
+        );
+        expect(resB.status).toBe(200);
+        cfg = await loadPanelConfig(env);
+        expect(cfg.music.tracks).toHaveLength(3);
+        expect(cfg.music.tracks[0].title).toBe('设置期间新转的歌');
+        expect(cfg.music.tracks.slice(1).map((t) => t.id)).toEqual(keptTwoOld.map((t) => t.id));
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    }
+  );
 });
