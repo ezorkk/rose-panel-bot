@@ -45,7 +45,7 @@ export const THEME_PRESETS = [
     name: '极简黑白',
     desc: '中性高级冷灰，无明显色调倾向',
     swatch: '#27272c',
-    swatchSoft: '#e9e9ee',
+    swatchSoft: '#dedee6',
     lightBg: '#f5f5f7',
     darkBg: '#111113',
   },
@@ -62,7 +62,7 @@ export const DOCK_STYLES = [
   {
     id: 'glass',
     name: '轻磨砂玻璃',
-    desc: '半透瓷釉毛玻璃 + 顶部微亮高光边',
+    desc: '高透液态玻璃 + 边缘高光，滑动时背景柔和透出',
   },
 ];
 
