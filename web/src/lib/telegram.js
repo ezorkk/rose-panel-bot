@@ -1,13 +1,19 @@
 // Telegram WebApp SDK helpers (gracefully works in both Telegram Mini App and browser preview)
 
+import { DEFAULT_THEME_PRESET, getThemeChromeBg } from './themes.js';
+
 export function getTelegramWebApp() {
   return typeof window !== 'undefined' ? window.Telegram?.WebApp || null : null;
 }
 
-export function syncTelegramChrome(theme = 'light') {
+export function syncTelegramChrome(theme = 'light', themePreset = DEFAULT_THEME_PRESET) {
+  const bg = getThemeChromeBg(theme, themePreset);
+  if (typeof document !== 'undefined') {
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', bg);
+  }
   const tg = getTelegramWebApp();
   if (!tg) return;
-  const bg = theme === 'dark' ? '#141012' : '#faf4f5';
   try {
     tg.setHeaderColor?.(bg);
     tg.setBackgroundColor?.(bg);
@@ -17,13 +23,13 @@ export function syncTelegramChrome(theme = 'light') {
   }
 }
 
-export function initTelegramWebApp() {
+export function initTelegramWebApp(themePreset = DEFAULT_THEME_PRESET) {
   const tg = getTelegramWebApp();
   if (!tg) return null;
   try {
     tg.ready();
     tg.expand();
-    syncTelegramChrome(getTelegramColorScheme());
+    syncTelegramChrome(getTelegramColorScheme(), themePreset);
   } catch {
     // Ignore outside Telegram
   }

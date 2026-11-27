@@ -1,6 +1,7 @@
 // Main Cloudflare Worker Entrypoint for RosePanel Bot
 
 import { BRAND_NAME } from '../../web/src/lib/brand.js';
+import { getThemePresetMeta, normalizeDockStyle, normalizeThemePreset } from '../../web/src/lib/themes.js';
 import { runProbeAlerts } from './alerts.js';
 import { handleApiRequest } from './api.js';
 import { parseAdminIds } from './auth.js';
@@ -119,11 +120,17 @@ async function injectSplashIntoHtml(response, env, requestOrigin = '') {
     const description = taglineChars.length > 160 ? `${taglineChars.slice(0, 159).join('')}…` : rawTagline;
     const ogImage = resolveOgImageUrl(config, requestOrigin);
 
+    const themePreset = normalizeThemePreset(config.ui?.themePreset);
+    const dockStyle = normalizeDockStyle(config.ui?.dockStyle);
+    const themeMeta = getThemePresetMeta(themePreset);
+
     const splashPayload = {
       displayName,
       style: config.profile?.splash?.style || 'emblem',
       text: config.profile?.splash?.text || '正在打开个人面板…',
       emoji: config.profile?.splash?.emoji || '🌹',
+      themePreset,
+      dockStyle,
       emblem: {
         type: config.profile?.emblem?.type || 'builtin',
         variant: config.profile?.emblem?.variant || 'owner',
@@ -146,13 +153,19 @@ async function injectSplashIntoHtml(response, env, requestOrigin = '') {
 
     const html = await response.text();
     let injected = html;
+    if (/<meta\s+name="theme-color"\s+content="[^"]*"\s*\/?>/i.test(injected)) {
+      injected = injected.replace(
+        /<meta\s+name="theme-color"\s+content="[^"]*"\s*\/?>/i,
+        () => `<meta name="theme-color" content="${themeMeta.lightBg}" />`
+      );
+    }
     if (/<title>[\s\S]*?<\/title>/i.test(injected)) {
       injected = injected.replace(/<title>[\s\S]*?<\/title>/i, () => titleTag);
     } else if (injected.includes('</head>')) {
       injected = injected.replace('</head>', () => `    ${titleTag}\n  </head>`);
     }
 
-    const headBlock = `    ${ogTags}\n    <script>window.__ROSE_SPLASH__=${serializeSafeInlineJson(splashPayload)};</script>\n  </head>`;
+    const headBlock = `    ${ogTags}\n    <script>window.__ROSE_SPLASH__=${serializeSafeInlineJson(splashPayload)};document.documentElement.setAttribute('data-palette',${JSON.stringify(themePreset)});document.documentElement.setAttribute('data-dock',${JSON.stringify(dockStyle)});</script>\n  </head>`;
     if (injected.includes('</head>')) {
       injected = injected.replace('</head>', () => headBlock);
     }

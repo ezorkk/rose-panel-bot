@@ -1,6 +1,23 @@
 // Configuration defaults and KV storage helpers for RosePanel Bot
 
+import {
+  DEFAULT_DOCK_STYLE,
+  DEFAULT_THEME_PRESET,
+  DOCK_STYLE_IDS,
+  THEME_PRESET_IDS,
+  normalizeDockStyle,
+  normalizeThemePreset,
+} from '../../web/src/lib/themes.js';
 import { buildMiniAppDirectLink } from './telegram.js';
+
+export {
+  DEFAULT_DOCK_STYLE,
+  DEFAULT_THEME_PRESET,
+  DOCK_STYLE_IDS,
+  THEME_PRESET_IDS,
+  normalizeDockStyle,
+  normalizeThemePreset,
+};
 
 export const LEVELS = [
   { level: 1, title: '初遇者', minXp: 0, badge: 'petal', color: '#E38AA6' },
@@ -210,6 +227,8 @@ export const DEFAULT_CONFIG = {
   },
   ui: {
     navOrder: [...DEFAULT_NAV_ORDER],
+    themePreset: DEFAULT_THEME_PRESET, // rose | ocean | matcha | lavender | mono
+    dockStyle: DEFAULT_DOCK_STYLE, // solid | glass
   },
 };
 
@@ -525,6 +544,8 @@ export function mergeConfig(base, override) {
     },
     ui: {
       navOrder: normalizeNavOrder(override.ui?.navOrder ?? base.ui?.navOrder),
+      themePreset: normalizeThemePreset(override.ui?.themePreset ?? base.ui?.themePreset),
+      dockStyle: normalizeDockStyle(override.ui?.dockStyle ?? base.ui?.dockStyle),
     },
     botUsername: String(override.botUsername ?? base.botUsername ?? '')
       .trim()
@@ -663,6 +684,8 @@ export async function savePanelConfig(env, nextConfig) {
   merged.pmBot.probation = normalizeProbation(DEFAULT_PROBATION, merged.pmBot.probation);
   merged.ui = {
     navOrder: normalizeNavOrder(merged.ui?.navOrder),
+    themePreset: normalizeThemePreset(merged.ui?.themePreset),
+    dockStyle: normalizeDockStyle(merged.ui?.dockStyle),
   };
 
   await safePutJSON(env.TOPIC_MAP, CONFIG_KV_KEY, merged);
@@ -755,6 +778,8 @@ export function sanitizePublicConfig(config, env, isAdmin = false, requestOrigin
     },
     ui: {
       navOrder: normalizeNavOrder(config.ui?.navOrder),
+      themePreset: normalizeThemePreset(config.ui?.themePreset),
+      dockStyle: normalizeDockStyle(config.ui?.dockStyle),
     },
     shareUrl: resolveShareUrl(config, env, requestOrigin),
     ...(publicVisitStats ? { visitStats: publicVisitStats } : {}),

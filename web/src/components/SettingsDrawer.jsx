@@ -12,6 +12,7 @@ import {
   Globe,
   Link2,
   Lock,
+  Palette,
   Plus,
   RefreshCw,
   Rocket,
@@ -30,6 +31,14 @@ import {
   toggleBlockedKeyword,
 } from '../lib/keywordPresets.js';
 import { buildSourceLink, confirmDialog, copyText, haptic, openExternalUrl } from '../lib/telegram.js';
+import {
+  DOCK_STYLES,
+  THEME_PRESETS,
+  getDockStyleMeta,
+  getThemePresetMeta,
+  normalizeDockStyle,
+  normalizeThemePreset,
+} from '../lib/themes.js';
 import { TgStickerMedia, TicketEmblem } from './Emblems.jsx';
 import {
   CHANGELOG_URL,
@@ -97,6 +106,7 @@ export default function SettingsDrawer({
   botInfo = null,
   shareUrl = '',
   appVersion = '',
+  onPreviewAppearance,
   onOpenWhatsNew,
   onClose,
   onSaved,
@@ -122,6 +132,7 @@ export default function SettingsDrawer({
   const [forkCardOpen, setForkCardOpen] = useState(() => Boolean(adminConfig?.updater?.forkRepo?.trim()));
   const [forkAdvancedOpen, setForkAdvancedOpen] = useState(false);
   const [profilePanels, setProfilePanels] = useState({
+    appearance: false,
     emblem: false,
     ticket: false,
     splash: false,
@@ -764,6 +775,24 @@ export default function SettingsDrawer({
         <div className="settings-sheet-body" ref={settingsBodyRef}>
         {/* Section 1: Profile & Ticket Emblem (TG Stickers / Custom Emojis!) */}
         {section === 'profile' && (() => {
+          const themePreset = normalizeThemePreset(draft.ui?.themePreset);
+          const dockStyle = normalizeDockStyle(draft.ui?.dockStyle);
+          const themeMeta = getThemePresetMeta(themePreset);
+          const dockMeta = getDockStyleMeta(dockStyle);
+          const updateAppearance = (patch) => {
+            haptic('light');
+            const nextThemePreset = normalizeThemePreset(patch.themePreset ?? themePreset);
+            const nextDockStyle = normalizeDockStyle(patch.dockStyle ?? dockStyle);
+            setDraft((prev) => ({
+              ...prev,
+              ui: {
+                ...(prev.ui || {}),
+                themePreset: nextThemePreset,
+                dockStyle: nextDockStyle,
+              },
+            }));
+            onPreviewAppearance?.({ themePreset: nextThemePreset, dockStyle: nextDockStyle });
+          };
           const emblemModeLabel =
             emblem.type === 'tg_sticker' ? 'TG 贴纸' : emblem.type === 'url' ? '图片链接' : '内置玫瑰';
           const splashStyle = draft.profile?.splash?.style || 'emblem';
@@ -927,6 +956,95 @@ export default function SettingsDrawer({
                     </div>
                   ))}
                 </div>
+              </div>
+
+              {/* Collapsible 0: Theme Palette & Bottom Dock Style */}
+              <div className="card update-fork-card">
+                <button
+                  type="button"
+                  className="update-collapse-head"
+                  aria-expanded={profilePanels.appearance}
+                  onClick={() => toggleProfilePanel('appearance')}
+                >
+                  <span className="update-collapse-title">
+                    <Palette size={14} color="var(--accent)" style={{ flexShrink: 0 }} />
+                    <span>主题配色与底栏风格</span>
+                    <span className="update-collapse-badge">
+                      {themeMeta.name} · {dockMeta.name}
+                    </span>
+                  </span>
+                  {profilePanels.appearance ? (
+                    <ChevronDown size={16} style={{ flexShrink: 0 }} />
+                  ) : (
+                    <ChevronRight size={16} style={{ flexShrink: 0 }} />
+                  )}
+                </button>
+
+                {profilePanels.appearance && (
+                  <div className="update-fork-body">
+                    <div className="field-label" style={{ marginBottom: 8 }}>
+                      面板配色主题（点击实时预览，自动适配日间 / 夜间模式，访客同步可见）
+                    </div>
+                    <div className="theme-preset-grid">
+                      {THEME_PRESETS.map((preset) => {
+                        const selected = themePreset === preset.id;
+                        return (
+                          <button
+                            key={preset.id}
+                            type="button"
+                            className={`theme-preset-card ${selected ? 'selected' : ''}`}
+                            aria-pressed={selected}
+                            onClick={() => updateAppearance({ themePreset: preset.id })}
+                          >
+                            <span
+                              className="theme-swatch-dot"
+                              style={{
+                                background: `linear-gradient(135deg, ${preset.swatchSoft} 0%, ${preset.swatch} 100%)`,
+                              }}
+                            >
+                              {selected && <Check size={13} color="#fff" strokeWidth={2.6} />}
+                            </span>
+                            <span className="theme-preset-meta">
+                              <span className="theme-preset-name">{preset.name}</span>
+                              <span className="theme-preset-desc">{preset.desc}</span>
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <div className="field-label" style={{ marginTop: 14, marginBottom: 8 }}>
+                      底部导航栏质感
+                    </div>
+                    <div className="dock-style-grid">
+                      {DOCK_STYLES.map((opt) => {
+                        const selected = dockStyle === opt.id;
+                        return (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            className={`dock-style-card ${selected ? 'selected' : ''}`}
+                            aria-pressed={selected}
+                            onClick={() => updateAppearance({ dockStyle: opt.id })}
+                          >
+                            <div className="dock-preview-stage" aria-hidden="true">
+                              <div className={`dock-preview-pill ${opt.id}`}>
+                                <span className="dock-preview-seg active" />
+                                <span className="dock-preview-seg" />
+                                <span className="dock-preview-seg" />
+                                <span className="dock-preview-seg" />
+                              </div>
+                            </div>
+                            <div>
+                              <div className="theme-preset-name">{opt.name}</div>
+                              <div className="theme-preset-desc">{opt.desc}</div>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Collapsible 1: Ticket Stub Emblem Picker */}

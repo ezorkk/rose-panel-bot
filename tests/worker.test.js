@@ -51,10 +51,16 @@ import { getLeaderboard, getMemberTicket, performCheckin, resolveLevel } from '.
 import {
   CHAT_RETENTION_DAYS_OPTIONS,
   DEFAULT_CONFIG,
+  DEFAULT_DOCK_STYLE,
   DEFAULT_NAV_ORDER,
+  DEFAULT_THEME_PRESET,
+  DOCK_STYLE_IDS,
+  THEME_PRESET_IDS,
   loadPanelConfig,
   normalizeChatRetentionDays,
+  normalizeDockStyle,
   normalizeNavOrder,
+  normalizeThemePreset,
   resolveSupergroupId,
   sanitizeAdminConfig,
   sanitizePublicConfig,
@@ -130,6 +136,11 @@ import {
   updateVisitorMessageReaction,
   upsertVisitorProfile,
 } from '../src/worker/visitors.js';
+import {
+  getDockStyleMeta,
+  getThemeChromeBg,
+  getThemePresetMeta,
+} from '../web/src/lib/themes.js';
 import {
   buildSourceLink as buildClientSourceLink,
   normalizeSourceParam as normalizeClientSourceParam,
@@ -8997,5 +9008,83 @@ describe('Cloudflare D1 Stage 2 store: cursor pagination, around jump, LIKE sear
       { text: 'rose', match: true },
       { text: ' test', match: false },
     ]);
+  });
+});
+
+describe('Theme presets & frosted glass dock style', () => {
+  it('validates themePreset and dockStyle whitelists, preserves legacy defaults, and exposes them in public config', async () => {
+    expect(DEFAULT_THEME_PRESET).toBe('rose');
+    expect(DEFAULT_DOCK_STYLE).toBe('solid');
+    expect(THEME_PRESET_IDS).toEqual(['rose', 'ocean', 'matcha', 'lavender', 'mono']);
+    expect(DOCK_STYLE_IDS).toEqual(['solid', 'glass']);
+
+    expect(normalizeThemePreset('OCEAN')).toBe('ocean');
+    expect(normalizeThemePreset('matcha')).toBe('matcha');
+    expect(normalizeThemePreset('invalid_theme')).toBe('rose');
+    expect(normalizeThemePreset(null)).toBe('rose');
+
+    expect(normalizeDockStyle('GLASS')).toBe('glass');
+    expect(normalizeDockStyle('solid')).toBe('solid');
+    expect(normalizeDockStyle('neon')).toBe('solid');
+
+    expect(getThemePresetMeta('ocean').name).toBe('海盐晴蓝');
+    expect(getDockStyleMeta('glass').name).toBe('轻磨砂玻璃');
+    expect(getThemeChromeBg('light', 'ocean')).toBe('#f3f7fb');
+    expect(getThemeChromeBg('dark', 'ocean')).toBe('#0f141a');
+    expect(getThemeChromeBg('light', 'unknown')).toBe('#faf4f5');
+
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv };
+
+    // Legacy KV config without ui.themePreset / ui.dockStyle falls back cleanly to rose + solid
+    await kv.put('config:panel', JSON.stringify({ profile: { displayName: 'LegacyCard' } }));
+    const legacyCfg = await loadPanelConfig(env);
+    expect(legacyCfg.ui.themePreset).toBe('rose');
+    expect(legacyCfg.ui.dockStyle).toBe('solid');
+    expect(sanitizePublicConfig(legacyCfg, env, false).ui).toEqual({
+      navOrder: DEFAULT_NAV_ORDER,
+      themePreset: 'rose',
+      dockStyle: 'solid',
+    });
+
+    // Saving valid preset + glass dock persists and survives reload; invalid inputs safely fall back
+    await savePanelConfig(env, { ui: { themePreset: 'lavender', dockStyle: 'glass' } });
+    const saved = await loadPanelConfig(env);
+    expect(saved.ui.themePreset).toBe('lavender');
+    expect(saved.ui.dockStyle).toBe('glass');
+    expect(sanitizePublicConfig(saved, env, false).ui).toMatchObject({
+      themePreset: 'lavender',
+      dockStyle: 'glass',
+    });
+
+    await savePanelConfig(env, { ui: { themePreset: '<script>', dockStyle: 'bogus' } });
+    const sanitized = await loadPanelConfig(env);
+    expect(sanitized.ui.themePreset).toBe('rose');
+    expect(sanitized.ui.dockStyle).toBe('solid');
+  });
+
+  it('injects active themePreset, dockStyle, and matching theme-color into 0ms splash HTML', async () => {
+    const kv = createMemoryKV();
+    const env = {
+      TOPIC_MAP: kv,
+      ASSETS: {
+        async fetch() {
+          return new Response(
+            '<!DOCTYPE html><html><head><meta name="theme-color" content="#FAF4F5" /><title>RosePanel</title></head><body></body></html>',
+            { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+          );
+        },
+      },
+    };
+    await savePanelConfig(env, { ui: { themePreset: 'matcha', dockStyle: 'glass' } });
+
+    const res = await worker.fetch(new Request('https://panel.test/'), env);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('<meta name="theme-color" content="#f4f8f5" />');
+    expect(html).toContain(`"themePreset":"matcha"`);
+    expect(html).toContain(`"dockStyle":"glass"`);
+    expect(html).toContain(`document.documentElement.setAttribute('data-palette',"matcha")`);
+    expect(html).toContain(`document.documentElement.setAttribute('data-dock',"glass")`);
   });
 });

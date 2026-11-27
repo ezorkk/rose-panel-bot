@@ -29,6 +29,7 @@ import {
   onColorSchemeChange,
   syncTelegramChrome,
 } from './lib/telegram.js';
+import { normalizeDockStyle, normalizeThemePreset } from './lib/themes.js';
 
 const BOOT_CACHE_PREFIX = 'rose_panel_boot_v1:';
 const THEME_MODE_STORAGE_KEY = 'rose_panel_theme_mode';
@@ -177,6 +178,7 @@ export default function App() {
   const [deepVisitorId, setDeepVisitorId] = useState('');
   const [visitorFilterPreset, setVisitorFilterPreset] = useState('');
   const [settingsSection, setSettingsSection] = useState(null);
+  const [appearancePreview, setAppearancePreview] = useState(null);
   const launchHandledRef = useRef(false);
   const [checkinLoading, setCheckinLoading] = useState(false);
   const [toast, setToast] = useState('');
@@ -187,6 +189,12 @@ export default function App() {
     previousVersion: '',
   });
   const splashMeta = readSplashMeta();
+  const activeThemePreset = normalizeThemePreset(
+    appearancePreview?.themePreset ?? bootstrap?.config?.ui?.themePreset ?? splashMeta?.themePreset
+  );
+  const activeDockStyle = normalizeDockStyle(
+    appearancePreview?.dockStyle ?? bootstrap?.config?.ui?.dockStyle ?? splashMeta?.dockStyle
+  );
 
   const showToast = useCallback((msg) => {
     setToast(msg);
@@ -197,8 +205,10 @@ export default function App() {
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
-    syncTelegramChrome(theme);
-  }, [theme]);
+    document.documentElement.setAttribute('data-palette', activeThemePreset);
+    document.documentElement.setAttribute('data-dock', activeDockStyle);
+    syncTelegramChrome(theme, activeThemePreset);
+  }, [theme, activeThemePreset, activeDockStyle]);
 
   useEffect(() => onColorSchemeChange(setSystemTheme), []);
 
@@ -289,7 +299,9 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    initTelegramWebApp();
+    initTelegramWebApp(
+      normalizeThemePreset(loadCachedBootstrap()?.config?.ui?.themePreset ?? readSplashMeta()?.themePreset)
+    );
     const hasWarmCache = Boolean(loadCachedBootstrap());
     loadBootstrap({ silent: hasWarmCache });
   }, [loadBootstrap]);
@@ -556,11 +568,16 @@ export default function App() {
           botInfo={bootstrap.config?.bot}
           shareUrl={bootstrap.config?.shareUrl}
           appVersion={bootstrap.appVersion}
+          onPreviewAppearance={(next) => setAppearancePreview(next)}
           onOpenWhatsNew={() =>
             setWhatsNewState({ open: true, mode: 'manual', previousVersion: '' })
           }
-          onClose={() => setSettingsSection(null)}
+          onClose={() => {
+            setAppearancePreview(null);
+            setSettingsSection(null);
+          }}
           onSaved={(savedRes) => {
+            setAppearancePreview(null);
             setBootstrap((prev) =>
               prev
                 ? {
