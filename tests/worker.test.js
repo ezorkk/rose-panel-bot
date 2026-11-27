@@ -9036,6 +9036,14 @@ describe('Theme presets & frosted glass dock style', () => {
     const kv = createMemoryKV();
     const env = { TOPIC_MAP: kv };
 
+    // Brand-new deployment (no saved config in KV) populates ui.themePreset & ui.dockStyle via mergeConfig
+    const freshCfg = await loadPanelConfig(env);
+    expect(freshCfg.ui).toEqual({
+      navOrder: DEFAULT_NAV_ORDER,
+      themePreset: 'rose',
+      dockStyle: 'solid',
+    });
+
     // Legacy KV config without ui.themePreset / ui.dockStyle falls back cleanly to rose + solid
     await kv.put('config:panel', JSON.stringify({ profile: { displayName: 'LegacyCard' } }));
     const legacyCfg = await loadPanelConfig(env);
@@ -9081,7 +9089,8 @@ describe('Theme presets & frosted glass dock style', () => {
     const res = await worker.fetch(new Request('https://panel.test/'), env);
     expect(res.status).toBe(200);
     const html = await res.text();
-    expect(html).toContain('<meta name="theme-color" content="#f4f8f5" />');
+    expect(html).toContain('<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f4f8f5" />');
+    expect(html).toContain('<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#101613" />');
     expect(html).toContain(`"themePreset":"matcha"`);
     expect(html).toContain(`"dockStyle":"glass"`);
     expect(html).toContain(`document.documentElement.setAttribute('data-palette',"matcha")`);

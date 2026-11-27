@@ -169,6 +169,7 @@ export default function App() {
   const [systemTheme, setSystemTheme] = useState(() => getTelegramColorScheme());
   const theme = themeMode === 'auto' ? systemTheme : themeMode;
   const [bootstrap, setBootstrap] = useState(() => loadCachedBootstrap());
+  const [bootstrapFresh, setBootstrapFresh] = useState(false);
   const [loading, setLoading] = useState(() => !loadCachedBootstrap());
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState(() => {
@@ -189,11 +190,19 @@ export default function App() {
     previousVersion: '',
   });
   const splashMeta = readSplashMeta();
+  // Before the live `/api/bootstrap` response arrives, trust server-injected `splashMeta` over stale
+  // localStorage boot cache so returning visitors never flash an old theme after an owner updates it.
+  const activeUiSource = bootstrapFresh
+    ? bootstrap?.config?.ui
+    : {
+        themePreset: splashMeta?.themePreset ?? bootstrap?.config?.ui?.themePreset,
+        dockStyle: splashMeta?.dockStyle ?? bootstrap?.config?.ui?.dockStyle,
+      };
   const activeThemePreset = normalizeThemePreset(
-    appearancePreview?.themePreset ?? bootstrap?.config?.ui?.themePreset ?? splashMeta?.themePreset
+    appearancePreview?.themePreset ?? activeUiSource?.themePreset
   );
   const activeDockStyle = normalizeDockStyle(
-    appearancePreview?.dockStyle ?? bootstrap?.config?.ui?.dockStyle ?? splashMeta?.dockStyle
+    appearancePreview?.dockStyle ?? activeUiSource?.dockStyle
   );
 
   const showToast = useCallback((msg) => {
@@ -257,6 +266,7 @@ export default function App() {
       setError('');
       const res = await apiRequest('/api/bootstrap');
       setBootstrap(res);
+      setBootstrapFresh(true);
       saveCachedBootstrap(res);
 
       // Handle Telegram start_param / query deep links (e.g. visitor_123456 or settings=modes) once on launch
@@ -300,7 +310,7 @@ export default function App() {
 
   useEffect(() => {
     initTelegramWebApp(
-      normalizeThemePreset(loadCachedBootstrap()?.config?.ui?.themePreset ?? readSplashMeta()?.themePreset)
+      normalizeThemePreset(readSplashMeta()?.themePreset ?? loadCachedBootstrap()?.config?.ui?.themePreset)
     );
     const hasWarmCache = Boolean(loadCachedBootstrap());
     loadBootstrap({ silent: hasWarmCache });
@@ -578,6 +588,7 @@ export default function App() {
           }}
           onSaved={(savedRes) => {
             setAppearancePreview(null);
+            setBootstrapFresh(true);
             setBootstrap((prev) =>
               prev
                 ? {

@@ -999,7 +999,7 @@ export default function SettingsDrawer({
                             <span
                               className="theme-swatch-dot"
                               style={{
-                                background: `linear-gradient(135deg, ${preset.swatchSoft} 0%, ${preset.swatch} 100%)`,
+                                background: `linear-gradient(145deg, ${preset.swatch} 55%, ${preset.swatchSoft} 100%)`,
                               }}
                             >
                               {selected && <Check size={13} color="#fff" strokeWidth={2.6} />}

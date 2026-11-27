@@ -14,6 +14,7 @@
   --accent-rgb: 163, 41, 82;
   --shadow-rgb: 140, 38, 72;
   --on-accent: #ffffff;
+  --on-accent-rgb: 255, 255, 255;
   --accent-line: rgba(var(--accent-rgb), 0.16);
   --border: rgba(var(--accent-rgb), 0.08);
   --shadow: 0 6px 24px rgba(var(--shadow-rgb), 0.06), 0 1px 3px rgba(var(--shadow-rgb), 0.04);
@@ -53,7 +54,8 @@
   --accent-grad-from: #f49bb8;
   --accent-rgb: 229, 107, 146;
   --shadow-rgb: 0, 0, 0;
-  --on-accent: #ffffff;
+  --on-accent: #220912;
+  --on-accent-rgb: 34, 9, 18;
   --accent-soft: rgba(var(--accent-rgb), 0.15);
   --accent-soft-hover: rgba(var(--accent-rgb), 0.24);
   --accent-line: rgba(var(--accent-rgb), 0.24);
@@ -108,6 +110,8 @@
   --accent-grad-from: #93c4fb;
   --accent-rgb: 99, 164, 245;
   --shadow-rgb: 0, 0, 0;
+  --on-accent: #091320;
+  --on-accent-rgb: 9, 19, 32;
   --border: rgba(210, 232, 255, 0.09);
   --dock-bg: rgba(23, 31, 41, 0.9);
   --dock-glass-bg: rgba(23, 31, 41, 0.62);
@@ -144,6 +148,8 @@
   --accent-grad-from: #8edbb5;
   --accent-rgb: 91, 194, 144;
   --shadow-rgb: 0, 0, 0;
+  --on-accent: #091a12;
+  --on-accent-rgb: 9, 26, 18;
   --border: rgba(210, 245, 224, 0.09);
   --dock-bg: rgba(24, 33, 28, 0.9);
   --dock-glass-bg: rgba(24, 33, 28, 0.62);
@@ -180,6 +186,8 @@
   --accent-grad-from: #c8b0fa;
   --accent-rgb: 166, 133, 240;
   --shadow-rgb: 0, 0, 0;
+  --on-accent: #120c21;
+  --on-accent-rgb: 18, 12, 33;
   --border: rgba(226, 214, 255, 0.09);
   --dock-bg: rgba(28, 25, 37, 0.9);
   --dock-glass-bg: rgba(28, 25, 37, 0.62);
@@ -197,8 +205,8 @@
   --accent: #27272c;
   --accent-strong: #111114;
   --accent-grad-from: #64646e;
-  --accent-soft: #e9e9ee;
-  --accent-soft-hover: #dcdce3;
+  --accent-soft: #dedee6;
+  --accent-soft-hover: #d1d1dc;
   --accent-rgb: 39, 39, 44;
   --shadow-rgb: 24, 24, 28;
 }
@@ -217,13 +225,10 @@
   --accent-rgb: 224, 224, 232;
   --shadow-rgb: 0, 0, 0;
   --on-accent: #141417;
+  --on-accent-rgb: 20, 20, 23;
   --border: rgba(255, 255, 255, 0.09);
   --dock-bg: rgba(27, 27, 30, 0.9);
   --dock-glass-bg: rgba(27, 27, 30, 0.62);
-}
-
-[data-palette='mono'][data-theme='dark'] .switch.on .switch-knob {
-  background: #141417;
 }
 
 /* Ensure every dark palette overrides light-mode solid --accent-soft tokens with translucent dark tints */
@@ -1408,6 +1413,7 @@ select {
 
 .switch.on .switch-knob {
   transform: translateX(20px);
+  background: var(--on-accent);
 }
 
 /* Toast */
@@ -1821,8 +1827,8 @@ select {
 }
 
 .chat-row.me .chat-bubble {
-  background: linear-gradient(135deg, #c93b6b, var(--accent));
-  color: #ffffff;
+  background: linear-gradient(135deg, var(--accent-strong), var(--accent));
+  color: var(--on-accent);
   border-bottom-right-radius: 5px;
 }
 
@@ -2742,8 +2748,8 @@ select {
 }
 
 .chip.active .chip-badge {
-  background: rgba(255, 255, 255, 0.24);
-  color: #ffffff;
+  background: rgba(var(--on-accent-rgb), 0.2);
+  color: var(--on-accent);
 }
 
 /* Visitor detail pending probation review card */
@@ -3052,8 +3058,8 @@ select {
 }
 
 .chat-row.me .search-hl {
-  background: rgba(255, 255, 255, 0.28);
-  color: #ffffff;
+  background: rgba(var(--on-accent-rgb), 0.22);
+  color: var(--on-accent);
 }
 
 .search-inline-link {

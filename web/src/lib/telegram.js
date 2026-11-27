@@ -9,8 +9,9 @@ export function getTelegramWebApp() {
 export function syncTelegramChrome(theme = 'light', themePreset = DEFAULT_THEME_PRESET) {
   const bg = getThemeChromeBg(theme, themePreset);
   if (typeof document !== 'undefined') {
-    const meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute('content', bg);
+    document.querySelectorAll('meta[name="theme-color"]').forEach((meta) => {
+      meta.setAttribute('content', bg);
+    });
   }
   const tg = getTelegramWebApp();
   if (!tg) return;

@@ -156,7 +156,8 @@ async function injectSplashIntoHtml(response, env, requestOrigin = '') {
     if (/<meta\s+name="theme-color"\s+content="[^"]*"\s*\/?>/i.test(injected)) {
       injected = injected.replace(
         /<meta\s+name="theme-color"\s+content="[^"]*"\s*\/?>/i,
-        () => `<meta name="theme-color" content="${themeMeta.lightBg}" />`
+        () =>
+          `<meta name="theme-color" media="(prefers-color-scheme: light)" content="${themeMeta.lightBg}" />\n    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="${themeMeta.darkBg}" />`
       );
     }
     if (/<title>[\s\S]*?<\/title>/i.test(injected)) {

@@ -464,6 +464,8 @@ export function mergeConfig(base, override) {
     cloned.pmBot.probation = normalizeProbation(DEFAULT_PROBATION, cloned.pmBot?.probation);
     cloned.ui = {
       navOrder: normalizeNavOrder(cloned.ui?.navOrder),
+      themePreset: normalizeThemePreset(cloned.ui?.themePreset),
+      dockStyle: normalizeDockStyle(cloned.ui?.dockStyle),
     };
     cloned.siteOrigin = String(cloned.siteOrigin || '').trim();
     return cloned;
