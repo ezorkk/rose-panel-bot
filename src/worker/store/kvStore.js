@@ -206,7 +206,16 @@ export function createKvStore(env) {
       const cleanUid = String(uid || '');
       const limit = Number.isInteger(Number(options?.limit)) && Number(options.limit) > 0 ? Number(options.limit) : MAX_MESSAGES;
       if (!kv || !/^\d+$/.test(cleanUid)) {
-        return { photos: [], links: [], pmMessageIds: [], messages: [] };
+        return {
+          photos: [],
+          links: [],
+          pmMessageIds: [],
+          messages: [],
+          hasMore: false,
+          hasNewer: false,
+          oldestCursor: null,
+          newestCursor: null,
+        };
       }
       const history = (await safeGetJSON(kv, `history:${cleanUid}`, null, { cacheTtl: HISTORY_CACHE_TTL_SECONDS })) || {
         photos: [],
@@ -220,6 +229,21 @@ export function createKvStore(env) {
         links: Array.isArray(history.links) ? history.links : [],
         pmMessageIds: Array.isArray(history.pmMessageIds) ? history.pmMessageIds : [],
         messages: rawMessages.length > limit ? rawMessages.slice(-limit) : rawMessages,
+        hasMore: false,
+        hasNewer: false,
+        oldestCursor: null,
+        newestCursor: null,
+      };
+    },
+
+    async searchMessages() {
+      // KV mode never scans KV keys for chat search; D1 binding is required.
+      return {
+        supported: false,
+        mode: 'kv',
+        items: [],
+        hasMore: false,
+        nextCursor: null,
       };
     },
 

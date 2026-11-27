@@ -25,7 +25,14 @@ import {
 } from './config.js';
 import { fetchProbeStatus } from './komari.js';
 import { isOwnerUnreachable, resolveInboxMode } from './inbox.js';
-import { getStorageStatus, migrateVisitorsBatch } from './store/index.js';
+import {
+  DEFAULT_SEARCH_LIMIT,
+  MAX_HISTORY_PAGE_LIMIT,
+  MAX_SEARCH_LIMIT,
+  MAX_SEARCH_QUERY_LEN,
+  getStorageStatus,
+  migrateVisitorsBatch,
+} from './store/index.js';
 import { checkLatestRelease, syncForkWithUpstream } from './updater.js';
 import { APP_VERSION } from './version.js';
 import { getVisitStats, recordMonthlyVisit } from './visitStats.js';
@@ -45,7 +52,47 @@ import {
   getVisitorOverview,
   listVisitors,
   recallAdminVisitorMessage,
+  searchVisitorMessages,
 } from './visitors.js';
+
+function parseStrictPositiveIntParam(raw) {
+  if (raw === null || raw === undefined || raw === '') {
+    return { present: false, valid: true, value: null };
+  }
+  const str = String(raw).trim();
+  if (!/^\d+$/.test(str)) {
+    return { present: true, valid: false, value: null };
+  }
+  const n = Number(str);
+  if (!Number.isSafeInteger(n) || n <= 0) {
+    return { present: true, valid: false, value: null };
+  }
+  return { present: true, valid: true, value: n };
+}
+
+function parseDateBoundaryParam(raw, isEnd = false) {
+  if (raw === null || raw === undefined || raw === '') {
+    return { present: false, valid: true, value: null };
+  }
+  const str = String(raw).trim();
+  if (/^\d+$/.test(str)) {
+    const n = Number(str);
+    return Number.isSafeInteger(n) && n > 0
+      ? { present: true, valid: true, value: n }
+      : { present: true, valid: false, value: null };
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+    const iso = isEnd ? `${str}T23:59:59.999Z` : `${str}T00:00:00.000Z`;
+    const parsed = Date.parse(iso);
+    return Number.isFinite(parsed) && parsed > 0
+      ? { present: true, valid: true, value: Math.trunc(parsed) }
+      : { present: true, valid: false, value: null };
+  }
+  const parsed = Date.parse(str);
+  return Number.isFinite(parsed) && parsed > 0
+    ? { present: true, valid: true, value: Math.trunc(parsed) }
+    : { present: true, valid: false, value: null };
+}
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -127,6 +174,79 @@ export async function handleApiRequest(request, env, url, ctx = null) {
   const auth = await authenticateRequest(request, env, tgCall);
   if (!auth.ok) {
     return json({ ok: false, error: auth.error || 'Unauthorized' }, auth.status || 401);
+  }
+
+  // GET /api/admin/search — D1-only full-history message search.
+  // Handled BEFORE `loadPanelConfig(env)` so KV mode rejects with 400 and ZERO KV reads.
+  if (path === '/api/admin/search' && method === 'GET') {
+    if (!auth.isAdmin) {
+      return json({ ok: false, error: '仅管理员有权访问此接口' }, 403);
+    }
+    if (!env.DB) {
+      return json(
+        { ok: false, mode: 'kv', d1Bound: false, error: '聊天记录搜索仅在绑定 D1 数据库后可用' },
+        400
+      );
+    }
+
+    const q = String(url.searchParams.get('q') || '').trim();
+    if (!q) {
+      return json({ ok: false, error: '请输入要搜索的关键词' }, 400);
+    }
+    if (q.length > MAX_SEARCH_QUERY_LEN) {
+      return json({ ok: false, error: `搜索关键词不能超过 ${MAX_SEARCH_QUERY_LEN} 个字符` }, 400);
+    }
+
+    const rawUid = String(url.searchParams.get('uid') || '').trim();
+    if (rawUid && !/^\d+$/.test(rawUid)) {
+      return json({ ok: false, error: '无效的访客 UID 参数' }, 400);
+    }
+
+    const fromParam = parseDateBoundaryParam(url.searchParams.get('from'), false);
+    if (!fromParam.valid) {
+      return json({ ok: false, error: '无效的开始时间参数 from' }, 400);
+    }
+    const toParam = parseDateBoundaryParam(url.searchParams.get('to'), true);
+    if (!toParam.valid) {
+      return json({ ok: false, error: '无效的结束时间参数 to' }, 400);
+    }
+    if (fromParam.value && toParam.value && fromParam.value > toParam.value) {
+      return json({ ok: false, error: '开始时间不能晚于结束时间' }, 400);
+    }
+
+    const limitParam = parseStrictPositiveIntParam(url.searchParams.get('limit'));
+    if (!limitParam.valid) {
+      return json({ ok: false, error: '无效的 limit 参数' }, 400);
+    }
+    const beforeParam = parseStrictPositiveIntParam(url.searchParams.get('before'));
+    if (!beforeParam.valid) {
+      return json({ ok: false, error: '无效的 before 游标参数' }, 400);
+    }
+    const beforeIdParam = parseStrictPositiveIntParam(url.searchParams.get('beforeId'));
+    if (!beforeIdParam.valid) {
+      return json({ ok: false, error: '无效的 beforeId 游标参数' }, 400);
+    }
+    if (beforeIdParam.present && !beforeParam.present) {
+      return json({ ok: false, error: '使用 beforeId 游标时必须同时传入 before 时间戳' }, 400);
+    }
+
+    const result = await searchVisitorMessages(env, {
+      q,
+      uid: rawUid,
+      from: fromParam.value,
+      to: toParam.value,
+      limit: limitParam.value ? Math.min(limitParam.value, MAX_SEARCH_LIMIT) : DEFAULT_SEARCH_LIMIT,
+      before: beforeParam.value,
+      beforeId: beforeIdParam.value,
+    });
+    return json({
+      ok: true,
+      d1Bound: true,
+      query: q,
+      items: result.items,
+      hasMore: result.hasMore,
+      nextCursor: result.nextCursor,
+    });
   }
 
   const config = await loadPanelConfig(env);
@@ -263,12 +383,43 @@ export async function handleApiRequest(request, env, url, ctx = null) {
     }
 
     // GET /api/admin/visitors/:userId/history — archived messages, photos (with signed URLs) & links
+    // Supports D1 cursor pagination (`before`/`beforeId`, `after`/`afterId`), search jump (`around=<msgId>`),
+    // and `messagesOnly=1` to skip re-signing photos/links on pagination scrolls.
     const historyMatch = path.match(/^\/api\/admin\/visitors\/(\d+)\/history$/);
     if (historyMatch && method === 'GET') {
       const uid = historyMatch[1];
+      const limitParam = parseStrictPositiveIntParam(url.searchParams.get('limit'));
+      if (!limitParam.valid) return json({ ok: false, error: '无效的 limit 参数' }, 400);
+      const beforeParam = parseStrictPositiveIntParam(url.searchParams.get('before'));
+      if (!beforeParam.valid) return json({ ok: false, error: '无效的 before 游标参数' }, 400);
+      const beforeIdParam = parseStrictPositiveIntParam(url.searchParams.get('beforeId'));
+      if (!beforeIdParam.valid) return json({ ok: false, error: '无效的 beforeId 游标参数' }, 400);
+      if (beforeIdParam.present && !beforeParam.present) {
+        return json({ ok: false, error: '使用 beforeId 游标时必须同时传入 before 时间戳' }, 400);
+      }
+      const afterParam = parseStrictPositiveIntParam(url.searchParams.get('after'));
+      if (!afterParam.valid) return json({ ok: false, error: '无效的 after 游标参数' }, 400);
+      const afterIdParam = parseStrictPositiveIntParam(url.searchParams.get('afterId'));
+      if (!afterIdParam.valid) return json({ ok: false, error: '无效的 afterId 游标参数' }, 400);
+      if (afterIdParam.present && !afterParam.present) {
+        return json({ ok: false, error: '使用 afterId 游标时必须同时传入 after 时间戳' }, 400);
+      }
+
+      const around = String(url.searchParams.get('around') || '').trim().slice(0, 128);
+      const messagesOnly = url.searchParams.get('messagesOnly') === '1';
+      const limit = limitParam.value ? Math.min(limitParam.value, MAX_HISTORY_PAGE_LIMIT) : 60;
+
       const [detail, history] = await Promise.all([
         getVisitorDetail(env, uid),
-        getVisitorHistory(env, uid, { limit: 60 }),
+        getVisitorHistory(env, uid, {
+          limit,
+          before: beforeParam.value,
+          beforeId: beforeIdParam.value,
+          after: afterParam.value,
+          afterId: afterIdParam.value,
+          around,
+          messagesOnly,
+        }),
       ]);
       if (!detail) return json({ ok: false, error: '未找到该访客记录' }, 404);
 
@@ -285,19 +436,21 @@ export async function handleApiRequest(request, env, url, ctx = null) {
       };
 
       const [signedPhotos, signedMessages] = await Promise.all([
-        Promise.all(
-          history.photos.map(async (p) => {
-            const urls = await signPhotoIds(p.fileId, p.thumbFileId);
-            return {
-              id: p.id,
-              caption: p.caption || '',
-              sender: p.sender || 'visitor',
-              at: p.at,
-              url: urls.url,
-              thumbUrl: urls.thumbUrl,
-            };
-          })
-        ),
+        messagesOnly
+          ? Promise.resolve([])
+          : Promise.all(
+              (history.photos || []).map(async (p) => {
+                const urls = await signPhotoIds(p.fileId, p.thumbFileId);
+                return {
+                  id: p.id,
+                  caption: p.caption || '',
+                  sender: p.sender || 'visitor',
+                  at: p.at,
+                  url: urls.url,
+                  thumbUrl: urls.thumbUrl,
+                };
+              })
+            ),
         Promise.all(
           (history.messages || []).map(async (m) => {
             const [urls, stickerSigned] = await Promise.all([
@@ -331,8 +484,14 @@ export async function handleApiRequest(request, env, url, ctx = null) {
         ok: true,
         visitor: detail,
         photos: signedPhotos,
-        links: history.links,
+        links: messagesOnly ? [] : history.links,
         messages: signedMessages,
+        d1Bound: Boolean(env.DB),
+        hasMore: Boolean(history.hasMore),
+        hasNewer: Boolean(history.hasNewer),
+        oldestCursor: history.oldestCursor || null,
+        newestCursor: history.newestCursor || null,
+        ...(history.aroundFound !== undefined ? { aroundFound: Boolean(history.aroundFound) } : {}),
       });
     }
 

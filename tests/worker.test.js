@@ -49,9 +49,11 @@ import {
 } from '../src/worker/bot.js';
 import { getLeaderboard, getMemberTicket, performCheckin, resolveLevel } from '../src/worker/checkin.js';
 import {
+  CHAT_RETENTION_DAYS_OPTIONS,
   DEFAULT_CONFIG,
   DEFAULT_NAV_ORDER,
   loadPanelConfig,
+  normalizeChatRetentionDays,
   normalizeNavOrder,
   resolveSupergroupId,
   sanitizeAdminConfig,
@@ -115,6 +117,7 @@ import {
   recallAdminVisitorMessage,
   recordVisitorExchange,
   rememberPendingSource,
+  searchVisitorMessages,
   updateVisitorMessageReaction,
   upsertVisitorProfile,
 } from '../src/worker/visitors.js';
@@ -123,9 +126,12 @@ import {
   normalizeSourceParam as normalizeClientSourceParam,
 } from '../web/src/lib/telegram.js';
 import {
+  MAX_SEARCH_QUERY_LEN,
+  RETENTION_DELETE_BATCH_SIZE,
   SCHEMA_VERSION,
   cleanupExpiredMaps,
   ensureSchema,
+  escapeLikePattern,
   getStorageStatus,
   getStore,
   migrateVisitor,
@@ -8232,5 +8238,565 @@ describe('Cloudflare D1 storage layer, schema idempotency, map fallback & daily 
     expect(tightBatch.ok).toBe(true);
     expect(tightBatch.batchMigrated).toBe(1);
     expect(tightBatch.finished).toBe(false);
+  });
+});
+
+describe('Cloudflare D1 Stage 2 store: cursor pagination, around jump, LIKE search & batched retention cleanup (v2.1)', () => {
+  it('paginates full D1 history with (created_at, rowid) cursors across same-ms ties, supports after & around with graceful fallback', async () => {
+    const kv = createMemoryKV();
+    const db = createD1Shim();
+    const env = { TOPIC_MAP: kv, DB: db };
+    const store = getStore(env);
+    const uid = '92101';
+
+    // Seed 25 messages including 5 messages sharing the exact same millisecond timestamp (T_TIE)
+    const baseMs = 1710000000000;
+    const tieMs = baseMs + 10_000;
+    const seededIds = [];
+    for (let i = 1; i <= 25; i += 1) {
+      const ts = i >= 10 && i <= 14 ? tieMs : baseMs + i * 1000;
+      const res = await store.appendExchange(uid, {
+        sender: i % 2 === 0 ? 'admin' : 'visitor',
+        nowMs: ts,
+        nowIso: new Date(ts).toISOString(),
+        text: `msg-${String(i).padStart(2, '0')}`,
+        pmMessageId: i,
+      });
+      seededIds.push(res.message.id);
+    }
+
+    // Walk backwards from newest to oldest in pages of 6 — must visit all 25 with zero skips or duplicates
+    const collected = [];
+    let cursor = null;
+    for (let page = 0; page < 10; page += 1) {
+      const res = await store.getHistory(
+        uid,
+        cursor
+          ? { limit: 6, before: cursor.ts, beforeId: cursor.id, messagesOnly: true }
+          : { limit: 6 }
+      );
+      collected.unshift(...res.messages);
+      if (page > 0) {
+        expect(res.photos).toEqual([]);
+        expect(res.links).toEqual([]);
+      }
+      if (!res.hasMore) break;
+      expect(res.oldestCursor).toBeTruthy();
+      expect(Number.isSafeInteger(res.oldestCursor.ts)).toBe(true);
+      expect(Number.isSafeInteger(res.oldestCursor.id)).toBe(true);
+      cursor = res.oldestCursor;
+    }
+
+    expect(collected.map((m) => m.text)).toEqual(
+      Array.from({ length: 25 }, (_, i) => `msg-${String(i + 1).padStart(2, '0')}`)
+    );
+
+    // Jump directly to `msg-12` (in the middle of the same-ms tie!) with limit = 7 -> 3 older + target + 3 newer
+    const targetId = seededIds[11]; // msg-12
+    const aroundRes = await store.getHistory(uid, { around: targetId, limit: 7 });
+    expect(aroundRes.aroundFound).toBe(true);
+    expect(aroundRes.hasMore).toBe(true);
+    expect(aroundRes.hasNewer).toBe(true);
+    expect(aroundRes.messages.map((m) => m.text)).toEqual([
+      'msg-09',
+      'msg-10',
+      'msg-11',
+      'msg-12',
+      'msg-13',
+      'msg-14',
+      'msg-15',
+    ]);
+
+    // Walk forward from `aroundRes.newestCursor` using `after` + `afterId` -> msg-16..msg-25
+    const afterPage1 = await store.getHistory(uid, {
+      limit: 6,
+      after: aroundRes.newestCursor.ts,
+      afterId: aroundRes.newestCursor.id,
+      messagesOnly: true,
+    });
+    expect(afterPage1.hasNewer).toBe(true);
+    expect(afterPage1.messages.map((m) => m.text)).toEqual([
+      'msg-16',
+      'msg-17',
+      'msg-18',
+      'msg-19',
+      'msg-20',
+      'msg-21',
+    ]);
+    const afterPage2 = await store.getHistory(uid, {
+      limit: 6,
+      after: afterPage1.newestCursor.ts,
+      afterId: afterPage1.newestCursor.id,
+      messagesOnly: true,
+    });
+    expect(afterPage2.hasNewer).toBe(false);
+    expect(afterPage2.messages.map((m) => m.text)).toEqual(['msg-22', 'msg-23', 'msg-24', 'msg-25']);
+
+    // Missing `around` ID (recalled or deleted) falls back cleanly to latest page with aroundFound: false
+    const missingAround = await store.getHistory(uid, { around: 'm_nonexistent_999', limit: 5 });
+    expect(missingAround.aroundFound).toBe(false);
+    expect(missingAround.hasNewer).toBe(false);
+    expect(missingAround.hasMore).toBe(true);
+    expect(missingAround.messages.map((m) => m.text)).toEqual(['msg-21', 'msg-22', 'msg-23', 'msg-24', 'msg-25']);
+
+    // KV mode ignores pagination cleanly and always reports hasMore: false, hasNewer: false
+    const kvOnlyEnv = { TOPIC_MAP: createMemoryKV() };
+    await getStore(kvOnlyEnv).appendExchange(uid, {
+      sender: 'visitor',
+      nowMs: baseMs,
+      nowIso: new Date(baseMs).toISOString(),
+      text: 'kv-only-msg',
+      pmMessageId: 1,
+    });
+    const kvHist = await getStore(kvOnlyEnv).getHistory(uid, { before: baseMs + 5000, limit: 10 });
+    expect(kvHist.messages).toHaveLength(1);
+    expect(kvHist.hasMore).toBe(false);
+    expect(kvHist.hasNewer).toBe(false);
+    expect(kvHist.oldestCursor).toBeNull();
+    expect(kvHist.newestCursor).toBeNull();
+  });
+
+  it('escapes %, _, and \\ in LIKE search, filters by uid/time/limit, excludes internal rows, and skips KV in KV mode', async () => {
+    expect(escapeLikePattern('100%_test\\path')).toBe('100\\%\\_test\\\\path');
+
+    const kv = createMemoryKV();
+    const db = createD1Shim();
+    const env = { TOPIC_MAP: kv, DB: db };
+    const store = getStore(env);
+
+    const t1 = Date.UTC(2026, 0, 10, 10, 0, 0);
+    const t2 = Date.UTC(2026, 1, 15, 10, 0, 0);
+    const t3 = Date.UTC(2026, 2, 20, 10, 0, 0);
+
+    await store.appendExchange('92201', {
+      sender: 'visitor',
+      nowMs: t1,
+      nowIso: new Date(t1).toISOString(),
+      text: '折扣 50% 优惠券',
+      pmMessageId: 1,
+    });
+    await store.appendExchange('92201', {
+      sender: 'admin',
+      nowMs: t2,
+      nowIso: new Date(t2).toISOString(),
+      text: '不要被 500 元和 foo_bar 搞混了',
+      pmMessageId: 2,
+    });
+    await store.appendExchange('92202', {
+      sender: 'visitor',
+      nowMs: t2,
+      nowIso: new Date(t2).toISOString(),
+      text: '路径 C:\\Users\\rose 以及 fooXbar',
+      pmMessageId: 3,
+    });
+    await store.appendExchange('92202', {
+      sender: 'visitor',
+      nowMs: t3,
+      nowIso: new Date(t3).toISOString(),
+      text: '',
+      mediaTag: '[文件 invoice_2026.pdf]',
+      pmMessageId: 4,
+    });
+    // Also insert internal archive-only `p_*` and `pm:*` rows containing the same text to ensure exclusion
+    await db.batch([
+      db
+        .prepare(
+          `INSERT INTO messages (id, uid, sender, text, photo_file_id, created_at)
+           VALUES ('p_legacy_1', '92201', 'visitor', '折扣 50% 归档图', 'file_old', ?)`
+        )
+        .bind(t1),
+      db
+        .prepare(
+          `INSERT INTO messages (id, uid, sender, text, pm_message_id, created_at)
+           VALUES ('pm:99', '92201', 'visitor', '折扣 50% 内部行', 99, ?)`
+        )
+        .bind(t1),
+    ]);
+
+    // `%` must match literal `%` only (NOT `500`) and must exclude `p_*` / `pm:*`
+    const pctRes = await store.searchMessages({ q: '50%' });
+    expect(pctRes.items.map((x) => x.text)).toEqual(['折扣 50% 优惠券']);
+
+    // `_` must match literal `_` only (NOT `fooXbar`)
+    const underRes = await store.searchMessages({ q: 'foo_bar' });
+    expect(underRes.items.map((x) => x.text)).toEqual(['不要被 500 元和 foo_bar 搞混了']);
+
+    // `\` must match literal backslash
+    const slashRes = await store.searchMessages({ q: 'C:\\Users' });
+    expect(slashRes.items.map((x) => x.text)).toEqual(['路径 C:\\Users\\rose 以及 fooXbar']);
+
+    // Matches `media_tag` filename
+    const fileRes = await store.searchMessages({ q: 'invoice_2026' });
+    expect(fileRes.items).toHaveLength(1);
+    expect(fileRes.items[0].mediaTag).toBe('[文件 invoice_2026.pdf]');
+
+    // `uid`, `from`, `to` filters + `limit` pagination
+    const rangeRes = await store.searchMessages({ q: 'foo', from: t2, to: t2, limit: 1 });
+    expect(rangeRes.items).toHaveLength(1);
+    expect(rangeRes.hasMore).toBe(true);
+    expect(rangeRes.nextCursor).toBeTruthy();
+
+    const rangePage2 = await store.searchMessages({
+      q: 'foo',
+      from: t2,
+      to: t2,
+      limit: 1,
+      before: rangeRes.nextCursor.before,
+      beforeId: rangeRes.nextCursor.beforeId,
+    });
+    expect(rangePage2.items).toHaveLength(1);
+    expect(rangePage2.hasMore).toBe(false);
+    expect(rangePage2.items[0].id).not.toBe(rangeRes.items[0].id);
+
+    const uidOnlyRes = await store.searchMessages({ q: 'foo', uid: '92201' });
+    expect(uidOnlyRes.items).toHaveLength(1);
+    expect(uidOnlyRes.items[0].uid).toBe('92201');
+
+    // Overlong query returns empty cleanly
+    const overlong = await store.searchMessages({ q: 'a'.repeat(MAX_SEARCH_QUERY_LEN + 1) });
+    expect(overlong.items).toEqual([]);
+
+    // KV store searchMessages returns supported: false with ZERO KV reads
+    const kvOnly = createMemoryKV();
+    const getSpy = vi.spyOn(kvOnly, 'get');
+    const listSpy = vi.spyOn(kvOnly, 'list');
+    const kvSearch = await getStore({ TOPIC_MAP: kvOnly }).searchMessages({ q: 'test' });
+    expect(kvSearch.supported).toBe(false);
+    expect(getSpy).not.toHaveBeenCalled();
+    expect(listSpy).not.toHaveBeenCalled();
+  });
+
+  it('validates chatRetentionDays whitelist and deletes expired D1 messages + paired message_links in bounded batches without KV writes or re-migration', async () => {
+    expect(CHAT_RETENTION_DAYS_OPTIONS).toEqual([0, 180, 365]);
+    expect(normalizeChatRetentionDays(0)).toBe(0);
+    expect(normalizeChatRetentionDays(180)).toBe(180);
+    expect(normalizeChatRetentionDays(365)).toBe(365);
+    expect(normalizeChatRetentionDays(1)).toBe(0);
+    expect(normalizeChatRetentionDays(30)).toBe(0);
+    expect(normalizeChatRetentionDays(-10)).toBe(0);
+    expect(normalizeChatRetentionDays('invalid')).toBe(0);
+
+    const kv = createMemoryKV();
+    const db = createD1Shim();
+    const env = { TOPIC_MAP: kv, DB: db };
+    const dayMs = 86400 * 1000;
+    const midnightUtc = Date.UTC(2026, 10, 27, 0, 2, 0);
+
+    // Seed legacy KV history for uid 92301 and migrate it into D1 so `migrated_visitors` is recorded
+    const oldTs = midnightUtc - 220 * dayMs; // 220 days old (>180d, <365d)
+    const recentTs = midnightUtc - 20 * dayMs; // 20 days old (kept under both 180d & 365d)
+    await kv.put(
+      'history:92301',
+      JSON.stringify({
+        photos: [],
+        links: [
+          {
+            id: 'l_legacy_old',
+            url: 'https://legacy-old.example.com',
+            snippet: 'legacy old',
+            sender: 'visitor',
+            at: new Date(oldTs).toISOString(),
+          },
+        ],
+        pmMessageIds: [],
+        messages: [
+          {
+            id: 'm_legacy_old',
+            sender: 'visitor',
+            text: '220天前的老消息',
+            mediaTag: '',
+            photoFileId: '',
+            thumbFileId: '',
+            pmMessageId: 10,
+            topicMsgId: null,
+            at: new Date(oldTs).toISOString(),
+          },
+        ],
+      })
+    );
+    await migrateVisitor(env, '92301');
+
+    // Insert 12 expired messages (each with a linked URL) + 2 recent messages (with a linked URL)
+    const store = getStore(env);
+    for (let i = 1; i <= 12; i += 1) {
+      const ts = midnightUtc - (200 + i) * dayMs;
+      await store.appendExchange('92301', {
+        sender: 'visitor',
+        nowMs: ts,
+        nowIso: new Date(ts).toISOString(),
+        text: `expired-${i} https://expired-${i}.example.com`,
+        urls: [`https://expired-${i}.example.com`],
+        pmMessageId: 100 + i,
+      });
+    }
+    // Also attach a slightly timestamp-skewed link directly to `m_legacy_old` to prove paired deletion by (uid, message_id)
+    await db
+      .prepare(
+        `INSERT INTO message_links (message_id, uid, url, snippet, sender, created_at)
+         VALUES ('m_legacy_old', '92301', 'https://skewed.example.com', 'skew', 'visitor', ?)`
+      )
+      .bind(recentTs)
+      .run();
+
+    for (let i = 1; i <= 2; i += 1) {
+      const ts = recentTs + i * 1000;
+      await store.appendExchange('92301', {
+        sender: 'admin',
+        nowMs: ts,
+        nowIso: new Date(ts).toISOString(),
+        text: `fresh-${i} https://fresh-${i}.example.com`,
+        urls: [`https://fresh-${i}.example.com`],
+        pmMessageId: 200 + i,
+      });
+    }
+
+    // Default config (`chatRetentionDays: 0`, permanent) -> deletes ZERO messages or links
+    const permRes = await cleanupExpiredMaps(env, midnightUtc, { retentionDays: 0 });
+    expect(permRes.deletedMessages).toBe(0);
+    expect(permRes.deletedLinks).toBe(0);
+    expect((await db.prepare(`SELECT COUNT(*) AS cnt FROM messages WHERE uid = '92301'`).first()).cnt).toBe(15);
+
+    // Batched cleanup with retentionDays = 180, batchSize = 5, maxBatches = 2 -> deletes 10 expired messages on Day 1
+    // (total expired = 13: m_legacy_old + 12 expired-*), leaving 3 expired + 2 fresh for Day 2
+    const day1 = await cleanupExpiredMaps(env, midnightUtc, {
+      retentionDays: 180,
+      batchSize: 5,
+      maxBatches: 2,
+    });
+    expect(day1.deletedMessages).toBe(10);
+    expect(day1.retentionBatches).toBe(2);
+    expect(day1.hasMoreExpired).toBe(true);
+    expect((await db.prepare(`SELECT COUNT(*) AS cnt FROM messages WHERE uid = '92301'`).first()).cnt).toBe(5);
+
+    // Day 2 scheduled cron with saved config `chatRetentionDays: 180` finishes the remaining 3 expired messages
+    // AND writes 0 KV keys during scheduled execution
+    await savePanelConfig(env, { pmBot: { chatRetentionDays: 180 } });
+    expect((await loadPanelConfig(env)).pmBot.chatRetentionDays).toBe(180);
+
+    const kvPutSpy = vi.spyOn(kv, 'put');
+    const kvDeleteSpy = vi.spyOn(kv, 'delete');
+    await worker.scheduled({ scheduledTime: midnightUtc }, env, null);
+
+    expect(kvPutSpy).not.toHaveBeenCalled();
+    expect(kvDeleteSpy).not.toHaveBeenCalled();
+
+    // Only the 2 fresh messages and 2 fresh links remain; even the skewed link on `m_legacy_old` is gone
+    const remMsgs = (await db.prepare(`SELECT text FROM messages WHERE uid = '92301' ORDER BY created_at ASC`).all())
+      .results;
+    const remLinks = (
+      await db.prepare(`SELECT url FROM message_links WHERE uid = '92301' ORDER BY created_at ASC`).all()
+    ).results;
+    expect(remMsgs.map((r) => r.text)).toEqual([
+      'fresh-1 https://fresh-1.example.com',
+      'fresh-2 https://fresh-2.example.com',
+    ]);
+    expect(remLinks.map((r) => r.url)).toEqual(['https://fresh-1.example.com', 'https://fresh-2.example.com']);
+
+    // KV legacy backup is untouched, AND reading history again does NOT re-import deleted expired messages
+    expect(await kv.get('history:92301')).toBeTruthy();
+    const afterCleanupHist = await getVisitorHistory(env, '92301');
+    expect(afterCleanupHist.messages).toHaveLength(2);
+    expect(afterCleanupHist.messages.every((m) => m.text.startsWith('fresh-'))).toBe(true);
+    expect(RETENTION_DELETE_BATCH_SIZE).toBe(500);
+  });
+
+  it('enforces admin auth, zero KV reads in KV mode, strict cursor validation, and around fallback on /api/admin/search and /history', async () => {
+    const botToken = '123456:STAGE2_API_TEST';
+    const kv = createMemoryKV();
+    const nowSec = Math.floor(Date.now() / 1000);
+    const adminInit = await signInitData(
+      { auth_date: String(nowSec), user: JSON.stringify({ id: 10001, first_name: 'Owner' }) },
+      botToken
+    );
+    const guestInit = await signInitData(
+      { auth_date: String(nowSec), user: JSON.stringify({ id: 20002, first_name: 'Guest' }) },
+      botToken
+    );
+
+    const kvOnlyEnv = { TOPIC_MAP: kv, BOT_TOKEN: botToken, ADMIN_IDS: '10001' };
+
+    // 1. Non-admin gets 403 on /api/admin/search with 0 KV reads
+    const kvGetSpy = vi.spyOn(kv, 'get');
+    const kvListSpy = vi.spyOn(kv, 'list');
+    const guestSearch = await worker.fetch(
+      new Request('https://panel.test/api/admin/search?q=hello', {
+        headers: { 'X-Telegram-Init-Data': guestInit },
+      }),
+      kvOnlyEnv
+    );
+    expect(guestSearch.status).toBe(403);
+    expect(kvGetSpy).not.toHaveBeenCalled();
+    expect(kvListSpy).not.toHaveBeenCalled();
+
+    // 2. KV-only mode returns 400 on /api/admin/search with ZERO KV reads
+    const kvModeSearch = await worker.fetch(
+      new Request('https://panel.test/api/admin/search?q=hello', {
+        headers: { 'X-Telegram-Init-Data': adminInit },
+      }),
+      kvOnlyEnv
+    );
+    expect(kvModeSearch.status).toBe(400);
+    const kvModeSearchJson = await kvModeSearch.json();
+    expect(kvModeSearchJson).toMatchObject({ ok: false, mode: 'kv', d1Bound: false });
+    expect(kvGetSpy).not.toHaveBeenCalled();
+    expect(kvListSpy).not.toHaveBeenCalled();
+
+    // 3. Seed D1 data for two visitors
+    const db = createD1Shim();
+    const d1Env = { ...kvOnlyEnv, DB: db };
+    await upsertVisitorProfile(d1Env, { id: 92401, first_name: 'Alice', username: 'alice_tg' });
+    await upsertVisitorProfile(d1Env, { id: 92402, first_name: 'Bob', username: 'bob_tg' });
+
+    const baseTs = Date.UTC(2026, 4, 1, 12, 0, 0);
+    const aliceIds = [];
+    for (let i = 1; i <= 8; i += 1) {
+      const ts = baseTs + i * 60_000;
+      const res = await getStore(d1Env).appendExchange('92401', {
+        sender: i % 2 === 0 ? 'admin' : 'visitor',
+        nowMs: ts,
+        nowIso: new Date(ts).toISOString(),
+        text: i === 3 ? '关于 100% 返现的说明' : `Alice 消息 #${i}`,
+        pmMessageId: i,
+      });
+      aliceIds.push(res.message.id);
+    }
+    await getStore(d1Env).appendExchange('92402', {
+      sender: 'visitor',
+      nowMs: baseTs + 9 * 60_000,
+      nowIso: new Date(baseTs + 9 * 60_000).toISOString(),
+      text: 'Bob 提到 100% 折扣和 1000 元',
+      pmMessageId: 1,
+    });
+
+    // 4. /api/admin/search validates empty q, overlong q, bad uid, bad cursor ints, and inverted date range
+    for (const badUrl of [
+      'https://panel.test/api/admin/search?q=',
+      `https://panel.test/api/admin/search?q=${'x'.repeat(MAX_SEARCH_QUERY_LEN + 1)}`,
+      'https://panel.test/api/admin/search?q=hi&uid=abc',
+      'https://panel.test/api/admin/search?q=hi&before=notanint',
+      'https://panel.test/api/admin/search?q=hi&beforeId=5',
+      'https://panel.test/api/admin/search?q=hi&before=1700000000000&beforeId=3.5',
+      'https://panel.test/api/admin/search?q=hi&from=2026-06-02&to=2026-06-01',
+    ]) {
+      const badRes = await worker.fetch(
+        new Request(badUrl, { headers: { 'X-Telegram-Init-Data': adminInit } }),
+        d1Env
+      );
+      expect(badRes.status).toBe(400);
+    }
+
+    // 5. Successful search enriches visitor displayName/username, escapes `%`, supports limit + cursor
+    const searchRes1 = await (
+      await worker.fetch(
+        new Request('https://panel.test/api/admin/search?q=100%25&limit=1', {
+          headers: { 'X-Telegram-Init-Data': adminInit },
+        }),
+        d1Env
+      )
+    ).json();
+    expect(searchRes1.ok).toBe(true);
+    expect(searchRes1.d1Bound).toBe(true);
+    expect(searchRes1.items).toHaveLength(1);
+    expect(searchRes1.items[0].uid).toBe('92402');
+    expect(searchRes1.items[0].visitor).toMatchObject({ userId: '92402', displayName: 'Bob', username: 'bob_tg' });
+    expect(searchRes1.hasMore).toBe(true);
+    expect(searchRes1.nextCursor).toBeTruthy();
+
+    const searchRes2 = await (
+      await worker.fetch(
+        new Request(
+          `https://panel.test/api/admin/search?q=100%25&limit=1&before=${searchRes1.nextCursor.before}&beforeId=${searchRes1.nextCursor.beforeId}`,
+          { headers: { 'X-Telegram-Init-Data': adminInit } }
+        ),
+        d1Env
+      )
+    ).json();
+    expect(searchRes2.ok).toBe(true);
+    expect(searchRes2.items).toHaveLength(1);
+    expect(searchRes2.items[0].uid).toBe('92401');
+    expect(searchRes2.items[0].id).toBe(aliceIds[2]);
+    expect(searchRes2.items[0].visitor).toMatchObject({ userId: '92401', displayName: 'Alice', username: 'alice_tg' });
+    expect(searchRes2.hasMore).toBe(false);
+
+    // 6. /api/admin/visitors/:uid/history validates integer cursor params
+    for (const badHistUrl of [
+      'https://panel.test/api/admin/visitors/92401/history?before=abc',
+      'https://panel.test/api/admin/visitors/92401/history?before=1700000000000&beforeId=-1',
+      'https://panel.test/api/admin/visitors/92401/history?beforeId=12',
+      'https://panel.test/api/admin/visitors/92401/history?after=12.34',
+      'https://panel.test/api/admin/visitors/92401/history?afterId=12',
+      'https://panel.test/api/admin/visitors/92401/history?limit=0',
+    ]) {
+      const badRes = await worker.fetch(
+        new Request(badHistUrl, { headers: { 'X-Telegram-Init-Data': adminInit } }),
+        d1Env
+      );
+      expect(badRes.status).toBe(400);
+    }
+
+    // 7. /history pagination + around jump + graceful around fallback
+    const page1 = await (
+      await worker.fetch(
+        new Request('https://panel.test/api/admin/visitors/92401/history?limit=3', {
+          headers: { 'X-Telegram-Init-Data': adminInit },
+        }),
+        d1Env
+      )
+    ).json();
+    expect(page1.ok).toBe(true);
+    expect(page1.d1Bound).toBe(true);
+    expect(page1.hasMore).toBe(true);
+    expect(page1.hasNewer).toBe(false);
+    expect(page1.messages.map((m) => m.id)).toEqual(aliceIds.slice(5, 8));
+    expect(Number.isSafeInteger(page1.oldestCursor?.ts)).toBe(true);
+    expect(Number.isSafeInteger(page1.oldestCursor?.id)).toBe(true);
+
+    const page2 = await (
+      await worker.fetch(
+        new Request(
+          `https://panel.test/api/admin/visitors/92401/history?limit=3&before=${page1.oldestCursor.ts}&beforeId=${page1.oldestCursor.id}&messagesOnly=1`,
+          { headers: { 'X-Telegram-Init-Data': adminInit } }
+        ),
+        d1Env
+      )
+    ).json();
+    expect(page2.ok).toBe(true);
+    expect(page2.hasMore).toBe(true);
+    expect(page2.messages.map((m) => m.id)).toEqual(aliceIds.slice(2, 5));
+
+    const jumped = await (
+      await worker.fetch(
+        new Request(
+          `https://panel.test/api/admin/visitors/92401/history?around=${encodeURIComponent(aliceIds[2])}&limit=3`,
+          { headers: { 'X-Telegram-Init-Data': adminInit } }
+        ),
+        d1Env
+      )
+    ).json();
+    expect(jumped.ok).toBe(true);
+    expect(jumped.aroundFound).toBe(true);
+    expect(jumped.hasMore).toBe(true);
+    expect(jumped.hasNewer).toBe(true);
+    expect(jumped.messages.map((m) => m.id)).toEqual(aliceIds.slice(1, 4));
+
+    const jumpedMissing = await (
+      await worker.fetch(
+        new Request('https://panel.test/api/admin/visitors/92401/history?around=m_recalled_404&limit=3', {
+          headers: { 'X-Telegram-Init-Data': adminInit },
+        }),
+        d1Env
+      )
+    ).json();
+    expect(jumpedMissing.ok).toBe(true);
+    expect(jumpedMissing.aroundFound).toBe(false);
+    expect(jumpedMissing.hasNewer).toBe(false);
+    expect(jumpedMissing.messages.map((m) => m.id)).toEqual(aliceIds.slice(5, 8));
+
+    // Also direct call to searchVisitorMessages in KV mode stays zero-KV-read
+    const directKv = createMemoryKV();
+    const directGetSpy = vi.spyOn(directKv, 'get');
+    const directSearch = await searchVisitorMessages({ TOPIC_MAP: directKv }, { q: 'anything' });
+    expect(directSearch.supported).toBe(false);
+    expect(directGetSpy).not.toHaveBeenCalled();
   });
 });

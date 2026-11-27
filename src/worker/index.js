@@ -307,8 +307,12 @@ export default {
     ];
     if (env?.DB && shouldRunDailyCleanup(scheduledTime)) {
       tasks.push(
-        cleanupExpiredMaps(env, scheduledTime).catch((err) => {
-          console.error('D1 map cleanup cron error:', err);
+        (async () => {
+          const cfg = env.TOPIC_MAP ? await loadPanelConfig(env).catch(() => null) : null;
+          const retentionDays = Number(cfg?.pmBot?.chatRetentionDays || 0);
+          return cleanupExpiredMaps(env, scheduledTime, { retentionDays });
+        })().catch((err) => {
+          console.error('D1 daily cleanup cron error:', err);
         })
       );
     }

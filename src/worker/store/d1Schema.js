@@ -33,6 +33,7 @@ const SCHEMA_DDL_STATEMENTS = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_messages_uid_time ON messages(uid, created_at)`,
   `CREATE INDEX IF NOT EXISTS idx_messages_uid_pm ON messages(uid, pm_message_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_messages_time ON messages(created_at)`,
   `CREATE TABLE IF NOT EXISTS message_links (
     message_id TEXT NOT NULL,
     uid        TEXT NOT NULL,
@@ -42,6 +43,7 @@ const SCHEMA_DDL_STATEMENTS = [
     created_at INTEGER NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS idx_links_uid_time ON message_links(uid, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_links_time ON message_links(created_at)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_links_uniq ON message_links(uid, message_id, url)`,
   `CREATE TABLE IF NOT EXISTS topic_map (
     group_id      TEXT NOT NULL,
