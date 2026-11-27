@@ -2,6 +2,7 @@
 // Unifies `messages`, `photos`, and `pmMessageIds` into `messages` (+ `message_links` for URLs),
 // reconstructs the exact v1.11.0 response structures, and never deletes legacy KV keys.
 
+import { CHAT_RETENTION_DAYS_OPTIONS, normalizeChatRetentionDays } from '../config.js';
 import { ensureSchema } from './d1Schema.js';
 import {
   DM_MAP_TTL_SECONDS,
@@ -21,7 +22,8 @@ export const MAX_SEARCH_LIMIT = 50;
 export const MAX_SEARCH_QUERY_LEN = 100;
 export const RETENTION_DELETE_BATCH_SIZE = 500;
 export const RETENTION_MAX_BATCHES_PER_RUN = 5;
-export const ALLOWED_CHAT_RETENTION_DAYS = [0, 180, 365];
+export const ALLOWED_CHAT_RETENTION_DAYS = CHAT_RETENTION_DAYS_OPTIONS;
+export { normalizeChatRetentionDays };
 
 // Excludes internal archive-only photo rows (`p_*`, `p:*`) and non-bubble PM tracking rows (`pm:*`)
 // without using SQL `LIKE` `_` single-character wildcards.
@@ -43,11 +45,10 @@ export function escapeLikePattern(raw) {
   return String(raw || '').replace(/[\\%_]/g, (ch) => `\\${ch}`);
 }
 
-export function normalizeChatRetentionDays(raw) {
-  const n = Number(raw);
-  return ALLOWED_CHAT_RETENTION_DAYS.includes(n) ? n : 0;
-}
-
+// Note: `messages` has a composite TEXT primary key `(uid, id)`, so `rowid` here is SQLite's
+// implicit rowid used strictly as a short-lived same-millisecond pagination tie-breaker.
+// SQLite VACUUM can renumber implicit rowids, which is low-risk on D1 (user VACUUM is not exposed)
+// and cursors are never persisted across sessions.
 function buildHistoryCursors(chronologicalRows = []) {
   if (!chronologicalRows.length) {
     return { oldestCursor: null, newestCursor: null };

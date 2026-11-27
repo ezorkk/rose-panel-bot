@@ -8917,6 +8917,27 @@ describe('Cloudflare D1 Stage 2 store: cursor pagination, around jump, LIKE sear
     expect(afterM0Merged.messages.slice(0, 3).map((m) => m.id)).toEqual(['m_9', 'm_11', 'm_12']);
     expect(afterM0Merged.messages).toHaveLength(60);
     expect(afterM0Merged.oldestCursor).toEqual({ ts: 1710000009000, id: 9 });
+    expect(afterM0Merged.prepended).toBe(false);
+
+    // 3b. Suffix-subset expansion (e.g. jumped via `around` to a recent message 5 from end,
+    //     returning 34 msgs [m_67..m_100], then 6s poll fetches latest 60 [m_41..m_100]):
+    //     must flag `prepended: true` so the chat stream preserves visual scrollTop
+    const aroundNearEndState = {
+      messages: Array.from({ length: 34 }, (_, i) => makeMsg(i + 67)), // m_67 .. m_100
+      hasMore: true,
+      oldestCursor: { ts: 1710000067000, id: 67 },
+      newestCursor: { ts: 1710000100000, id: 100 },
+    };
+    const expandedPoll = mergeLatestHistoryTail(aroundNearEndState, {
+      messages: Array.from({ length: 60 }, (_, i) => makeMsg(i + 41)), // m_41 .. m_100
+      hasMore: true,
+      oldestCursor: { ts: 1710000041000, id: 41 },
+      newestCursor: { ts: 1710000100000, id: 100 },
+    });
+    expect(expandedPoll.messages).toHaveLength(60);
+    expect(expandedPoll.messages[0].id).toBe('m_41');
+    expect(expandedPoll.prepended).toBe(true);
+    expect(expandedPoll.oldestCursor).toEqual({ ts: 1710000041000, id: 41 });
 
     // 4. Complete conversation (`hasMore: false`): recall of oldest message m_1 removes it cleanly
     const smallState = {

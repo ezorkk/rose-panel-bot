@@ -31,8 +31,25 @@ export function mergeLatestHistoryTail(existingState = {}, latestRes = {}) {
       hasMore: false,
       oldestCursor: null,
       newestCursor: null,
+      prepended: false,
     };
   }
+
+  const computePrepended = (nextMessages) => {
+    if (existing.length === 0 || nextMessages.length === 0) return false;
+    const nextIndexById = new Map();
+    for (let i = 0; i < nextMessages.length; i += 1) {
+      if (nextMessages[i]?.id) nextIndexById.set(nextMessages[i].id, i);
+    }
+    for (let i = 0; i < existing.length; i += 1) {
+      const idxInNext = nextIndexById.get(existing[i]?.id);
+      if (idxInNext !== undefined) {
+        // More messages now sit above the first surviving message than before -> content was inserted above
+        return idxInNext > i;
+      }
+    }
+    return false;
+  };
 
   // Server returned the entire conversation (no older messages exist).
   if (!latestHasMore || existing.length === 0) {
@@ -41,6 +58,7 @@ export function mergeLatestHistoryTail(existingState = {}, latestRes = {}) {
       hasMore: latestHasMore,
       oldestCursor: latestOldest,
       newestCursor: latestNewest,
+      prepended: computePrepended(latest),
     };
   }
 
@@ -49,11 +67,13 @@ export function mergeLatestHistoryTail(existingState = {}, latestRes = {}) {
   // `firstLatestIdx` is guaranteed older than `latest[0]` (even with identical millisecond timestamps).
   const firstLatestIdx = existing.findIndex((m) => m?.id === latest[0]?.id);
   if (firstLatestIdx > 0) {
+    const mergedMessages = [...existing.slice(0, firstLatestIdx), ...latest];
     return {
-      messages: [...existing.slice(0, firstLatestIdx), ...latest],
+      messages: mergedMessages,
       hasMore: Boolean(existingState?.hasMore),
       oldestCursor: existingState?.oldestCursor || latestOldest,
       newestCursor: latestNewest,
+      prepended: false,
     };
   }
   if (firstLatestIdx === 0) {
@@ -62,11 +82,13 @@ export function mergeLatestHistoryTail(existingState = {}, latestRes = {}) {
       hasMore: latestHasMore,
       oldestCursor: latestOldest,
       newestCursor: latestNewest,
+      prepended: false,
     };
   }
 
   // `latest[0]` is not in `existing` (e.g. `existing[0]` was deleted on the server so the 60-message tail
-  // shifted backward to an unloaded older message `M-1`, or >60 brand-new messages arrived).
+  // shifted backward to an unloaded older message `M-1`, or `existing` was a shorter `around` window
+  // near the bottom, or >60 brand-new messages arrived).
   // Only retain messages from `existing` strictly older than `latest[0]`'s timestamp (`latestStartTs`),
   // dropping any deleted boundary messages that were >= `latestStartTs`.
   const latestIds = new Set(latest.map((m) => m?.id).filter(Boolean));
@@ -79,11 +101,13 @@ export function mergeLatestHistoryTail(existingState = {}, latestRes = {}) {
       return Number.isFinite(ts) && ts < latestStartTs;
     });
     if (strictlyOlder.length > 0) {
+      const mergedMessages = [...strictlyOlder, ...latest];
       return {
-        messages: [...strictlyOlder, ...latest],
+        messages: mergedMessages,
         hasMore: Boolean(existingState?.hasMore),
         oldestCursor: existingState?.oldestCursor || latestOldest,
         newestCursor: latestNewest,
+        prepended: false,
       };
     }
   }
@@ -93,6 +117,7 @@ export function mergeLatestHistoryTail(existingState = {}, latestRes = {}) {
     hasMore: latestHasMore,
     oldestCursor: latestOldest,
     newestCursor: latestNewest,
+    prepended: computePrepended(latest),
   };
 }
 

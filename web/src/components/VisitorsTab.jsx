@@ -113,11 +113,14 @@ export default function VisitorsTab({
   const [loading, setLoading] = useState(true);
 
   // D1 full-history message search state (strictly disabled & hidden when d1Bound === false)
+  // Defaults to last 30 days so LIKE scans stay bounded by `idx_messages_time`, and triggers only on
+  // explicit Enter/Search click (never mid-keystroke or mid-IME composition) to protect D1 row-read quota.
   const [searchMode, setSearchMode] = useState('visitors'); // 'visitors' | 'messages'
   const [msgQuery, setMsgQuery] = useState('');
+  const [submittedMsgQuery, setSubmittedMsgQuery] = useState('');
   const [msgUidFilter, setMsgUidFilter] = useState('');
   const [msgUidLabel, setMsgUidLabel] = useState('');
-  const [msgTimeRange, setMsgTimeRange] = useState('all'); // 'all' | '7d' | '30d' | 'custom'
+  const [msgTimeRange, setMsgTimeRange] = useState('30d'); // '30d' | '7d' | 'all' | 'custom'
   const [msgDateFrom, setMsgDateFrom] = useState('');
   const [msgDateTo, setMsgDateTo] = useState('');
   const [msgResults, setMsgResults] = useState([]);
@@ -170,17 +173,14 @@ export default function VisitorsTab({
   const historySeqRef = useRef(0);
   const historyInFlightRef = useRef(0);
   const hasNewerRef = useRef(false);
-  const messagesRef = useRef([]);
+  const historyStateRef = useRef(EMPTY_HISTORY);
   const scrollIntentRef = useRef({ type: 'none' });
   const highlightTimerRef = useRef(null);
 
   useEffect(() => {
     hasNewerRef.current = Boolean(historyData.hasNewer);
-  }, [historyData.hasNewer]);
-
-  useEffect(() => {
-    messagesRef.current = Array.isArray(historyData.messages) ? historyData.messages : [];
-  }, [historyData.messages]);
+    historyStateRef.current = historyData;
+  }, [historyData]);
 
   useEffect(() => {
     if (!d1Bound && searchMode === 'messages') {
@@ -258,27 +258,22 @@ export default function VisitorsTab({
     return () => clearTimeout(timer);
   }, [search, filter]);
 
-  const computeSearchBounds = () => {
-    const now = Date.now();
-    if (msgTimeRange === '7d') return { from: now - 7 * 86400 * 1000, to: null };
-    if (msgTimeRange === '30d') return { from: now - 30 * 86400 * 1000, to: null };
-    if (msgTimeRange === 'custom') {
-      const from = msgDateFrom ? new Date(`${msgDateFrom}T00:00:00`).getTime() : null;
-      const to = msgDateTo ? new Date(`${msgDateTo}T23:59:59.999`).getTime() : null;
-      return {
-        from: Number.isFinite(from) && from > 0 ? Math.trunc(from) : null,
-        to: Number.isFinite(to) && to > 0 ? Math.trunc(to) : null,
-      };
-    }
-    return { from: null, to: null };
-  };
-
-  const runMessageSearch = async ({ append = false, cursor = null } = {}) => {
+  const runMessageSearch = async ({
+    append = false,
+    cursor = null,
+    queryOverride = undefined,
+    uidOverride = undefined,
+    timeRangeOverride = undefined,
+    dateFromOverride = undefined,
+    dateToOverride = undefined,
+  } = {}) => {
     // Strictly never call `/api/admin/search` when D1 is not bound
     if (!d1Bound) return;
-    const trimmed = msgQuery.trim();
+    const rawQuery = queryOverride !== undefined ? queryOverride : msgQuery;
+    const trimmed = String(rawQuery || '').trim();
     if (!trimmed) {
       searchSeqRef.current += 1;
+      setSubmittedMsgQuery('');
       setMsgResults([]);
       setMsgHasMore(false);
       setMsgNextCursor(null);
@@ -287,7 +282,25 @@ export default function VisitorsTab({
       return;
     }
 
-    const { from, to } = computeSearchBounds();
+    const activeUid = uidOverride !== undefined ? uidOverride : msgUidFilter;
+    const activeRange = timeRangeOverride !== undefined ? timeRangeOverride : msgTimeRange;
+    const activeFromDate = dateFromOverride !== undefined ? dateFromOverride : msgDateFrom;
+    const activeToDate = dateToOverride !== undefined ? dateToOverride : msgDateTo;
+
+    const now = Date.now();
+    let from = null;
+    let to = null;
+    if (activeRange === '7d') {
+      from = now - 7 * 86400 * 1000;
+    } else if (activeRange === '30d') {
+      from = now - 30 * 86400 * 1000;
+    } else if (activeRange === 'custom') {
+      const f = activeFromDate ? new Date(`${activeFromDate}T00:00:00`).getTime() : null;
+      const t = activeToDate ? new Date(`${activeToDate}T23:59:59.999`).getTime() : null;
+      from = Number.isFinite(f) && f > 0 ? Math.trunc(f) : null;
+      to = Number.isFinite(t) && t > 0 ? Math.trunc(t) : null;
+    }
+
     if (from && to && from > to) {
       setMsgSearchError('开始日期不能晚于结束日期');
       return;
@@ -300,10 +313,11 @@ export default function VisitorsTab({
         setMsgLoadingMore(true);
       } else {
         setMsgSearching(true);
+        setSubmittedMsgQuery(trimmed);
       }
       const url = buildSearchUrl({
         q: trimmed,
-        uid: msgUidFilter,
+        uid: activeUid,
         from,
         to,
         limit: 30,
@@ -334,21 +348,20 @@ export default function VisitorsTab({
     }
   };
 
+  // Only clear results when input is emptied; NEVER auto-search on every keystroke or during IME
+  // composition so `LIKE '%q%'` never burns D1 free-tier row reads while typing.
   useEffect(() => {
-    if (!d1Bound || searchMode !== 'messages') return undefined;
-    const trimmed = msgQuery.trim();
-    if (!trimmed) {
+    if (!d1Bound || searchMode !== 'messages') return;
+    if (!msgQuery.trim()) {
       searchSeqRef.current += 1;
+      setSubmittedMsgQuery('');
       setMsgResults([]);
       setMsgHasMore(false);
       setMsgNextCursor(null);
       setMsgSearchError('');
       setMsgHasSearched(false);
-      return undefined;
     }
-    const timer = setTimeout(() => runMessageSearch({ append: false }), 260);
-    return () => clearTimeout(timer);
-  }, [d1Bound, searchMode, msgQuery, msgUidFilter, msgTimeRange, msgDateFrom, msgDateTo]);
+  }, [d1Bound, searchMode, msgQuery]);
 
   const loadVisitorHistory = async (uid, { silent = false, force = false } = {}) => {
     const targetUid = String(uid);
@@ -370,12 +383,23 @@ export default function VisitorsTab({
       if (silent) {
         const el = chatStreamRef.current;
         const wasNearBottom = !el || el.scrollHeight - el.scrollTop - el.clientHeight < 90;
+        const currentSnapshot = historyStateRef.current;
+        const currentMessages = Array.isArray(currentSnapshot?.messages) ? currentSnapshot.messages : [];
         const incomingLastId = res.messages?.[res.messages.length - 1]?.id || '';
         const hasNewTailMsg = Boolean(
-          incomingLastId && !messagesRef.current.some((m) => m.id === incomingLastId)
+          incomingLastId && !currentMessages.some((m) => m.id === incomingLastId)
         );
+        const previewMerged = mergeLatestHistoryTail(currentSnapshot, res);
         if (wasNearBottom && hasNewTailMsg) {
           scrollIntentRef.current = { type: 'bottom' };
+        } else if (previewMerged.prepended && el) {
+          // If the polled latest window expanded upward (e.g. after jumping via `around` to a recent
+          // message within the last 30 items), preserve visual scrollTop so the highlighted bubble stays put.
+          scrollIntentRef.current = {
+            type: 'preserve-top',
+            prevScrollHeight: el.scrollHeight,
+            prevScrollTop: el.scrollTop,
+          };
         }
         setHistoryData((prev) => {
           const merged = mergeLatestHistoryTail(prev, res);
@@ -513,7 +537,7 @@ export default function VisitorsTab({
     setReplyText('');
     setReplyPhoto(null);
     setHighlightMsgId('');
-    setHighlightQuery(msgQuery.trim());
+    setHighlightQuery(submittedMsgQuery || msgQuery.trim());
     setHistoryData(EMPTY_HISTORY);
     setHistoryLoading(true);
     haptic('light');
@@ -1009,36 +1033,51 @@ export default function VisitorsTab({
               maxLength={100}
               onChange={(e) => setMsgQuery(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+                if (e.key === 'Enter' && !e.nativeEvent.isComposing && e.keyCode !== 229) {
                   e.preventDefault();
                   runMessageSearch({ append: false });
                 }
               }}
-              placeholder="搜索历史聊天关键词（支持中英文、文件名）"
+              placeholder="输入关键词按回车或点搜索…"
             />
             {msgQuery && (
               <button
                 type="button"
+                aria-label="清空搜索词"
                 onClick={() => setMsgQuery('')}
                 style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}
               >
                 <X size={15} />
               </button>
             )}
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              style={{ padding: '4px 11px', height: 28, fontSize: 12, flexShrink: 0 }}
+              disabled={msgSearching || !msgQuery.trim()}
+              onClick={() => runMessageSearch({ append: false })}
+            >
+              搜索
+            </button>
           </div>
 
           <div className="chip-row" style={{ marginBottom: msgTimeRange === 'custom' || msgUidFilter ? 8 : 10 }}>
             {[
-              { id: 'all', label: '全部时间' },
-              { id: '7d', label: '近 7 天' },
               { id: '30d', label: '近 30 天' },
+              { id: '7d', label: '近 7 天' },
+              { id: 'all', label: '全部时间' },
               { id: 'custom', label: '自定义日期' },
             ].map((item) => (
               <button
                 key={item.id}
                 type="button"
                 className={`chip ${msgTimeRange === item.id ? 'active' : ''}`}
-                onClick={() => setMsgTimeRange(item.id)}
+                onClick={() => {
+                  setMsgTimeRange(item.id);
+                  if (item.id !== 'custom' && msgHasSearched && msgQuery.trim()) {
+                    runMessageSearch({ append: false, timeRangeOverride: item.id });
+                  }
+                }}
               >
                 {item.id === 'custom' && <Calendar size={12} style={{ marginRight: 4, verticalAlign: -1 }} />}
                 {item.label}
@@ -1076,6 +1115,9 @@ export default function VisitorsTab({
                 setMsgUidFilter(nextUid);
                 const found = visitors.find((v) => String(v.userId) === nextUid);
                 setMsgUidLabel(found ? found.displayName : '');
+                if (msgHasSearched && msgQuery.trim()) {
+                  runMessageSearch({ append: false, uidOverride: nextUid });
+                }
               }}
             >
               <option value="">全部访客</option>
@@ -1097,6 +1139,9 @@ export default function VisitorsTab({
                 onClick={() => {
                   setMsgUidFilter('');
                   setMsgUidLabel('');
+                  if (msgHasSearched && msgQuery.trim()) {
+                    runMessageSearch({ append: false, uidOverride: '' });
+                  }
                 }}
               >
                 <X size={13} /> 清除访客
@@ -1127,12 +1172,12 @@ export default function VisitorsTab({
             </div>
           )}
 
-          {!msgQuery.trim() ? (
+          {!msgHasSearched && !msgSearching ? (
             <div className="card empty-state">
               <div style={{ fontSize: 26, marginBottom: 6 }}>🔍</div>
-              <div style={{ fontWeight: 600, color: 'var(--text)' }}>全文检索 D1 聊天记录</div>
+              <div style={{ fontWeight: 600, color: 'var(--text)' }}>检索 D1 聊天记录</div>
               <div style={{ marginTop: 6, lineHeight: 1.55 }}>
-                输入关键词即可跨访客搜索完整历史消息，点击命中结果直接定位到对应聊天位置。
+                输入关键词后按回车或点「搜索」即可查询（默认先搜近 30 天，可切换全部时间），点击结果直接定位到对应气泡。
               </div>
               {onOpenSettings && (
                 <div style={{ marginTop: 10, fontSize: 11.5, color: 'var(--text-muted)' }}>
@@ -1156,9 +1201,9 @@ export default function VisitorsTab({
           ) : msgHasSearched && msgResults.length === 0 ? (
             <div className="card empty-state">
               <div style={{ fontSize: 26, marginBottom: 6 }}>🪹</div>
-              <div>未找到包含「{msgQuery.trim()}」的聊天记录</div>
+              <div>未找到包含「{submittedMsgQuery || msgQuery.trim()}」的聊天记录</div>
               <div style={{ marginTop: 6, fontSize: 12, lineHeight: 1.5 }}>
-                可尝试放宽时间范围或清除访客筛选；若部分老访客尚未迁移到 D1，可前往{' '}
+                可尝试切换到「全部时间」或清除访客筛选；若部分老访客尚未迁移到 D1，可前往{' '}
                 {onOpenSettings ? (
                   <button
                     type="button"
@@ -1215,7 +1260,7 @@ export default function VisitorsTab({
                         )}
                       </div>
                       <div className="search-hit-snippet">
-                        {renderHighlightedText(snippetText, msgQuery.trim())}
+                        {renderHighlightedText(snippetText, submittedMsgQuery || msgQuery.trim())}
                       </div>
                     </div>
                     <div style={{ textAlign: 'right', flexShrink: 0, fontSize: 11, color: 'var(--text-muted)' }}>
@@ -1231,7 +1276,13 @@ export default function VisitorsTab({
                     type="button"
                     className="btn btn-subtle btn-sm btn-block"
                     disabled={msgLoadingMore}
-                    onClick={() => runMessageSearch({ append: true, cursor: msgNextCursor })}
+                    onClick={() =>
+                      runMessageSearch({
+                        append: true,
+                        cursor: msgNextCursor,
+                        queryOverride: submittedMsgQuery || msgQuery,
+                      })
+                    }
                   >
                     {msgLoadingMore ? (
                       <>
