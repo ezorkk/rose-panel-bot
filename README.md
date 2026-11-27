@@ -117,7 +117,7 @@
 
 ---
 
-## 🧩 模块化按需选配
+## <img src="docs/assets/stickers/tulip.webp" width="22" height="22" align="absmiddle" /> 模块化按需选配
 
 未启用的模块完全隐藏、零额外请求，想只当「轻量化防广告私聊机器人」或「全功能个人主页 + 探针」都可以：
 
@@ -132,11 +132,12 @@
 ---
 
 <a id="deploy"></a>
-## 🚀 极简部署（免费上线）
+<a id="-极简部署免费上线"></a>
+## <img src="docs/assets/stickers/comet.webp" width="22" height="22" align="absmiddle" /> 极简部署（免费上线）
 
 > **🐣 第一次申请 Telegram 机器人？** 看完下面「1 分钟备齐 4 样」直接按 4 步走即可，或打开 **[零基础保姆教程](docs/SETUP_GUIDE.md)** 看更细的图文指引。
 
-### 🎒 动手前：1 分钟先备齐这 4 样（其他全部自动建好）
+### <img src="docs/assets/stickers/bag.webp" width="20" height="20" align="absmiddle" /> 动手前：1 分钟先备齐这 4 样（其他全部自动建好）
 
 | 要准备的东西 | Cloudflare 变量类型 | 从哪里拿（1 分钟备齐） | ⚠️ 避坑重点 |
 | :--- | :---: | :--- | :--- |
@@ -238,7 +239,7 @@ npx wrangler dev --ip 127.0.0.1 --port 8787 --persist-to ./.wrangler/state --sho
 ---
 
 <a id="upgrade"></a>
-## 🔄 老用户如何升级到最新版（KV 数据保留，聊天数据自动迁移到 D1）
+## <img src="docs/assets/stickers/butterfly.webp" width="22" height="22" align="absmiddle" /> 老用户如何升级到最新版（KV 数据保留，聊天数据自动迁移到 D1）
 
 > **✅ KV 数据 100% 保留不删！** 升级只更新代码，原有的名片、小站、探针、访客与通知群绑定 **100% 原样保留**（`wrangler.toml` 已开启 `keep_vars = true`，重部署不误清普通变量）；绑定 D1 数据库（`DB`）后，聊天记录会自动按需迁移到 D1（也可在 **⚙️ 设置 → 版本更新 → 数据存储** 点「一键迁移」），未绑定 D1 则继续走原有 KV，完全不受影响。  
 > **⚠️ 两点注意**：① **切勿新建 Worker 或重新点击一键部署按钮**，否则会建出全新的空实例；② **同一 Cloudflare 账号下部署了 2 个及以上实例**时，请在各自仓库 `wrangler.toml` 中修改 `database_name`（如 `rose-panel-bot-2`）以免共用同一个 D1 库。
@@ -252,7 +253,7 @@ npx wrangler dev --ip 127.0.0.1 --port 8787 --persist-to ./.wrangler/state --sho
 
 ---
 
-## ⚙️ 环境变量一览
+## <img src="docs/assets/stickers/lock.webp" width="22" height="22" align="absmiddle" /> 环境变量一览
 
 | 变量名 | 类型 | 必填 | 说明 |
 | :--- | :--- | :---: | :--- |
@@ -270,7 +271,7 @@ npx wrangler dev --ip 127.0.0.1 --port 8787 --persist-to ./.wrangler/state --sho
 
 ---
 
-## 🤖 常用指令
+## <img src="docs/assets/stickers/ok.webp" width="22" height="22" align="absmiddle" /> 常用指令
 
 - **通用**：`/start` · `/panel` · `/me` · `/checkin`（群社区模式）· `/rank`（群社区模式）
 - **站长私聊**：`/set`（秒设动态贴纸主徽章）· `/add`（录入收藏表情包看图验证题）· `/resetbadge` · `/cancel`；未绑群走私聊直推时，引用推送消息也可直接发 `/del` `/info` `/ban` `/unban` `/trust` `/reset` `/close` `/open`
@@ -278,14 +279,14 @@ npx wrangler dev --ip 127.0.0.1 --port 8787 --persist-to ./.wrangler/state --sho
 
 ---
 
-## 🙏 致谢与技术栈
+## <img src="docs/assets/stickers/hug.webp" width="22" height="22" align="absmiddle" /> 致谢与技术栈
 
 - 协议适配与兼容：[Komari Monitor](https://github.com/komari-monitor/komari) · [Combot Anti-Spam (CAS)](https://cas.chat/) · [jikssha/telegram_private_chatbot](https://github.com/jikssha/telegram_private_chatbot)
 - 开源基础设施：[Cloudflare Workers](https://workers.cloudflare.com/) · [Telegram Mini Apps](https://core.telegram.org/bots/webapps) · [React](https://react.dev/) · [Vite](https://vitejs.dev/) · [Lucide Icons](https://lucide.dev/) · [lottie-web](https://github.com/airbnb/lottie-web)
 
 ---
 
-## 💬 反馈与建议
+## <img src="docs/assets/stickers/flower.webp" width="22" height="22" align="absmiddle" /> 反馈与建议
 
 遇到部署问题、Bug，或者有任何使用体验上的改进建议，欢迎前往 **[GitHub Issues](https://github.com/mango0114/rose-panel-bot/issues/new/choose)** 提交反馈（支持 Bug 反馈、功能建议与使用问题与建议，提交时请勿粘贴 `BOT_TOKEN`、`WEBHOOK_SECRET` 等隐私凭证）。
 
@@ -315,7 +316,7 @@ npx wrangler dev --ip 127.0.0.1 --port 8787 --persist-to ./.wrangler/state --sho
 
 ---
 
-## 🌟 Star History
+## <img src="docs/assets/stickers/star.webp" width="22" height="22" align="absmiddle" /> Star History
 
 <a href="https://www.star-history.com/#mango0114/rose-panel-bot&Date">
  <picture>

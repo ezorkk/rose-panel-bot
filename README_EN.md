@@ -117,7 +117,7 @@ Switch anytime inside **⚙️ Settings → 防骚扰验证 (Anti-Spam Verificat
 
 ---
 
-## 🧩 Modular Add-Ons
+## <img src="docs/assets/stickers/tulip.webp" width="22" height="22" align="absmiddle" /> Modular Add-Ons
 
 Unused modules stay completely hidden and add zero overhead:
 
@@ -132,11 +132,11 @@ Unused modules stay completely hidden and add zero overhead:
 ---
 
 <a id="deploy"></a>
-## 🚀 Fast Deployment (Free on Cloudflare)
+## <img src="docs/assets/stickers/comet.webp" width="22" height="22" align="absmiddle" /> Fast Deployment (Free on Cloudflare)
 
 > **🐣 First Telegram bot?** Grab the 4 items below first, then follow the 4 steps (around **10–20 minutes** from scratch, or check the **[Beginner Guide (ZH)](docs/SETUP_GUIDE.md)**).
 
-### 🎒 Before You Start: 4 Values Ready in 1 Minute (Everything Else Auto-Provisions)
+### <img src="docs/assets/stickers/bag.webp" width="20" height="20" align="absmiddle" /> Before You Start: 4 Values Ready in 1 Minute (Everything Else Auto-Provisions)
 
 | Item | Cloudflare Type | Where to Get It | ⚠️ Watch Out |
 | :--- | :---: | :--- | :--- |
@@ -238,7 +238,7 @@ Then reverse-proxy `127.0.0.1:8787` with Caddy for automatic HTTPS.
 ---
 
 <a id="upgrade"></a>
-## 🔄 Upgrading Existing Deployments (KV Data Preserved & Auto-Migrated to D1)
+## <img src="docs/assets/stickers/butterfly.webp" width="22" height="22" align="absmiddle" /> Upgrading Existing Deployments (KV Data Preserved & Auto-Migrated to D1)
 
 > **✅ KV data is 100% preserved!** Upgrading only replaces Worker code (`wrangler.toml` enables `keep_vars = true` so plain-text vars stay safe across deploys). Your card, sites, probe, visitors, and group binding stay **100% intact** in KV; once D1 (`DB`) is bound, visitor chat history migrates automatically on demand (or via 1-click batch migration in **⚙️ Settings → 版本更新 → 数据存储**), and deployments without `DB` continue using KV seamlessly.  
 > **⚠️ Two reminders**: (1) Do not create a new Worker or re-click a 1-click deploy button; (2) if running **2+ instances on the same Cloudflare account**, give each repo a unique `database_name` in `wrangler.toml` (e.g. `rose-panel-bot-2`) so they don't share one D1 database.
@@ -252,7 +252,7 @@ Then reverse-proxy `127.0.0.1:8787` with Caddy for automatic HTTPS.
 
 ---
 
-## ⚙️ Environment Variables
+## <img src="docs/assets/stickers/lock.webp" width="22" height="22" align="absmiddle" /> Environment Variables
 
 | Variable | Type | Required | Description |
 | :--- | :--- | :---: | :--- |
@@ -270,7 +270,7 @@ Then reverse-proxy `127.0.0.1:8787` with Caddy for automatic HTTPS.
 
 ---
 
-## 🤖 Commands
+## <img src="docs/assets/stickers/ok.webp" width="22" height="22" align="absmiddle" /> Commands
 
 - **General**: `/start` · `/panel` · `/me` · `/checkin` (group mode) · `/rank` (group mode)
 - **Admin PM**: `/set` (animated sticker emblem) · `/add` (add sticker quiz) · `/resetbadge` · `/cancel`; in DM push mode, quote-replying a pushed message also supports `/del` `/info` `/ban` `/unban` `/trust` `/reset` `/close` `/open`
@@ -278,14 +278,14 @@ Then reverse-proxy `127.0.0.1:8787` with Caddy for automatic HTTPS.
 
 ---
 
-## 🙏 Credits & Tech Stack
+## <img src="docs/assets/stickers/hug.webp" width="22" height="22" align="absmiddle" /> Credits & Tech Stack
 
 - Protocol & Ecosystem: [Komari Monitor](https://github.com/komari-monitor/komari) · [Combot Anti-Spam (CAS)](https://cas.chat/) · [jikssha/telegram_private_chatbot](https://github.com/jikssha/telegram_private_chatbot)
 - Open-Source Stack: [Cloudflare Workers](https://workers.cloudflare.com/) · [Telegram Mini Apps](https://core.telegram.org/bots/webapps) · [React](https://react.dev/) · [Vite](https://vitejs.dev/) · [Lucide Icons](https://lucide.dev/) · [lottie-web](https://github.com/airbnb/lottie-web)
 
 ---
 
-## 💬 Feedback
+## <img src="docs/assets/stickers/flower.webp" width="22" height="22" align="absmiddle" /> Feedback
 
 Found a bug, have a deployment question, or want to suggest an improvement? Feel free to open an issue via **[GitHub Issues](https://github.com/mango0114/rose-panel-bot/issues/new/choose)** (choose between Bug Report, Feature Request, or Usage Feedback — please never paste secrets like `BOT_TOKEN` or `WEBHOOK_SECRET`).
 
@@ -312,7 +312,7 @@ RosePanel Bot is 100% free & MIT open-source with zero paywalls and zero data co
 
 ---
 
-## 🌟 Star History
+## <img src="docs/assets/stickers/star.webp" width="22" height="22" align="absmiddle" /> Star History
 
 <a href="https://www.star-history.com/#mango0114/rose-panel-bot&Date">
  <picture>
