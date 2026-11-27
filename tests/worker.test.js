@@ -9648,9 +9648,34 @@ describe('Awaiting-reply tracking, scene status quick API & pre-PM verification 
     await applyVisitorAction(env, '88101', 'ban');
     const overviewBanned = await getVisitorOverview(env);
     expect(overviewBanned.stats.awaitingReply).toBe(0);
+
+    // Legacy visitor without `last_sender` infers awaitingReply from non-admin `last_preview`
+    await upsertVisitorProfile(
+      env,
+      { id: 88102, first_name: 'LegacyVisitor' },
+      { incrementMsg: true, lastPreview: '升级前发的消息' }
+    );
+    const legacyDetail = await getVisitorDetail(env, '88102');
+    expect(legacyDetail.lastSender).toBe('visitor');
+    expect(legacyDetail.awaitingReply).toBe(true);
+
+    // Legacy visitor whose last_preview starts with `我：` is inferred as replied by admin
+    await upsertVisitorProfile(
+      env,
+      { id: 88103, first_name: 'LegacyReplied' },
+      { incrementMsg: true, lastPreview: '我：已经处理好了' }
+    );
+    const legacyReplied = await getVisitorDetail(env, '88103');
+    expect(legacyReplied.lastSender).toBe('admin');
+    expect(legacyReplied.awaitingReply).toBe(false);
+
+    // `needsAttention` counts the union of pendingReview and awaitingReply without double-counting
+    const overviewUnion = await getVisitorOverview(env);
+    expect(overviewUnion.stats.awaitingReply).toBe(1);
+    expect(overviewUnion.stats.needsAttention).toBe(1);
   });
 
-  it('updates statusTone, statusText, statusSticker & autoReply via POST /api/admin/status and exposes pmVerificationRequired', async () => {
+  it('updates statusTone, statusText, statusSticker & autoReply via POST /api/admin/status without clobbering untouched fields', async () => {
     const kv = createMemoryKV();
     const env = {
       TOPIC_MAP: kv,
@@ -9702,16 +9727,19 @@ describe('Awaiting-reply tracking, scene status quick API & pre-PM verification 
     expect(body.adminConfig.pmBot.autoReplyText).toBe('正在写代码，稍后回复～');
     expect(body.config.bot.pmVerificationRequired).toBe(true);
 
-    // Invalid statusSticker is sanitized to ''
+    // Invalid statusSticker is sanitized to '', non-string statusText is ignored, and omitted auto-reply fields are preserved
     const badRes = await worker.fetch(
       new Request('https://panel.test/api/admin/status', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': adminInit },
-        body: JSON.stringify({ statusSticker: '../evil.png' }),
+        body: JSON.stringify({ statusSticker: '../evil.png', statusText: { bogus: 1 } }),
       }),
       env
     );
     const badBody = await badRes.json();
     expect(badBody.config.profile.statusSticker).toBe('');
+    expect(badBody.config.profile.statusText).toBe('写代码中');
+    expect(badBody.adminConfig.pmBot.autoReplyEnabled).toBe(true);
+    expect(badBody.adminConfig.pmBot.autoReplyText).toBe('正在写代码，稍后回复～');
   });
 });

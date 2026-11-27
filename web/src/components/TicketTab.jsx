@@ -111,6 +111,7 @@ export default function TicketTab({
   const [showGetSame, setShowGetSame] = useState(false);
   const [statusSheetOpen, setStatusSheetOpen] = useState(false);
   const [statusSaving, setStatusSaving] = useState(false);
+  const [statusInitial, setStatusInitial] = useState(null);
   const [statusDraft, setStatusDraft] = useState({
     statusTone: 'online',
     statusText: '',
@@ -124,14 +125,16 @@ export default function TicketTab({
   const openStatusSheet = () => {
     if (!isAdmin) return;
     haptic('light');
-    setStatusDraft({
+    const initial = {
       statusTone: normalizeStatusTone(profile.statusTone),
       statusText: profile.statusText || '在线营业中',
       statusSticker: normalizeStatusSticker(profile.statusSticker),
       autoReplyEnabled: Boolean(adminConfig?.pmBot?.autoReplyEnabled),
       autoReplyText:
         adminConfig?.pmBot?.autoReplyText || '已收到您的消息 🌸 看到后会第一时间回复，请稍等片刻～',
-    });
+    };
+    setStatusInitial(initial);
+    setStatusDraft(initial);
     setStatusSheetOpen(true);
   };
 
@@ -143,16 +146,34 @@ export default function TicketTab({
       statusText: preset.statusText,
       statusSticker: preset.statusSticker,
       autoReplyEnabled: preset.autoReplyEnabled,
-      autoReplyText: preset.autoReplyText || prev.autoReplyText,
+      ...(preset.autoReplyEnabled && preset.autoReplyText
+        ? { autoReplyText: preset.autoReplyText }
+        : {}),
     }));
   };
 
   const handleSaveStatus = async () => {
     try {
       setStatusSaving(true);
+      // Only send auto-reply fields when actually modified in this sheet so changing a sticker
+      // or status label never clobbers the owner's saved auto-reply configuration.
+      const body = {
+        statusTone: statusDraft.statusTone,
+        statusText: statusDraft.statusText,
+        statusSticker: statusDraft.statusSticker,
+      };
+      if (!statusInitial || statusDraft.autoReplyEnabled !== statusInitial.autoReplyEnabled) {
+        body.autoReplyEnabled = statusDraft.autoReplyEnabled;
+      }
+      if (
+        statusDraft.autoReplyEnabled &&
+        (!statusInitial || statusDraft.autoReplyText !== statusInitial.autoReplyText)
+      ) {
+        body.autoReplyText = statusDraft.autoReplyText;
+      }
       const res = await apiRequest('/api/admin/status', {
         method: 'POST',
-        body: statusDraft,
+        body,
       });
       onStatusUpdated?.(res);
       setStatusSheetOpen(false);

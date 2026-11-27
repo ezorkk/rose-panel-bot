@@ -3433,6 +3433,10 @@ select {
   color: var(--red);
 }
 
+[data-theme='dark'] .admin-todo-item.alert {
+  border-color: rgba(242, 99, 117, 0.32);
+}
+
 .admin-todo-num {
   font-size: 17px;
   font-weight: 800;

@@ -721,6 +721,7 @@ export async function clearVisitorHistory(env, userId, mode = 'archive', tgCallF
   rec.photo_count = 0;
   rec.link_count = 0;
   rec.last_preview = '';
+  rec.last_sender = '';
   await store.putVisitor(uid, rec);
   await invalidateVisitorSummaryCache(env);
 
@@ -776,6 +777,15 @@ export async function getVisitorDetail(env, userId, knownSupergroupId = null, kn
     base.visitor_msg_count !== undefined ? Number(base.visitor_msg_count || 0) : totalMsgs;
   const adminMsgs = Number(base.admin_msg_count || 0);
   const pendingReview = filterFreshPendingReview(base.pendingReview);
+  // Backfill `last_sender` for legacy pre-v2.3 records created before the field existed
+  const previewText = String(base.last_preview || '');
+  const inferredLastSender =
+    base.last_sender ||
+    (visitorMsgs > 0 && previewText
+      ? previewText.startsWith('我：')
+        ? 'admin'
+        : 'visitor'
+      : '');
 
   return {
     userId: uid,
@@ -793,9 +803,9 @@ export async function getVisitorDetail(env, userId, knownSupergroupId = null, kn
     admin_msg_count: adminMsgs,
     photo_count: Number(base.photo_count || 0),
     link_count: Number(base.link_count || 0),
-    last_preview: base.last_preview || '',
-    lastSender: base.last_sender || '',
-    awaitingReply: base.last_sender === 'visitor' && !isBanned && !isClosed,
+    last_preview: previewText,
+    lastSender: inferredLastSender,
+    awaitingReply: inferredLastSender === 'visitor' && !isBanned && !isClosed,
     note: base.note || '',
     source: base.source || '',
     source_at: base.source_at || null,
@@ -813,7 +823,7 @@ export async function listVisitors(env, options = {}) {
   const { search = '', filter = 'all', limit = 60 } = options;
   if (!env?.TOPIC_MAP && !env?.DB) {
     return {
-      stats: { total: 0, active: 0, trusted: 0, banned: 0, closed: 0, pendingReview: 0, awaitingReply: 0 },
+      stats: { total: 0, active: 0, trusted: 0, banned: 0, closed: 0, pendingReview: 0, awaitingReply: 0, needsAttention: 0 },
       sourceStats: [],
       items: [],
     };
@@ -903,6 +913,9 @@ export async function listVisitors(env, options = {}) {
     closed: details.filter((v) => v.isClosed && !v.isBanned).length,
     pendingReview: details.filter((v) => !v.isBanned && (v.pendingReview?.length || 0) > 0).length,
     awaitingReply: details.filter((v) => v.awaitingReply).length,
+    needsAttention: details.filter(
+      (v) => !v.isBanned && ((v.pendingReview?.length || 0) > 0 || v.awaitingReply)
+    ).length,
   };
   const sourceStats = computeSourceStats(details);
 
@@ -922,6 +935,7 @@ export async function listVisitors(env, options = {}) {
         existingCache.stats &&
         typeof existingCache.stats.pendingReview === 'number' &&
         typeof existingCache.stats.awaitingReply === 'number' &&
+        typeof existingCache.stats.needsAttention === 'number' &&
         Array.isArray(existingCache.sourceStats) &&
         Date.now() - Number(existingCache.cachedAt || 0) < VISITOR_SUMMARY_TTL_MS;
       if (!cacheFresh) {
@@ -964,7 +978,7 @@ export async function listVisitors(env, options = {}) {
 export async function getVisitorOverview(env) {
   if (!env?.TOPIC_MAP && !env?.DB) {
     return {
-      stats: { total: 0, active: 0, trusted: 0, banned: 0, closed: 0, pendingReview: 0, awaitingReply: 0 },
+      stats: { total: 0, active: 0, trusted: 0, banned: 0, closed: 0, pendingReview: 0, awaitingReply: 0, needsAttention: 0 },
       sourceStats: [],
       recent: [],
       cached: false,
@@ -988,6 +1002,7 @@ export async function getVisitorOverview(env) {
       cached.stats &&
       typeof cached.stats.pendingReview === 'number' &&
       typeof cached.stats.awaitingReply === 'number' &&
+      typeof cached.stats.needsAttention === 'number' &&
       Date.now() - Number(cached.cachedAt || 0) < VISITOR_SUMMARY_TTL_MS
     ) {
       return {

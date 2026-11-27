@@ -394,13 +394,16 @@ export default function App() {
   const awaitingReplyCount = Number(
     bootstrap?.awaitingReplyCount ?? bootstrap?.visitorSummary?.awaitingReply ?? 0
   );
+  const visitorAttentionCount = Number(
+    bootstrap?.visitorSummary?.needsAttention ?? Math.max(pendingReviewCount, awaitingReplyCount)
+  );
 
   if (isAdmin) {
     navItems.push({
       id: 'visitors',
       label: '访客',
       icon: Users,
-      badge: pendingReviewCount + awaitingReplyCount,
+      badge: visitorAttentionCount,
       badgeAlert: pendingReviewCount > 0,
     });
   } else if (enableCheckin) {

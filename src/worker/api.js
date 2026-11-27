@@ -697,25 +697,25 @@ export async function handleApiRequest(request, env, url, ctx = null) {
     // POST /api/admin/status — 1-tap scene status & auto-reply quick switch from profile card
     if (path === '/api/admin/status' && method === 'POST') {
       const body = await readJsonBody(request);
-      if (!body || typeof body !== 'object') {
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
         return json({ ok: false, error: '无效的状态参数' }, 400);
       }
+      const profilePatch = {};
+      if (typeof body.statusTone === 'string') profilePatch.statusTone = body.statusTone;
+      if (typeof body.statusText === 'string') profilePatch.statusText = body.statusText;
+      if (typeof body.statusSticker === 'string') profilePatch.statusSticker = body.statusSticker;
+
+      const pmBotPatch = {};
+      if (typeof body.autoReplyEnabled === 'boolean') pmBotPatch.autoReplyEnabled = body.autoReplyEnabled;
+      if (typeof body.autoReplyText === 'string') pmBotPatch.autoReplyText = body.autoReplyText;
+
       const patch = {
-        profile: {
-          ...(body.statusTone !== undefined ? { statusTone: body.statusTone } : {}),
-          ...(body.statusText !== undefined ? { statusText: body.statusText } : {}),
-          ...(body.statusSticker !== undefined ? { statusSticker: body.statusSticker } : {}),
-        },
-        ...(body.autoReplyEnabled !== undefined || body.autoReplyText !== undefined
-          ? {
-              pmBot: {
-                ...(body.autoReplyEnabled !== undefined ? { autoReplyEnabled: Boolean(body.autoReplyEnabled) } : {}),
-                ...(body.autoReplyText !== undefined ? { autoReplyText: body.autoReplyText } : {}),
-              },
-            }
-          : {}),
+        ...(Object.keys(profilePatch).length > 0 ? { profile: profilePatch } : {}),
+        ...(Object.keys(pmBotPatch).length > 0 ? { pmBot: pmBotPatch } : {}),
       };
-      await savePanelConfig(env, patch);
+      if (Object.keys(patch).length > 0) {
+        await savePanelConfig(env, patch);
+      }
       const [latestCfg, inboxStatus] = await Promise.all([
         loadPanelConfig(env),
         loadAdminInboxStatus(env),
