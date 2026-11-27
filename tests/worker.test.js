@@ -38,7 +38,9 @@ import {
   checkRateLimit,
   completeTurnstileVerification,
   ensureWebhookReactionSubscription,
+  extractMusicTrackFromMessage,
   formatSafeReviewPreviewHtml,
+  formatTrackDuration,
   generateInlineChallenge,
   generateStickerChallenge,
   handleTelegramUpdate,
@@ -46,6 +48,7 @@ import {
   matchKeywordReply,
   parseStickerQuizInput,
   reviewPendingVisitor,
+  sendMusicTrackToUser,
   startVisitorProbation,
   syncTelegramBotSurface,
 } from '../src/worker/bot.js';
@@ -54,13 +57,17 @@ import {
   CHAT_RETENTION_DAYS_OPTIONS,
   DEFAULT_CONFIG,
   DEFAULT_DOCK_STYLE,
+  DEFAULT_MUSIC,
   DEFAULT_NAV_ORDER,
   DEFAULT_THEME_PRESET,
   DOCK_STYLE_IDS,
+  MAX_MUSIC_TRACKS,
   THEME_PRESET_IDS,
   loadPanelConfig,
   normalizeChatRetentionDays,
   normalizeDockStyle,
+  normalizeMusic,
+  normalizeMusicSourceUrl,
   normalizeNavOrder,
   normalizeThemePreset,
   resolveSupergroupId,
@@ -9822,6 +9829,589 @@ describe('Awaiting-reply tracking, scene status quick API & pre-PM verification 
       );
       const reply2 = tgCalls.find((c) => c.method === 'sendMessage' && c.body.chat_id === 40002);
       expect(reply2?.body?.text).toBe('自定义常驻回执 X');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+});
+
+describe('Zero-command music playlist (PR #28)', () => {
+  it('extracts track metadata, strips audio extensions, and only records public channel links', () => {
+    expect(formatTrackDuration(0)).toBe('');
+    expect(formatTrackDuration(245)).toBe('4:05');
+    expect(formatTrackDuration(3661)).toBe('1:01:01');
+
+    // Bot API 7.0+ forward_origin public channel
+    const fromChannel = extractMusicTrackFromMessage({
+      audio: {
+        file_id: 'CQAC_public_1',
+        file_unique_id: 'uniq_1',
+        title: '晴天',
+        performer: '周杰伦',
+        duration: 269,
+      },
+      forward_origin: {
+        type: 'channel',
+        chat: { id: -100123456, type: 'channel', username: 'suisuiniann', title: 'Rose Music' },
+        message_id: 650,
+      },
+    });
+    expect(fromChannel).toEqual({
+      fileId: 'CQAC_public_1',
+      fileUniqueId: 'uniq_1',
+      title: '晴天',
+      performer: '周杰伦',
+      duration: 269,
+      sourceUrl: 'https://t.me/suisuiniann/650',
+      sourceTitle: 'Rose Music',
+    });
+
+    // Legacy forward_from_chat + fallback to file_name without extension
+    const fromLegacy = extractMusicTrackFromMessage({
+      audio: {
+        file_id: 'CQAC_legacy_2',
+        file_unique_id: 'uniq_2',
+        file_name: '夜曲.flac',
+        duration: 226,
+      },
+      forward_from_chat: { type: 'channel', username: 'rose_fm', title: 'Rose FM' },
+      forward_from_message_id: 88,
+    });
+    expect(fromLegacy.title).toBe('夜曲');
+    expect(fromLegacy.sourceUrl).toBe('https://t.me/rose_fm/88');
+
+    // Private channel (no username) & music bot forward must NOT leak link
+    const fromPrivateChannel = extractMusicTrackFromMessage({
+      audio: { file_id: 'CQAC_priv_3', file_unique_id: 'uniq_3' },
+      forward_origin: {
+        type: 'channel',
+        chat: { id: -100999, type: 'channel', title: 'Private Vault' },
+        message_id: 12,
+      },
+    });
+    expect(fromPrivateChannel.title).toBe('未命名音频');
+    expect(fromPrivateChannel.sourceUrl).toBe('');
+    expect(fromPrivateChannel.sourceTitle).toBe('');
+
+    // Voice note & document are ignored
+    expect(extractMusicTrackFromMessage({ voice: { file_id: 'AwAC_voice' } })).toBeNull();
+    expect(extractMusicTrackFromMessage({ document: { file_id: 'BQAC_doc' } })).toBeNull();
+
+    // Source URL sanitizer blocks private t.me/c/ and non-Telegram URLs
+    expect(normalizeMusicSourceUrl('https://t.me/c/123456/78')).toBe('');
+    expect(normalizeMusicSourceUrl('https://evil.example/song/1')).toBe('');
+    expect(normalizeMusicSourceUrl('https://t.me/suisuiniann/662')).toBe('https://t.me/suisuiniann/662');
+  });
+
+  it('captures admin forwarded audio with dedupe, cap, quick-remove callback, and guards against accidental triggers', async () => {
+    const kv = createMemoryKV();
+    const env = {
+      BOT_TOKEN: '123456:TEST_TOKEN',
+      BOT_USERNAME: 'RoseTestBot',
+      ADMIN_IDS: '99999',
+      TOPIC_MAP: kv,
+    };
+
+    const tgCalls = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url, init) => {
+      const method = String(url).split('/').pop();
+      const body = init?.body ? JSON.parse(init.body) : {};
+      tgCalls.push({ method, body });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 500 + tgCalls.length } }), {
+        status: 200,
+      });
+    });
+
+    try {
+      // 1. Admin forwards public channel audio in private chat -> captured
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 10,
+            from: { id: 99999, first_name: 'Owner' },
+            chat: { id: 99999, type: 'private' },
+            audio: {
+              file_id: 'AUDIO_FILE_A',
+              file_unique_id: 'UNIQ_A',
+              title: '七里香',
+              performer: '周杰伦',
+              duration: 299,
+            },
+            forward_origin: {
+              type: 'channel',
+              chat: { id: -1001, type: 'channel', username: 'suisuiniann', title: 'Rose' },
+              message_id: 700,
+            },
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+
+      let cfg = await loadPanelConfig(env);
+      expect(cfg.music.tracks).toHaveLength(1);
+      expect(cfg.music.tracks[0].title).toBe('七里香');
+      expect(cfg.music.tracks[0].fileId).toBe('AUDIO_FILE_A');
+      expect(cfg.music.tracks[0].sourceUrl).toBe('https://t.me/suisuiniann/700');
+      const trackAId = cfg.music.tracks[0].id;
+      const receipt = tgCalls.find((c) => c.method === 'sendMessage' && c.body.chat_id === 99999);
+      expect(receipt?.body?.text).toContain('已加入面板歌单');
+      expect(receipt?.body?.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data).toBe(`mus:rm:${trackAId}`);
+
+      // 2. Guard: Admin replying to a visitor DM push with audio sends to visitor, NOT playlist
+      await saveDmMessageMap(env, 888, '33333');
+      tgCalls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 11,
+            from: { id: 99999, first_name: 'Owner' },
+            chat: { id: 99999, type: 'private' },
+            reply_to_message: { message_id: 888 },
+            audio: { file_id: 'AUDIO_FOR_VISITOR', file_unique_id: 'UNIQ_V', title: '私发曲' },
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      cfg = await loadPanelConfig(env);
+      expect(cfg.music.tracks).toHaveLength(1);
+      expect(tgCalls.some((c) => c.method === 'copyMessage' && c.body.chat_id === 33333)).toBe(true);
+
+      // 3. Guard: Admin voice note, slash-command caption, or active /set session must NOT capture
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 12,
+            from: { id: 99999, first_name: 'Owner' },
+            chat: { id: 99999, type: 'private' },
+            voice: { file_id: 'VOICE_ONLY', duration: 5 },
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 13,
+            from: { id: 99999, first_name: 'Owner' },
+            chat: { id: 99999, type: 'private' },
+            caption: '/ignoreme',
+            audio: { file_id: 'AUDIO_WITH_CMD', file_unique_id: 'UNIQ_CMD', title: '指令音频' },
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      await kv.put('await_badge:99999', '1');
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 14,
+            from: { id: 99999, first_name: 'Owner' },
+            chat: { id: 99999, type: 'private' },
+            audio: { file_id: 'AUDIO_IN_SET', file_unique_id: 'UNIQ_SET', title: '录入态音频' },
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      await kv.delete('await_badge:99999');
+
+      // 4. Guard: Non-admin visitor sending audio never enters playlist
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 15,
+            from: { id: 44444, first_name: 'Guest' },
+            chat: { id: 44444, type: 'private' },
+            audio: { file_id: 'AUDIO_GUEST', file_unique_id: 'UNIQ_G', title: '访客音频' },
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+
+      cfg = await loadPanelConfig(env);
+      expect(cfg.music.tracks).toHaveLength(1);
+
+      // 5. Add second track, rename Track A, then re-forward Track A -> deduped & bumped to top while preserving custom title
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 16,
+            from: { id: 99999, first_name: 'Owner' },
+            chat: { id: 99999, type: 'private' },
+            audio: { file_id: 'AUDIO_FILE_B', file_unique_id: 'UNIQ_B', title: '晴天', performer: '周杰伦', duration: 269 },
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      cfg = await loadPanelConfig(env);
+      expect(cfg.music.tracks.map((t) => t.title)).toEqual(['晴天', '七里香']);
+
+      await savePanelConfig(env, {
+        music: {
+          tracks: cfg.music.tracks.map((t) => (t.id === trackAId ? { id: t.id, title: '七里香 (Live)' } : { id: t.id })),
+        },
+      });
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 17,
+            from: { id: 99999, first_name: 'Owner' },
+            chat: { id: 99999, type: 'private' },
+            audio: { file_id: 'AUDIO_FILE_A_NEW', file_unique_id: 'UNIQ_A', title: '七里香', performer: '周杰伦', duration: 299 },
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      cfg = await loadPanelConfig(env);
+      expect(cfg.music.tracks).toHaveLength(2);
+      expect(cfg.music.tracks[0].id).toBe(trackAId);
+      expect(cfg.music.tracks[0].title).toBe('七里香 (Live)');
+      expect(cfg.music.tracks[0].fileId).toBe('AUDIO_FILE_A_NEW');
+      expect(cfg.music.tracks[0].sourceUrl).toBe('https://t.me/suisuiniann/700');
+
+      // 6. Non-admin cannot click mus:rm callback; admin click removes track
+      tgCalls.length = 0;
+      await handleTelegramUpdate(
+        {
+          callback_query: {
+            id: 'cq-guest',
+            from: { id: 44444, first_name: 'Guest' },
+            message: { message_id: 501, chat: { id: 99999, type: 'private' } },
+            data: `mus:rm:${trackAId}`,
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect((await loadPanelConfig(env)).music.tracks).toHaveLength(2);
+
+      await handleTelegramUpdate(
+        {
+          callback_query: {
+            id: 'cq-admin',
+            from: { id: 99999, first_name: 'Owner' },
+            message: { message_id: 501, chat: { id: 99999, type: 'private' } },
+            data: `mus:rm:${trackAId}`,
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      cfg = await loadPanelConfig(env);
+      expect(cfg.music.tracks).toHaveLength(1);
+      expect(cfg.music.tracks[0].title).toBe('晴天');
+      expect(tgCalls.some((c) => c.method === 'editMessageText' && c.body.text.includes('已从面板歌单移出'))).toBe(true);
+
+      // 7. Max cap enforcement (MAX_MUSIC_TRACKS = 20)
+      const bulk = Array.from({ length: MAX_MUSIC_TRACKS + 3 }, (_, idx) => ({
+        id: `trk${String(idx).padStart(5, '0')}`,
+        fileId: `FID_${idx}`,
+        fileUniqueId: `UID_${idx}`,
+        title: `Song ${idx}`,
+      }));
+      const normalized = normalizeMusic(DEFAULT_MUSIC, { tracks: bulk });
+      expect(normalized.tracks).toHaveLength(MAX_MUSIC_TRACKS);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('strips fileId from public/admin configs, preserves server fileId on admin reorder/edit, and blocks forged tracks', async () => {
+    const kv = createMemoryKV();
+    const env = {
+      BOT_TOKEN: '123456:TEST_TOKEN',
+      BOT_USERNAME: 'RoseTestBot',
+      ADMIN_IDS: '99999',
+      TOPIC_MAP: kv,
+    };
+
+    await savePanelConfig(env, {
+      music: {
+        enabled: true,
+        title: '深夜歌单',
+        tracks: [
+          {
+            id: 'songaaa1',
+            fileId: 'SECRET_TG_FID_1',
+            fileUniqueId: 'SECRET_UNIQ_1',
+            title: '第一首',
+            performer: '歌手A',
+            duration: 200,
+            sourceUrl: 'https://t.me/suisuiniann/100',
+            sourceTitle: 'Rose',
+          },
+          {
+            id: 'songbbb2',
+            fileId: 'SECRET_TG_FID_2',
+            fileUniqueId: 'SECRET_UNIQ_2',
+            title: '第二首',
+            performer: '歌手B',
+            duration: 180,
+          },
+        ],
+      },
+    });
+
+    const cfg = await loadPanelConfig(env);
+    const pubGuest = sanitizePublicConfig(cfg, env, false, 'https://panel.test');
+    expect(pubGuest.music.title).toBe('深夜歌单');
+    expect(pubGuest.music.tracks).toHaveLength(2);
+    expect(pubGuest.music.tracks[0].fileId).toBeUndefined();
+    expect(pubGuest.music.tracks[0].fileUniqueId).toBeUndefined();
+
+    const adminSanitized = sanitizeAdminConfig(cfg, env);
+    expect(adminSanitized.music.tracks[0].fileId).toBeUndefined();
+    expect(adminSanitized.music.tracks[0].fileUniqueId).toBeUndefined();
+
+    // Admin reorders, renames, and attempts to inject a forged track + spoofed sourceUrl via PUT /api/admin/config
+    const nowSec = String(Math.floor(Date.now() / 1000));
+    const adminInit = await signInitData(
+      { user: JSON.stringify({ id: 99999, first_name: 'Owner' }), auth_date: nowSec },
+      env.BOT_TOKEN
+    );
+    const putRes = await worker.fetch(
+      new Request('https://panel.test/api/admin/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': adminInit },
+        body: JSON.stringify({
+          music: {
+            enabled: false,
+            title: '我的收藏',
+            tracks: [
+              { id: 'songbbb2', title: '第二首（改名）', performer: '新歌手B' },
+              {
+                id: 'songaaa1',
+                title: '第一首',
+                performer: '歌手A',
+                fileId: 'HIJACKED_FID',
+                sourceUrl: 'https://t.me/evil/999',
+              },
+              { id: 'forged99', fileId: 'STOLEN_FID', title: '伪造歌曲' },
+            ],
+          },
+        }),
+      }),
+      env
+    );
+    expect(putRes.status).toBe(200);
+    const putBody = await putRes.json();
+    expect(putBody.adminConfig.music.tracks.map((t) => t.id)).toEqual(['songbbb2', 'songaaa1']);
+    expect(putBody.adminConfig.music.tracks[0].title).toBe('第二首（改名）');
+    expect(putBody.adminConfig.music.tracks[1].sourceUrl).toBe('https://t.me/suisuiniann/100');
+
+    // Stored server config still holds original fileIds and dropped forged track
+    const persisted = await loadPanelConfig(env);
+    expect(persisted.music.enabled).toBe(false);
+    expect(persisted.music.tracks).toHaveLength(2);
+    expect(persisted.music.tracks[0].fileId).toBe('SECRET_TG_FID_2');
+    expect(persisted.music.tracks[1].fileId).toBe('SECRET_TG_FID_1');
+    expect(persisted.music.tracks[1].sourceUrl).toBe('https://t.me/suisuiniann/100');
+
+    // When disabled, non-admin public config hides tracks completely
+    const hiddenPub = sanitizePublicConfig(persisted, env, false, 'https://panel.test');
+    expect(hiddenPub.music).toEqual({ enabled: false, title: '', tracks: [] });
+  });
+
+  it('delivers audio via POST /api/music/play, falls back to /start song_<id> on 403, enforces limits, and never bypasses PM verification', async () => {
+    const kv = createMemoryKV();
+    const env = {
+      BOT_TOKEN: '123456:TEST_TOKEN',
+      BOT_USERNAME: 'RoseTestBot',
+      ADMIN_IDS: '99999',
+      SUPERGROUP_ID: '-100555666',
+      TOPIC_MAP: kv,
+    };
+
+    await savePanelConfig(env, {
+      music: {
+        enabled: true,
+        title: '最近在听',
+        tracks: [
+          {
+            id: 'play1234',
+            fileId: 'TG_AUDIO_PLAY_1',
+            fileUniqueId: 'UNIQ_PLAY_1',
+            title: '稻香',
+            performer: '周杰伦',
+            duration: 223,
+            sourceUrl: 'https://t.me/suisuiniann/655',
+            sourceTitle: 'Rose',
+          },
+        ],
+      },
+    });
+
+    const nowSec = String(Math.floor(Date.now() / 1000));
+    const guestInit = await signInitData(
+      { user: JSON.stringify({ id: 55001, first_name: 'Listener' }), auth_date: nowSec },
+      env.BOT_TOKEN
+    );
+    const coldGuestInit = await signInitData(
+      { user: JSON.stringify({ id: 55002, first_name: 'NewVisitor' }), auth_date: nowSec },
+      env.BOT_TOKEN
+    );
+    const bannedGuestInit = await signInitData(
+      { user: JSON.stringify({ id: 55003, first_name: 'Banned' }), auth_date: nowSec },
+      env.BOT_TOKEN
+    );
+    await kv.put('banned:55003', '1');
+
+    const tgCalls = [];
+    let sendMode = 'ok';
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url, init) => {
+      if (String(url).includes('api.cas.chat')) {
+        return new Response(JSON.stringify({ ok: false }), { status: 200 });
+      }
+      const method = String(url).split('/').pop();
+      const body = init?.body ? JSON.parse(init.body) : {};
+      tgCalls.push({ method, body });
+      if (method === 'sendAudio') {
+        if (sendMode === '403') {
+          return new Response(
+            JSON.stringify({ ok: false, error_code: 403, description: "Forbidden: bot can't initiate conversation with a user" }),
+            { status: 403 }
+          );
+        }
+        if (sendMode === '400') {
+          return new Response(
+            JSON.stringify({ ok: false, error_code: 400, description: 'Bad Request: wrong file identifier' }),
+            { status: 400 }
+          );
+        }
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 900 + tgCalls.length } }), {
+        status: 200,
+      });
+    });
+
+    try {
+      // 1. Happy path: POST /api/music/play sends audio with server fileId & channel button
+      const res1 = await worker.fetch(
+        new Request('https://panel.test/api/music/play', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': guestInit },
+          body: JSON.stringify({ id: 'play1234' }),
+        }),
+        env
+      );
+      expect(res1.status).toBe(200);
+      const body1 = await res1.json();
+      expect(body1.delivered).toBe(true);
+      const audioCall = tgCalls.find((c) => c.method === 'sendAudio' && c.body.chat_id === 55001);
+      expect(audioCall?.body?.audio).toBe('TG_AUDIO_PLAY_1');
+      expect(audioCall?.body?.reply_markup?.inline_keyboard?.[0]?.[0]?.url).toBe('https://t.me/suisuiniann/655');
+
+      // 2. Cold visitor (403) -> deep-link fallback `/start song_<id>`
+      sendMode = '403';
+      const res403 = await worker.fetch(
+        new Request('https://panel.test/api/music/play', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': coldGuestInit },
+          body: JSON.stringify({ id: 'play1234' }),
+        }),
+        env
+      );
+      expect(res403.status).toBe(200);
+      const body403 = await res403.json();
+      expect(body403.delivered).toBe(false);
+      expect(body403.needsDeepLink).toBe(true);
+      expect(body403.deepLink).toBe('https://t.me/RoseTestBot?start=song_play1234');
+
+      // 3. Invalid file_id (400) -> 502 with sourceUrl fallback
+      sendMode = '400';
+      const res400 = await worker.fetch(
+        new Request('https://panel.test/api/music/play', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': guestInit },
+          body: JSON.stringify({ id: 'play1234' }),
+        }),
+        env
+      );
+      expect(res400.status).toBe(502);
+      const body400 = await res400.json();
+      expect(body400.sourceUrl).toBe('https://t.me/suisuiniann/655');
+
+      // 4. Banned user rejected with 403
+      sendMode = 'ok';
+      const resBanned = await worker.fetch(
+        new Request('https://panel.test/api/music/play', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': bannedGuestInit },
+          body: JSON.stringify({ id: 'play1234' }),
+        }),
+        env
+      );
+      expect(resBanned.status).toBe(403);
+
+      // 5. Cold visitor clicks `/start song_play1234` -> receives audio directly without topic/verification;
+      //    subsequent text message STILL requires normal PM verification
+      tgCalls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 21,
+            from: { id: 55002, first_name: 'NewVisitor' },
+            chat: { id: 55002, type: 'private' },
+            text: '/start song_play1234',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(tgCalls.some((c) => c.method === 'sendAudio' && c.body.chat_id === 55002 && c.body.audio === 'TG_AUDIO_PLAY_1')).toBe(true);
+      expect(tgCalls.some((c) => c.method === 'createForumTopic')).toBe(false);
+      expect(await kv.get('verified:55002')).toBeNull();
+
+      // Missing track via /start song_<missing> replies politely
+      tgCalls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 22,
+            from: { id: 55002, first_name: 'NewVisitor' },
+            chat: { id: 55002, type: 'private' },
+            text: '/start song_deadbeef',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(tgCalls.some((c) => c.method === 'sendMessage' && c.body.text.includes('已从歌单下架'))).toBe(true);
+
+      // Subsequent normal PM from same unverified user still hits verification challenge
+      tgCalls.length = 0;
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 23,
+            from: { id: 55002, first_name: 'NewVisitor' },
+            chat: { id: 55002, type: 'private' },
+            text: '你好想加个友链',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(tgCalls.some((c) => c.method === 'createForumTopic')).toBe(false);
+      expect(tgCalls.some((c) => c.method === 'sendMessage' && /验证/.test(c.body.text || ''))).toBe(true);
+
+      // 6. Per-user rate limit (6/min -> 7th returns 429)
+      let rateRes;
+      for (let i = 0; i < 7; i += 1) {
+        rateRes = await sendMusicTrackToUser(env, 'https://panel.test', '55099', 'play1234');
+      }
+      expect(rateRes.ok).toBe(false);
+      expect(rateRes.status).toBe(429);
+      expect(rateRes.rateLimited).toBe(true);
     } finally {
       globalThis.fetch = origFetch;
     }

@@ -8,9 +8,11 @@ import {
   Download,
   ExternalLink,
   Flame,
+  Headphones,
   HeartHandshake,
   Link2,
   MessageCircle,
+  Music2,
   RefreshCw,
   Share2,
   Sparkles,
@@ -40,6 +42,16 @@ import {
 } from '../lib/telegram.js';
 
 const GetSameCardModal = lazy(() => import('./GetSameCardModal.jsx'));
+
+function formatTrackDuration(seconds = 0) {
+  const total = Math.round(Number(seconds) || 0);
+  if (!Number.isFinite(total) || total <= 0) return '';
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
 
 export default function TicketTab({
   data,
@@ -103,6 +115,8 @@ export default function TicketTab({
   };
 
   const [openingPm, setOpeningPm] = useState(false);
+  const [playingTrackId, setPlayingTrackId] = useState('');
+  const [musicExpanded, setMusicExpanded] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [posterLoading, setPosterLoading] = useState(false);
   const [posterError, setPosterError] = useState('');
@@ -261,6 +275,153 @@ export default function TicketTab({
       : null;
 
   const showPoweredBy = !isAdmin && profile.showPoweredBy !== false;
+  const musicConfig = config?.music || {};
+  const musicTracks =
+    musicConfig.enabled !== false && Array.isArray(musicConfig.tracks) ? musicConfig.tracks : [];
+  const visibleMusicTracks = musicExpanded ? musicTracks : musicTracks.slice(0, 3);
+
+  const handlePlayTrack = async (track) => {
+    if (!track?.id || playingTrackId) return;
+    haptic('medium');
+    const rawBot = String(bot?.username || '').replace(/^@/, '').trim();
+    const cleanHandle = String(profile.handle || '').replace(/^@/, '').trim();
+    const uname =
+      rawBot || (cleanHandle && cleanHandle !== 'your_bot' && /bot$/i.test(cleanHandle) ? cleanHandle : '');
+    const songDeepLink = uname ? `https://t.me/${uname}?start=song_${encodeURIComponent(track.id)}` : '';
+
+    if (!getTelegramInitData()) {
+      if (songDeepLink) {
+        openExternalUrl(songDeepLink);
+      } else if (track.sourceUrl) {
+        openExternalUrl(track.sourceUrl);
+      } else {
+        onToast('请在 Telegram 内打开面板收听音频');
+      }
+      return;
+    }
+
+    try {
+      setPlayingTrackId(track.id);
+      const res = await apiRequest('/api/music/play', {
+        method: 'POST',
+        body: { id: track.id },
+      });
+      if (res?.delivered) {
+        haptic('success');
+        onToast(`🎵 已将「${track.title}」发到机器人私聊，请返回收听`);
+        return;
+      }
+      if (res?.needsDeepLink) {
+        const targetLink = res.deepLink || songDeepLink;
+        if (targetLink) {
+          openExternalUrl(targetLink);
+          closeMiniApp();
+          return;
+        }
+        if (res.sourceUrl || track.sourceUrl) {
+          openExternalUrl(res.sourceUrl || track.sourceUrl);
+          return;
+        }
+        onToast('请先在机器人私聊点「开始」后再试');
+      }
+    } catch (err) {
+      if (track.sourceUrl) {
+        onToast(`${err.message || '直发失败'}，可点右侧图标前往频道原帖`);
+      } else {
+        onToast(err.message || '发送音频失败，请稍后重试');
+      }
+    } finally {
+      setPlayingTrackId('');
+    }
+  };
+
+  const renderMusicCard = () => {
+    if (musicTracks.length === 0) return null;
+    return (
+      <div className="card music-card">
+        <div className="card-header" style={{ marginBottom: 8 }}>
+          <span className="card-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Music2 size={15} color="var(--accent)" />
+            {musicConfig.title || '最近在听'}
+          </span>
+          <span className="pill rose" style={{ fontSize: 11, padding: '2px 8px' }}>
+            {musicTracks.length} 首
+          </span>
+        </div>
+
+        <div className="music-track-list">
+          {visibleMusicTracks.map((track, idx) => {
+            const durText = formatTrackDuration(track.duration);
+            const metaText = [track.performer, durText].filter(Boolean).join(' · ');
+            const isSending = playingTrackId === track.id;
+            return (
+              <div className="music-track-row" key={track.id}>
+                <span className="music-track-index" aria-hidden="true">
+                  {idx + 1}
+                </span>
+                <div className="music-track-info">
+                  <div className="music-track-title">{track.title}</div>
+                  {metaText && <div className="music-track-meta">{metaText}</div>}
+                </div>
+                <div className="music-track-actions">
+                  {track.sourceUrl && (
+                    <button
+                      type="button"
+                      className="music-source-btn"
+                      title={track.sourceTitle ? `原帖：${track.sourceTitle}` : '查看频道原帖'}
+                      aria-label={track.sourceTitle ? `查看 ${track.sourceTitle} 原帖` : '查看频道原帖'}
+                      onClick={() => {
+                        haptic('light');
+                        openExternalUrl(track.sourceUrl);
+                      }}
+                    >
+                      <ExternalLink size={13} />
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="btn btn-soft btn-sm music-play-btn"
+                    disabled={Boolean(playingTrackId)}
+                    onClick={() => handlePlayTrack(track)}
+                  >
+                    {isSending ? (
+                      <>
+                        <RefreshCw size={12} className="spin" /> 发送中
+                      </>
+                    ) : (
+                      <>
+                        <Headphones size={12} /> 听这首
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {musicTracks.length > 3 && (
+          <button
+            type="button"
+            className="music-expand-btn"
+            onClick={() => {
+              haptic('light');
+              setMusicExpanded((v) => !v);
+            }}
+          >
+            {musicExpanded ? '收起歌单' : `展开全部 ${musicTracks.length} 首`}
+            <ChevronDown
+              size={13}
+              style={{
+                transform: musicExpanded ? 'rotate(180deg)' : 'none',
+                transition: 'transform 0.16s ease',
+              }}
+            />
+          </button>
+        )}
+      </div>
+    );
+  };
 
   const renderAdminStatusStrip = () => {
     if (!isAdmin) return null;
@@ -934,6 +1095,7 @@ export default function TicketTab({
           </div>
         </div>
 
+        {renderMusicCard()}
         {renderAdminStatusStrip()}
         {renderVisitCounter()}
         {renderPoweredBy()}
@@ -1124,6 +1286,9 @@ export default function TicketTab({
           ))}
         </div>
       )}
+
+      {/* Music Playlist Card (Auto-hidden when empty or disabled) */}
+      {renderMusicCard()}
 
       {/* Contact Etiquette Card (Visible to everyone when filled) */}
       {etiquetteLines.length > 0 && (

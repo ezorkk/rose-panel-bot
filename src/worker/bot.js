@@ -15,8 +15,10 @@ import {
 import { isUserAdmin, parseAdminIds } from './auth.js';
 import { getLeaderboard, getMemberTicket, performCheckin } from './checkin.js';
 import {
+  MAX_MUSIC_TRACKS,
   clearBoundSupergroupId,
   loadPanelConfig,
+  normalizeMusicSourceUrl,
   resolveSupergroupId,
   safeGetJSON,
   safePutJSON,
@@ -2162,6 +2164,52 @@ async function handleCallbackQuery(env, requestOrigin, cq, config) {
       text: '🎭 已切换为「表情包看图猜题」验证模式！',
       show_alert: true,
     });
+    return;
+  }
+
+  // 5. Admin quick-remove playlist track button: mus:rm:<trackId>
+  if (data.startsWith('mus:rm:')) {
+    const isAdmin = await isUserAdmin(env, cq.from.id, tgCall);
+    if (!isAdmin) {
+      await tgCall(env, 'answerCallbackQuery', {
+        callback_query_id: cq.id,
+        text: '仅管理员可执行此操作',
+        show_alert: true,
+      });
+      return;
+    }
+    const trackId = data.slice('mus:rm:'.length).trim().toLowerCase();
+    const tracks = Array.isArray(config?.music?.tracks) ? config.music.tracks : [];
+    const target = tracks.find((t) => String(t.id || '').toLowerCase() === trackId);
+    if (!target) {
+      await tgCall(env, 'answerCallbackQuery', {
+        callback_query_id: cq.id,
+        text: '该曲目已不在歌单中',
+      }).catch(() => {});
+      if (cq.message) {
+        await tgCall(env, 'editMessageReplyMarkup', {
+          chat_id: cq.message.chat.id,
+          message_id: cq.message.message_id,
+          reply_markup: { inline_keyboard: [] },
+        }).catch(() => {});
+      }
+      return;
+    }
+    const nextTracks = tracks.filter((t) => String(t.id || '').toLowerCase() !== trackId);
+    await savePanelConfig(env, { music: { tracks: nextTracks } });
+    await tgCall(env, 'answerCallbackQuery', {
+      callback_query_id: cq.id,
+      text: '🗑️ 已从面板歌单移出',
+    }).catch(() => {});
+    if (cq.message) {
+      await tgCall(env, 'editMessageText', {
+        chat_id: cq.message.chat.id,
+        message_id: cq.message.message_id,
+        text: `🗑️ <b>已从面板歌单移出</b>：${escapeHtml(target.title)}`,
+        parse_mode: 'HTML',
+      }).catch(() => {});
+    }
+    return;
   }
 }
 
@@ -2736,6 +2784,12 @@ export async function handleTelegramUpdate(update, env, requestOrigin) {
           return;
         }
       }
+
+      // Zero-command playlist capture: admin forwards/sends native audio directly to bot (non-reply, non-command)
+      if (msg.audio?.file_id && !msg.reply_to_message && !extractCommand(msg.caption || '')) {
+        await handleAdminAudioCapture(env, requestOrigin, msg, config);
+        return;
+      }
     }
 
     if (!isAdmin && (await env.TOPIC_MAP.get(`banned:${uid}`)) === '1') {
@@ -2746,6 +2800,34 @@ export async function handleTelegramUpdate(update, env, requestOrigin) {
       if (parsed.cmd === 'start') {
         if (inboxMode === 'dm' && uid === getOwnerChatId(env)) {
           await clearOwnerUnreachable(env);
+        }
+        // Deep-link audio playback fallback (`/start song_<id>`) for visitors who haven't started the bot yet.
+        // Delivers the owner's public playlist audio directly without creating a visitor topic or nagging with captcha.
+        const songMatch = String(parsed.args || '')
+          .trim()
+          .match(/^song_([a-z0-9_]{4,24})$/i);
+        if (songMatch) {
+          const playRes = await sendMusicTrackToUser(env, requestOrigin, msg.from.id, songMatch[1], config, {
+            isAdmin,
+            fromStart: true,
+          });
+          if (!playRes.ok) {
+            if (playRes.rateLimited || playRes.banned) return;
+            const rows = [];
+            if (playRes.sourceUrl) {
+              rows.push([{ text: '📢 前往频道原帖收听', url: playRes.sourceUrl }]);
+            }
+            rows.push([buildPanelButton(env, requestOrigin, '✨ 打开个人面板', { isGroup: false })]);
+            await tgCall(env, 'sendMessage', {
+              chat_id: msg.chat.id,
+              text: playRes.notFound
+                ? '🎵 这首歌已从歌单下架或暂未开放，可以打开名片听听其他推荐～'
+                : `⚠️ ${escapeHtml(playRes.error || '音频发送失败，请稍后重试。')}`,
+              parse_mode: 'HTML',
+              reply_markup: { inline_keyboard: rows },
+            }).catch(() => {});
+          }
+          return;
         }
         // Record first-touch source attribution (`src_<channel>`) before verification so
         // visitors who must verify first still retain their referral source.
@@ -3333,4 +3415,257 @@ function sniffSupportedImage(b) {
     b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
     b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50;
   return isJpeg || isPng || isGif || isWebp;
+}
+
+export function formatTrackDuration(seconds = 0) {
+  const total = Math.round(Number(seconds) || 0);
+  if (!Number.isFinite(total) || total <= 0) return '';
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
+export function extractMusicTrackFromMessage(msg) {
+  const audio = msg?.audio;
+  if (!audio || typeof audio !== 'object' || !audio.file_id) return null;
+  const fileId = String(audio.file_id || '').trim().slice(0, 256);
+  if (!fileId) return null;
+  const fileUniqueId = String(audio.file_unique_id || '').trim().slice(0, 128);
+  const rawTitle = String(audio.title || '').trim();
+  const rawFileName = String(audio.file_name || '')
+    .trim()
+    .replace(/\.(mp3|flac|m4a|ogg|oga|opus|wav|aac|wma|alac|aiff)$/i, '')
+    .trim();
+  const title = (rawTitle || rawFileName || '未命名音频').slice(0, 80);
+  const performer = String(audio.performer || '').trim().slice(0, 60);
+  const rawDur = Number(audio.duration);
+  const duration = Number.isFinite(rawDur) && rawDur > 0 ? Math.min(Math.round(rawDur), 86400) : 0;
+
+  let sourceUrl = '';
+  let sourceTitle = '';
+  if (msg.forward_origin?.type === 'channel') {
+    const uname = String(msg.forward_origin.chat?.username || '').trim();
+    const msgId = Number(msg.forward_origin.message_id);
+    const candidate = uname && Number.isSafeInteger(msgId) && msgId > 0 ? `https://t.me/${uname}/${msgId}` : '';
+    sourceUrl = normalizeMusicSourceUrl(candidate);
+    if (sourceUrl) {
+      sourceTitle = String(msg.forward_origin.chat?.title || '').trim().slice(0, 60);
+    }
+  } else if (msg.forward_from_chat?.type === 'channel') {
+    const uname = String(msg.forward_from_chat.username || '').trim();
+    const msgId = Number(msg.forward_from_message_id);
+    const candidate = uname && Number.isSafeInteger(msgId) && msgId > 0 ? `https://t.me/${uname}/${msgId}` : '';
+    sourceUrl = normalizeMusicSourceUrl(candidate);
+    if (sourceUrl) {
+      sourceTitle = String(msg.forward_from_chat.title || '').trim().slice(0, 60);
+    }
+  }
+
+  return {
+    fileId,
+    fileUniqueId,
+    title,
+    performer,
+    duration,
+    sourceUrl,
+    sourceTitle,
+  };
+}
+
+async function handleAdminAudioCapture(env, requestOrigin, msg, config) {
+  const extracted = extractMusicTrackFromMessage(msg);
+  if (!extracted) return;
+
+  const currentTracks = Array.isArray(config?.music?.tracks) ? [...config.music.tracks] : [];
+  const matchIdx = currentTracks.findIndex(
+    (t) =>
+      (extracted.fileUniqueId && t.fileUniqueId && t.fileUniqueId === extracted.fileUniqueId) ||
+      t.fileId === extracted.fileId
+  );
+
+  let track;
+  let updatedExisting = false;
+  let nextTracks;
+
+  if (matchIdx >= 0) {
+    const prev = currentTracks[matchIdx];
+    updatedExisting = true;
+    track = {
+      ...prev,
+      fileId: extracted.fileId,
+      fileUniqueId: extracted.fileUniqueId || prev.fileUniqueId,
+      title: prev.title && prev.title !== '未命名音频' ? prev.title : extracted.title,
+      performer: prev.performer || extracted.performer,
+      duration: extracted.duration || prev.duration,
+      sourceUrl: extracted.sourceUrl || prev.sourceUrl,
+      sourceTitle: extracted.sourceUrl ? extracted.sourceTitle : prev.sourceTitle,
+      addedAt: Date.now(),
+    };
+    currentTracks.splice(matchIdx, 1);
+    nextTracks = [track, ...currentTracks];
+  } else {
+    const usedIds = new Set(currentTracks.map((t) => t.id));
+    let id = randomId(8);
+    while (usedIds.has(id)) {
+      id = randomId(8);
+    }
+    track = {
+      id,
+      ...extracted,
+      addedAt: Date.now(),
+    };
+    nextTracks = [track, ...currentTracks];
+  }
+
+  const trimmed = nextTracks.length > MAX_MUSIC_TRACKS;
+  const savedTracks = nextTracks.slice(0, MAX_MUSIC_TRACKS);
+  await savePanelConfig(env, { music: { tracks: savedTracks } });
+
+  const durStr = formatTrackDuration(track.duration);
+  const metaLine = [
+    `<b>${escapeHtml(track.title)}</b>`,
+    track.performer ? escapeHtml(track.performer) : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  const lines = [
+    updatedExisting
+      ? `🎵 <b>已置顶更新面板歌单</b>（共 ${savedTracks.length} 首）`
+      : `🎵 <b>已加入面板歌单</b>（共 ${savedTracks.length} 首）`,
+    `${metaLine}${durStr ? ` <code>${durStr}</code>` : ''}`,
+  ];
+  if (track.sourceUrl) {
+    lines.push(
+      `📢 原帖：<a href="${escapeHtml(track.sourceUrl)}">${escapeHtml(track.sourceTitle || '查看频道原帖')}</a>`
+    );
+  }
+  if (trimmed) {
+    lines.push(`<i>歌单已满 ${MAX_MUSIC_TRACKS} 首，最早收录的 1 首已自动移出。</i>`);
+  }
+  if (config?.music?.enabled === false) {
+    lines.push(`<i>提示：当前面板歌单展示处于关闭状态，可在设置中重新开启。</i>`);
+  }
+
+  await tgCall(env, 'sendMessage', {
+    chat_id: msg.chat.id,
+    reply_to_message_id: msg.message_id,
+    text: lines.join('\n'),
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: '🗑️ 移出歌单', callback_data: `mus:rm:${track.id}` },
+          buildPanelButton(env, requestOrigin, '✨ 查看名片', { isGroup: false }),
+        ],
+      ],
+    },
+  }).catch(() => {});
+}
+
+export async function sendMusicTrackToUser(
+  env,
+  requestOrigin,
+  targetUserId,
+  rawTrackId,
+  config = null,
+  options = {}
+) {
+  const { isAdmin = false, fromStart = false } = options;
+  const uid = String(targetUserId || '').trim();
+  const trackId = String(rawTrackId || '').trim().toLowerCase();
+  if (!/^[a-z0-9_]{4,24}$/.test(trackId)) {
+    return { ok: false, status: 400, notFound: true, error: '无效的曲目 ID' };
+  }
+
+  if (!isAdmin && /^\d+$/.test(uid) && env.TOPIC_MAP && (await env.TOPIC_MAP.get(`banned:${uid}`)) === '1') {
+    return { ok: false, status: 403, banned: true, error: '无法发送音频' };
+  }
+
+  const cfg = config || (await loadPanelConfig(env));
+  const music = cfg.music || { enabled: true, tracks: [] };
+  if (music.enabled === false && !isAdmin) {
+    return { ok: false, status: 404, notFound: true, error: '歌单暂未开放' };
+  }
+  const track = (music.tracks || []).find((t) => String(t.id || '').toLowerCase() === trackId);
+  if (!track || !track.fileId) {
+    return { ok: false, status: 404, notFound: true, error: '这首歌已从歌单下架啦' };
+  }
+
+  if (!env.BOT_TOKEN || !/^\d+$/.test(uid)) {
+    const botUsername =
+      String(env.BOT_USERNAME || '').trim().replace(/^@/, '') ||
+      String(cfg.botUsername || '').trim().replace(/^@/, '');
+    return {
+      ok: true,
+      delivered: false,
+      needsDeepLink: true,
+      deepLink: botUsername ? `https://t.me/${botUsername}?start=song_${track.id}` : '',
+      sourceUrl: track.sourceUrl || '',
+    };
+  }
+
+  if (!(await checkRateLimit(env, `rl:music:${uid}`, 6, 60))) {
+    return { ok: false, status: 429, rateLimited: true, error: '点歌太快啦，请稍后再试' };
+  }
+
+  const captionLines = [
+    `🎵 <b>${escapeHtml(track.title)}</b>${track.performer ? ` — ${escapeHtml(track.performer)}` : ''}`,
+  ];
+  if (track.sourceUrl) {
+    captionLines.push(`📢 来源：${escapeHtml(track.sourceTitle || '公开频道')}`);
+  }
+
+  const inlineRows = [];
+  if (track.sourceUrl) {
+    inlineRows.push([{ text: '📢 查看频道原帖', url: track.sourceUrl }]);
+  }
+  if (fromStart) {
+    inlineRows.push([buildPanelButton(env, requestOrigin, '✨ 打开个人面板', { isGroup: false })]);
+  }
+
+  try {
+    await tgCall(env, 'sendAudio', {
+      chat_id: Number(uid),
+      audio: track.fileId,
+      caption: captionLines.join('\n'),
+      parse_mode: 'HTML',
+      ...(inlineRows.length > 0 ? { reply_markup: { inline_keyboard: inlineRows } } : {}),
+    });
+    return {
+      ok: true,
+      delivered: true,
+      track: {
+        id: track.id,
+        title: track.title,
+        performer: track.performer,
+        sourceUrl: track.sourceUrl,
+      },
+    };
+  } catch (err) {
+    if (
+      Number(err?.code) === 403 ||
+      /bot can't initiate|chat not found|forbidden|blocked by the user/i.test(String(err?.message))
+    ) {
+      const botUsername = await resolveBotUsername(env, cfg);
+      return {
+        ok: true,
+        delivered: false,
+        needsDeepLink: true,
+        deepLink: botUsername ? `https://t.me/${botUsername}?start=song_${track.id}` : '',
+        sourceUrl: track.sourceUrl || '',
+      };
+    }
+    return {
+      ok: false,
+      status: 502,
+      sendFailed: true,
+      sourceUrl: track.sourceUrl || '',
+      error: track.sourceUrl
+        ? '音频直发失败，可直接前往频道原帖收听'
+        : '音频发送失败，可稍后重试或提醒站长重新转发该曲目',
+    };
+  }
 }

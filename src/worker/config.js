@@ -107,6 +107,13 @@ export const DEFAULT_PROBATION = {
   allowDomains: [], // 链接白名单，例如 ['github.com', 'example.com']，匹配域名本身及其子域名
 };
 
+export const MAX_MUSIC_TRACKS = 20;
+export const DEFAULT_MUSIC = {
+  enabled: true, // 默认开启（无曲目时前端自动隐藏）
+  title: '最近在听',
+  tracks: [],
+};
+
 export const DEFAULT_NAV_ORDER = ['profile', 'sites', 'probe', 'visitors', 'leaderboard'];
 
 export function normalizeNavOrder(raw) {
@@ -236,6 +243,7 @@ export const DEFAULT_CONFIG = {
     branch: 'main',
     githubToken: '', // optional single-repo Fine-grained PAT for in-app 1-click fork sync
   },
+  music: structuredClone(DEFAULT_MUSIC),
   ui: {
     navOrder: [...DEFAULT_NAV_ORDER],
     themePreset: DEFAULT_THEME_PRESET, // rose | ocean | matcha | lavender | mono
@@ -453,6 +461,78 @@ export function normalizeProbation(baseProbation = DEFAULT_PROBATION, override =
   };
 }
 
+export function normalizeMusicSourceUrl(raw = '') {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  const match = s.match(/^https:\/\/t\.me\/([A-Za-z0-9_]{3,64})\/([1-9]\d{0,12})$/);
+  if (!match) return '';
+  return `https://t.me/${match[1]}/${match[2]}`;
+}
+
+export function normalizeMusicTrack(track = {}) {
+  if (!track || typeof track !== 'object') return null;
+  const id = String(track.id || '').trim().toLowerCase();
+  if (!/^[a-z0-9_]{4,24}$/.test(id)) return null;
+  const fileId = String(track.fileId || '').trim().slice(0, 256);
+  if (!fileId) return null;
+  const fileUniqueId = String(track.fileUniqueId || '').trim().slice(0, 128);
+  const title = String(track.title || '').trim().slice(0, 80) || '未命名音频';
+  const performer = String(track.performer || '').trim().slice(0, 60);
+  const rawDuration = Number(track.duration);
+  const duration =
+    Number.isFinite(rawDuration) && rawDuration > 0 ? Math.min(Math.round(rawDuration), 86400) : 0;
+  const sourceUrl = normalizeMusicSourceUrl(track.sourceUrl);
+  const sourceTitle = sourceUrl ? String(track.sourceTitle || '').trim().slice(0, 60) : '';
+  const rawAddedAt = Number(track.addedAt);
+  const addedAt = Number.isFinite(rawAddedAt) && rawAddedAt > 0 ? Math.trunc(rawAddedAt) : Date.now();
+  return {
+    id,
+    fileId,
+    fileUniqueId,
+    title,
+    performer,
+    duration,
+    sourceUrl,
+    sourceTitle,
+    addedAt,
+  };
+}
+
+export function normalizeMusic(baseMusic = DEFAULT_MUSIC, override = null) {
+  const base = baseMusic && typeof baseMusic === 'object' ? baseMusic : DEFAULT_MUSIC;
+  const ov = override && typeof override === 'object' ? override : {};
+  const enabled = (ov.enabled ?? base.enabled) !== false;
+  const rawTitle = ov.title !== undefined ? ov.title : base.title;
+  const title = String(rawTitle ?? '').trim().slice(0, 24) || DEFAULT_MUSIC.title;
+  const rawTracks = Array.isArray(ov.tracks)
+    ? ov.tracks
+    : Array.isArray(base.tracks)
+      ? base.tracks
+      : [];
+  const seen = new Set();
+  const tracks = [];
+  for (const item of rawTracks) {
+    const normalized = normalizeMusicTrack(item);
+    if (!normalized || seen.has(normalized.id)) continue;
+    seen.add(normalized.id);
+    tracks.push(normalized);
+    if (tracks.length >= MAX_MUSIC_TRACKS) break;
+  }
+  return { enabled, title, tracks };
+}
+
+function stripPublicTrackFields(track) {
+  return {
+    id: track.id,
+    title: track.title,
+    performer: track.performer,
+    duration: track.duration,
+    sourceUrl: track.sourceUrl,
+    sourceTitle: track.sourceTitle,
+    addedAt: track.addedAt,
+  };
+}
+
 function resolveAvatarMode(rawMode, avatarUrl) {
   if (AVATAR_MODES.includes(rawMode)) return rawMode;
   return String(avatarUrl || '').trim() ? 'custom' : 'bot';
@@ -475,6 +555,7 @@ export function mergeConfig(base, override) {
     cloned.probe.alerts = normalizeProbeAlerts(DEFAULT_PROBE_ALERTS, cloned.probe.alerts);
     cloned.pmBot.chatRetentionDays = normalizeChatRetentionDays(cloned.pmBot?.chatRetentionDays);
     cloned.pmBot.probation = normalizeProbation(DEFAULT_PROBATION, cloned.pmBot?.probation);
+    cloned.music = normalizeMusic(DEFAULT_MUSIC, cloned.music);
     cloned.ui = {
       navOrder: normalizeNavOrder(cloned.ui?.navOrder),
       themePreset: normalizeThemePreset(cloned.ui?.themePreset),
@@ -571,6 +652,7 @@ export function mergeConfig(base, override) {
       ...base.updater,
       ...(override.updater || {}),
     },
+    music: normalizeMusic(base.music, override.music),
     ui: {
       navOrder: normalizeNavOrder(override.ui?.navOrder ?? base.ui?.navOrder),
       themePreset: normalizeThemePreset(override.ui?.themePreset ?? base.ui?.themePreset),
@@ -639,7 +721,30 @@ export async function loadPanelConfig(env) {
 
 export async function savePanelConfig(env, nextConfig) {
   const current = await loadPanelConfig(env);
-  const merged = mergeConfig(current, nextConfig);
+  let effectiveNext = nextConfig;
+  if (nextConfig && typeof nextConfig === 'object' && Array.isArray(nextConfig.music?.tracks)) {
+    const existingById = new Map((current.music?.tracks || []).map((t) => [t.id, t]));
+    const hydratedTracks = nextConfig.music.tracks.map((item) => {
+      if (!item || typeof item !== 'object') return item;
+      if (item.fileId) return item;
+      const id = String(item.id || '').trim().toLowerCase();
+      const prev = existingById.get(id);
+      if (!prev) return item;
+      return {
+        ...prev,
+        title: item.title !== undefined ? item.title : prev.title,
+        performer: item.performer !== undefined ? item.performer : prev.performer,
+      };
+    });
+    effectiveNext = {
+      ...nextConfig,
+      music: {
+        ...nextConfig.music,
+        tracks: hydratedTracks,
+      },
+    };
+  }
+  const merged = mergeConfig(current, effectiveNext);
 
   // Preserve stored secrets if admin sent masked placeholder
   if (nextConfig?.probe?.apiKey === '********') {
@@ -716,6 +821,7 @@ export async function savePanelConfig(env, nextConfig) {
     ? merged.pmBot.stickerChallenges.filter((item) => item?.fileId && item?.question && item?.answer).slice(0, 40)
     : [];
   merged.pmBot.probation = normalizeProbation(DEFAULT_PROBATION, merged.pmBot.probation);
+  merged.music = normalizeMusic(DEFAULT_MUSIC, merged.music);
   merged.ui = {
     navOrder: normalizeNavOrder(merged.ui?.navOrder),
     themePreset: normalizeThemePreset(merged.ui?.themePreset),
@@ -757,6 +863,15 @@ export function sanitizePublicConfig(config, env, isAdmin = false, requestOrigin
   };
 
   const probePrivateHidden = config.probe.visibility === 'private' && !isAdmin;
+  const rawMusic = normalizeMusic(DEFAULT_MUSIC, config.music);
+  const publicMusic =
+    !rawMusic.enabled && !isAdmin
+      ? { enabled: false, title: '', tracks: [] }
+      : {
+          enabled: rawMusic.enabled,
+          title: rawMusic.title,
+          tracks: rawMusic.tracks.map(stripPublicTrackFields),
+        };
   const publicVisitStats =
     config.profile?.showVisitCounter === true
       ? { thisMonth: Math.max(0, Number(visitStats?.thisMonth) || 0) }
@@ -816,6 +931,7 @@ export function sanitizePublicConfig(config, env, isAdmin = false, requestOrigin
       themePreset: normalizeThemePreset(config.ui?.themePreset),
       dockStyle: normalizeDockStyle(config.ui?.dockStyle),
     },
+    music: publicMusic,
     shareUrl: resolveShareUrl(config, env, requestOrigin),
     ...(publicVisitStats ? { visitStats: publicVisitStats } : {}),
   };
@@ -843,6 +959,12 @@ export function sanitizeAdminConfig(config, env = {}, inboxStatus = {}) {
   }
   cloned.pmBot.turnstileReady = Boolean(env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET);
   cloned.d1Bound = Boolean(env.DB);
+  const normalizedMusic = normalizeMusic(DEFAULT_MUSIC, cloned.music);
+  cloned.music = {
+    enabled: normalizedMusic.enabled,
+    title: normalizedMusic.title,
+    tracks: normalizedMusic.tracks.map(stripPublicTrackFields),
+  };
   if (inboxStatus && typeof inboxStatus === 'object') {
     if (inboxStatus.inboxMode !== undefined) {
       cloned.inboxMode = inboxStatus.inboxMode;
