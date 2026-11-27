@@ -58,16 +58,16 @@
 </div>
 
 - **224×84 Pixel Day/Night Bubble Slider & 5 Themes + Frosted Glass Dock**: scrub the crystal magnifier to toggle **Dark / Follow Telegram / Light** with a full-screen circular View Transition ripple synced to Telegram chrome; choose from **5 palettes (Rose / Ocean / Matcha / Lavender / Mono)** and **Solid / Frosted Glass** bottom dock styles with 0ms edge-injected splash and **customizable bottom navigation order & default landing tab**;
-- **Zero-Command Audio Playlist & 1-Tap Scene Statuses**: forward any native Telegram audio (including music channels/bots, multi-select supported) directly to your bot to build a lightweight **"🎵 Recently Listening"** card (auto-hidden when empty; visitors tap **"🎧 听这首"** for zero-egress native `sendAudio` playback with `/start song_<id>` deep-link fallback and zero `file_id` exposure); tap the card status pill for 1-tap scene presets, 12 built-in animated stickers (no Telegram Premium required), and isolated temporary auto-replies;
+- **Portable Playlist on the Go & 1-Tap Scene Statuses**: whenever you hear a track you like on Telegram (music channels, groups, or music bots), just forward it directly to your own bot (multi-select supported) and your card automatically organizes it into a **"🎵 Recently Listening"** playlist (auto-hidden when empty; visitors tap **"🎧 听这首"** for zero-egress native `sendAudio` playback with `/start song_<id>` deep-link fallback and zero `file_id` exposure); tap the card status pill for 1-tap scene presets, 12 built-in animated stickers (no Telegram Premium required), and isolated temporary auto-replies;
 - Filter exchanged photos by sender, with **unlimited cursor pagination & full-history message search** when D1 is bound; inspect live **Komari / Nezha (v1·v0) / NodeGet / Generic JSON** server metrics (with per-line **latency & packet loss display** for Komari — requires adding Ping Tasks in the Komari dashboard, currently Komari-only — plus optional offline & resource alerts, off by default) and **Public / 🔒 Private** site bookmarks; generate **light/dark shareable QR card posters with Open Graph previews, `src_` referral tracking, and monthly unique visitor counts**; swap animated `.webp` / `.webm` / `.tgs` emblems via `/set` with 3-way private avatar options.
 
-### 4 · Zero-Command Forwarded Audio Playlist & Native Playback (iPhone Duo)
+### 4 · Portable Playlist: Forward Songs Anywhere → Auto-Organized Card & Native Playback (iPhone Duo)
 
 <div align="center">
   <img src="docs/assets/demo-music.webp" alt="iPhone Duo walkthrough: zero-command audio forwarding to card playlist, native sendAudio playback, and settings reorder" width="94%" />
 </div>
 
-- **Zero-command capture**: Forward any native Telegram audio (from music channels or music bots, including multi-select batches) directly to your bot in private chat (non-reply) to populate the card's **"🎵 Recently Listening"** module with title, artist, duration, and optional public channel post link (auto-hidden when empty, with a 1-tap `🗑️ Remove` undo button on the bot receipt).
+- **Forward anywhere, auto-organized**: Whenever you come across a track you like on Telegram (music channels, groups, music bots, or friends — multi-select supported), simply forward the native audio directly to your bot in private chat (non-reply) with zero commands. RosePanel automatically organizes it into your card's **"🎵 Recently Listening"** playlist with title, artist, duration, and optional public channel post link (auto-hidden when empty, with a 1-tap `🗑️ Remove` undo button on the receipt).
 - **Zero-egress native delivery**: Visitors tap **"🎧 听这首"** to receive original-quality audio directly via Telegram `sendAudio` (zero Cloudflare egress, raw `file_id` never exposed to clients; cold visitors automatically fall back to `/start song_<id>` without bypassing PM verification), while owners can toggle visibility, rename, reorder, or delete tracks inside Settings.
 
 ---
