@@ -37,16 +37,17 @@
   --dock-glass-item-halo:
     0 0 8px rgba(255, 255, 255, 0.92),
     0 1px 2px rgba(255, 255, 255, 0.85);
+  --dock-glass-icon-halo: drop-shadow(0 0 4px rgba(255, 255, 255, 0.88));
   --dock-glass-active-bg: linear-gradient(
     180deg,
-    rgba(255, 255, 255, 0.72) 0%,
-    rgba(255, 255, 255, 0.34) 100%
+    rgba(255, 255, 255, 0.78) 0%,
+    rgba(var(--accent-rgb), 0.1) 100%
   );
   --dock-glass-active-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.98),
-    inset 0 -1px 0 rgba(var(--accent-rgb), 0.12),
-    0 2px 10px rgba(var(--shadow-rgb), 0.12),
-    0 0 0 0.5px rgba(var(--accent-rgb), 0.12);
+    inset 0 -1px 0 rgba(var(--accent-rgb), 0.14),
+    0 2px 10px rgba(var(--shadow-rgb), 0.14),
+    0 0 0 1px rgba(var(--accent-rgb), 0.16);
   --green: #16935d;
   --green-soft: #e8f7f0;
   --amber: #c97a16;
@@ -97,6 +98,7 @@
   --dock-glass-item-halo:
     0 1px 6px rgba(0, 0, 0, 0.88),
     0 0 3px rgba(0, 0, 0, 0.72);
+  --dock-glass-icon-halo: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.8));
   --dock-glass-active-bg: linear-gradient(
     180deg,
     rgba(255, 255, 255, 0.11) 0%,
@@ -1318,6 +1320,10 @@ select {
 
 [data-dock='glass'] .dock-item > span:not(.dock-badge) {
   text-shadow: var(--dock-glass-item-halo);
+}
+
+[data-dock='glass'] .dock-item svg {
+  filter: var(--dock-glass-icon-halo);
 }
 
 [data-dock='glass'] .dock-item.active {
