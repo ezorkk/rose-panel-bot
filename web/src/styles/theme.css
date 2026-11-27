@@ -19,16 +19,30 @@
   --border: rgba(var(--accent-rgb), 0.08);
   --shadow: 0 6px 24px rgba(var(--shadow-rgb), 0.06), 0 1px 3px rgba(var(--shadow-rgb), 0.04);
   --shadow-dock: 0 10px 34px rgba(var(--shadow-rgb), 0.13), 0 2px 8px rgba(var(--shadow-rgb), 0.06);
-  --dock-bg: rgba(255, 255, 255, 0.88);
-  --dock-glass-bg: rgba(255, 255, 255, 0.66);
-  --dock-glass-border: rgba(255, 255, 255, 0.78);
+  --dock-bg: rgba(255, 255, 255, 0.96);
+  --dock-glass-bg: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.34) 0%,
+    rgba(255, 255, 255, 0.12) 55%,
+    rgba(255, 255, 255, 0.22) 100%
+  );
+  --dock-glass-filter: blur(9px) saturate(200%);
+  --dock-glass-border: rgba(255, 255, 255, 0.72);
   --dock-glass-shadow:
-    0 12px 34px rgba(var(--shadow-rgb), 0.12),
-    0 2px 8px rgba(var(--shadow-rgb), 0.05),
-    inset 0 1px 0 rgba(255, 255, 255, 0.88),
-    inset 0 -1px 0 rgba(var(--accent-rgb), 0.06);
-  --dock-glass-active-bg: rgba(var(--accent-rgb), 0.13);
-  --dock-glass-active-highlight: rgba(255, 255, 255, 0.68);
+    0 12px 32px rgba(var(--shadow-rgb), 0.14),
+    0 2px 8px rgba(var(--shadow-rgb), 0.06),
+    0 0 0 0.5px rgba(var(--accent-rgb), 0.14),
+    inset 0 1.5px 1px rgba(255, 255, 255, 0.94),
+    inset 0 -1px 1.5px rgba(255, 255, 255, 0.5);
+  --dock-glass-item-color: rgba(24, 20, 24, 0.76);
+  --dock-glass-active-bg: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.56) 0%,
+    rgba(var(--accent-rgb), 0.15) 100%
+  );
+  --dock-glass-active-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 1px 5px rgba(var(--shadow-rgb), 0.1);
   --green: #16935d;
   --green-soft: #e8f7f0;
   --amber: #c97a16;
@@ -62,15 +76,29 @@
   --border: rgba(255, 224, 235, 0.08);
   --shadow: 0 8px 26px rgba(0, 0, 0, 0.35);
   --shadow-dock: 0 12px 36px rgba(0, 0, 0, 0.52);
-  --dock-bg: rgba(31, 24, 27, 0.9);
-  --dock-glass-bg: rgba(31, 24, 27, 0.62);
-  --dock-glass-border: rgba(255, 255, 255, 0.14);
+  --dock-bg: rgba(31, 24, 27, 0.96);
+  --dock-glass-bg: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.1) 0%,
+    rgba(16, 14, 18, 0.2) 52%,
+    rgba(16, 14, 18, 0.28) 100%
+  );
+  --dock-glass-filter: blur(9px) saturate(200%);
+  --dock-glass-border: rgba(255, 255, 255, 0.24);
   --dock-glass-shadow:
-    0 14px 38px rgba(0, 0, 0, 0.48),
-    inset 0 1px 0 rgba(255, 255, 255, 0.18),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.26);
-  --dock-glass-active-bg: rgba(var(--accent-rgb), 0.2);
-  --dock-glass-active-highlight: rgba(255, 255, 255, 0.12);
+    0 14px 36px rgba(0, 0, 0, 0.52),
+    0 2px 10px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.32),
+    inset 0 -1px 1px rgba(255, 255, 255, 0.08);
+  --dock-glass-item-color: rgba(245, 242, 246, 0.82);
+  --dock-glass-active-bg: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.16) 0%,
+    rgba(var(--accent-rgb), 0.24) 100%
+  );
+  --dock-glass-active-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.26),
+    0 1px 6px rgba(0, 0, 0, 0.28);
   --green: #42c98d;
   --green-soft: rgba(66, 201, 141, 0.14);
   --amber: #f0a742;
@@ -113,8 +141,7 @@
   --on-accent: #091320;
   --on-accent-rgb: 9, 19, 32;
   --border: rgba(210, 232, 255, 0.09);
-  --dock-bg: rgba(23, 31, 41, 0.9);
-  --dock-glass-bg: rgba(23, 31, 41, 0.62);
+  --dock-bg: rgba(23, 31, 41, 0.96);
 }
 
 /* Preset 3: Matcha (抹茶青瓷) */
@@ -151,8 +178,7 @@
   --on-accent: #091a12;
   --on-accent-rgb: 9, 26, 18;
   --border: rgba(210, 245, 224, 0.09);
-  --dock-bg: rgba(24, 33, 28, 0.9);
-  --dock-glass-bg: rgba(24, 33, 28, 0.62);
+  --dock-bg: rgba(24, 33, 28, 0.96);
 }
 
 /* Preset 4: Lavender (暮紫雾灰) */
@@ -189,8 +215,7 @@
   --on-accent: #120c21;
   --on-accent-rgb: 18, 12, 33;
   --border: rgba(226, 214, 255, 0.09);
-  --dock-bg: rgba(28, 25, 37, 0.9);
-  --dock-glass-bg: rgba(28, 25, 37, 0.62);
+  --dock-bg: rgba(28, 25, 37, 0.96);
 }
 
 /* Preset 5: Mono (极简黑白) */
@@ -227,8 +252,7 @@
   --on-accent: #141417;
   --on-accent-rgb: 20, 20, 23;
   --border: rgba(255, 255, 255, 0.09);
-  --dock-bg: rgba(27, 27, 30, 0.9);
-  --dock-glass-bg: rgba(27, 27, 30, 0.62);
+  --dock-bg: rgba(27, 27, 30, 0.96);
 }
 
 /* Ensure every dark palette overrides light-mode solid --accent-soft tokens with translucent dark tints */
@@ -1187,8 +1211,8 @@ select {
   width: 100%;
   max-width: 460px;
   background: var(--dock-bg);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   border-radius: 999px;
   border: 1px solid var(--border);
   box-shadow: var(--shadow-dock);
@@ -1226,18 +1250,29 @@ select {
   color: var(--accent);
 }
 
-/* Light Frosted Glass Dock variant */
+/* Clear Frosted Glass Dock variant */
 [data-dock='glass'] .bottom-dock {
   background: var(--dock-glass-bg);
-  backdrop-filter: blur(22px) saturate(185%);
-  -webkit-backdrop-filter: blur(22px) saturate(185%);
+  backdrop-filter: var(--dock-glass-filter);
+  -webkit-backdrop-filter: var(--dock-glass-filter);
   border: 1px solid var(--dock-glass-border);
   box-shadow: var(--dock-glass-shadow);
 }
 
+[data-dock='glass'] .dock-item {
+  color: var(--dock-glass-item-color);
+}
+
 [data-dock='glass'] .dock-item.active {
   background: var(--dock-glass-active-bg);
-  box-shadow: inset 0 1px 0 var(--dock-glass-active-highlight);
+  color: var(--accent-strong);
+  box-shadow: var(--dock-glass-active-shadow);
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  [data-dock='glass'] .bottom-dock {
+    background: var(--dock-bg);
+  }
 }
 
 .dock-badge {
@@ -3217,7 +3252,7 @@ select {
 }
 
 .dock-preview-stage {
-  height: 36px;
+  height: 38px;
   border-radius: 10px;
   position: relative;
   overflow: hidden;
@@ -3225,7 +3260,15 @@ select {
   align-items: center;
   justify-content: center;
   padding: 0 8px;
-  background: linear-gradient(125deg, rgba(var(--accent-rgb), 0.22), rgba(var(--accent-rgb), 0.06) 55%, rgba(245, 158, 11, 0.16));
+  background:
+    radial-gradient(circle at 18% 35%, rgba(var(--accent-rgb), 0.52) 0 11px, transparent 12px),
+    radial-gradient(circle at 82% 65%, rgba(245, 158, 11, 0.5) 0 12px, transparent 13px),
+    radial-gradient(circle at 52% 50%, rgba(22, 147, 93, 0.36) 0 13px, transparent 14px),
+    repeating-linear-gradient(
+      120deg,
+      rgba(var(--accent-rgb), 0.1) 0 8px,
+      transparent 8px 16px
+    );
 }
 
 .dock-preview-pill {
@@ -3246,10 +3289,18 @@ select {
 
 .dock-preview-pill.glass {
   background: var(--dock-glass-bg);
-  backdrop-filter: blur(12px) saturate(180%);
-  -webkit-backdrop-filter: blur(12px) saturate(180%);
+  backdrop-filter: blur(6px) saturate(190%);
+  -webkit-backdrop-filter: blur(6px) saturate(190%);
   border: 1px solid var(--dock-glass-border);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.65);
+  box-shadow:
+    0 4px 12px rgba(var(--shadow-rgb), 0.14),
+    inset 0 1px 0 var(--dock-glass-border);
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .dock-preview-pill.glass {
+    background: var(--dock-bg);
+  }
 }
 
 .dock-preview-seg {
@@ -3262,8 +3313,9 @@ select {
   background: var(--accent-soft);
 }
 
-[data-dock='glass'] .dock-preview-pill.glass .dock-preview-seg.active {
+.dock-preview-pill.glass .dock-preview-seg.active {
   background: var(--dock-glass-active-bg);
+  box-shadow: var(--dock-glass-active-shadow);
 }
 
 .chat-history-pill:disabled {
