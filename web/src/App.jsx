@@ -553,6 +553,9 @@ export default function App() {
                   className={`dock-item ${active ? 'active' : ''}`}
                   onClick={() => {
                     haptic('light');
+                    if (item.id !== effectiveTab) {
+                      window.scrollTo?.(0, 0);
+                    }
                     setActiveTab(item.id);
                   }}
                 >
