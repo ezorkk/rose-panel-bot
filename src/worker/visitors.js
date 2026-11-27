@@ -137,9 +137,14 @@ export function computeSourceStats(visitors = []) {
 }
 
 export async function invalidateVisitorSummaryCache(env) {
-  if (!env?.TOPIC_MAP) return;
   try {
-    await env.TOPIC_MAP.delete(VISITOR_SUMMARY_CACHE_KEY);
+    if (env?.DB) {
+      await getStore(env).invalidateVisitorOverviewCache();
+      return;
+    }
+    if (env?.TOPIC_MAP) {
+      await env.TOPIC_MAP.delete(VISITOR_SUMMARY_CACHE_KEY);
+    }
   } catch {
     // Ignore cache invalidation errors
   }
@@ -270,8 +275,8 @@ export async function upsertVisitorProfile(env, tgUser, extra = {}) {
   }
   if (store.mode === 'kv') {
     await addToVisitorIndex(env, uid);
-    await invalidateVisitorSummaryCache(env);
   }
+  await invalidateVisitorSummaryCache(env);
   return updated;
 }
 
@@ -343,8 +348,8 @@ export async function addPendingReviewMessage(env, tgUser, entry) {
   }
   if (store.mode === 'kv') {
     await addToVisitorIndex(env, uid);
-    await invalidateVisitorSummaryCache(env);
   }
+  await invalidateVisitorSummaryCache(env);
   return { record: updated, pendingReview: nextPending };
 }
 
@@ -357,9 +362,7 @@ export async function clearPendingReviewMessages(env, userId) {
   if (rec.pendingReview !== undefined) {
     delete rec.pendingReview;
     await store.putVisitor(uid, rec);
-    if (store.mode === 'kv') {
-      await invalidateVisitorSummaryCache(env);
-    }
+    await invalidateVisitorSummaryCache(env);
   }
   return rec;
 }
@@ -487,7 +490,7 @@ export async function recordVisitorExchange(env, userId, msg, options = {}) {
       invalidateVisitorSummaryCache(env),
     ]);
   } else {
-    await store.putVisitor(uid, rec);
+    await Promise.all([store.putVisitor(uid, rec), invalidateVisitorSummaryCache(env)]);
   }
 
   return {
@@ -699,9 +702,7 @@ export async function clearVisitorHistory(env, userId, mode = 'archive', tgCallF
   rec.link_count = 0;
   rec.last_preview = '';
   await store.putVisitor(uid, rec);
-  if (store.mode === 'kv') {
-    await invalidateVisitorSummaryCache(env);
-  }
+  await invalidateVisitorSummaryCache(env);
 
   const visitor = await getVisitorDetail(env, uid, null, rec);
   return { visitor, deletedTopic, deletedPmCount };
@@ -798,12 +799,14 @@ export async function listVisitors(env, options = {}) {
 
   const store = getStore(env);
   let details = [];
+  let sqlTotalCount = 0;
 
   if (store.mode === 'd1') {
-    const [rows, supergroupId] = await Promise.all([
+    const [{ rows, totalCount }, supergroupId] = await Promise.all([
       store.listVisitorRecords({ limit: 120 }),
       resolveSupergroupId(env),
     ]);
+    sqlTotalCount = totalCount;
     details = (
       await Promise.all(rows.map(({ uid, record }) => getVisitorDetail(env, uid, supergroupId, record)))
     ).filter(Boolean);
@@ -873,7 +876,7 @@ export async function listVisitors(env, options = {}) {
   });
 
   const stats = {
-    total: details.length,
+    total: store.mode === 'd1' ? Math.max(sqlTotalCount, details.length) : details.length,
     active: details.filter((v) => !v.isBanned && !v.isClosed).length,
     trusted: details.filter((v) => v.isTrusted && !v.isBanned).length,
     banned: details.filter((v) => v.isBanned).length,
@@ -882,23 +885,31 @@ export async function listVisitors(env, options = {}) {
   };
   const sourceStats = computeSourceStats(details);
 
-  // KV mode only: opportunistically refresh single-key summary cache when missing or expired.
-  // D1 mode queries `visitors` directly via SQL and never writes `cache:visitor_summary`.
-  if (store.mode === 'kv' && !search && filter === 'all') {
-    const existingCache = await safeGetJSON(env.TOPIC_MAP, VISITOR_SUMMARY_CACHE_KEY, null);
-    const cacheFresh =
-      existingCache &&
-      existingCache.stats &&
-      typeof existingCache.stats.pendingReview === 'number' &&
-      Array.isArray(existingCache.sourceStats) &&
-      Date.now() - Number(existingCache.cachedAt || 0) < VISITOR_SUMMARY_TTL_MS;
-    if (!cacheFresh) {
-      await safePutJSON(
-        env.TOPIC_MAP,
-        VISITOR_SUMMARY_CACHE_KEY,
-        { stats, sourceStats, recent: details.slice(0, 5), cachedAt: Date.now() },
-        { expirationTtl: 600 }
-      ).catch(() => {});
+  // Cache overview in D1 `meta` (D1 mode, 0 KV writes/reads on warm open) or KV `cache:visitor_summary` (KV mode).
+  if (!search && filter === 'all') {
+    if (store.mode === 'd1') {
+      const existingCache = await store.getVisitorOverviewCache(VISITOR_SUMMARY_TTL_MS).catch(() => null);
+      if (!existingCache) {
+        await store
+          .putVisitorOverviewCache({ stats, sourceStats, recent: details.slice(0, 5), cachedAt: Date.now() })
+          .catch(() => {});
+      }
+    } else {
+      const existingCache = await safeGetJSON(env.TOPIC_MAP, VISITOR_SUMMARY_CACHE_KEY, null);
+      const cacheFresh =
+        existingCache &&
+        existingCache.stats &&
+        typeof existingCache.stats.pendingReview === 'number' &&
+        Array.isArray(existingCache.sourceStats) &&
+        Date.now() - Number(existingCache.cachedAt || 0) < VISITOR_SUMMARY_TTL_MS;
+      if (!cacheFresh) {
+        await safePutJSON(
+          env.TOPIC_MAP,
+          VISITOR_SUMMARY_CACHE_KEY,
+          { stats, sourceStats, recent: details.slice(0, 5), cachedAt: Date.now() },
+          { expirationTtl: 600 }
+        ).catch(() => {});
+      }
     }
   }
 
@@ -937,7 +948,17 @@ export async function getVisitorOverview(env) {
     };
   }
   const store = getStore(env);
-  if (store.mode === 'kv') {
+  if (store.mode === 'd1') {
+    const cached = await store.getVisitorOverviewCache(VISITOR_SUMMARY_TTL_MS).catch(() => null);
+    if (cached) {
+      return {
+        stats: cached.stats,
+        sourceStats: Array.isArray(cached.sourceStats) ? cached.sourceStats : [],
+        recent: Array.isArray(cached.recent) ? cached.recent : [],
+        cached: true,
+      };
+    }
+  } else {
     const cached = await safeGetJSON(env.TOPIC_MAP, VISITOR_SUMMARY_CACHE_KEY, null);
     if (
       cached &&
@@ -1036,16 +1057,19 @@ export async function applyVisitorAction(env, userId, action, payload = {}) {
   }
 
   // In D1 mode, ensure visitors acted upon via ban/trust (e.g. direct ban/trust by UID) exist in
-  // `visitors` so they always appear in `listVisitors`, matching KV's `addToVisitorIndex`.
+  // `visitors` with a fresh `last_seen_at` so they surface immediately in `listVisitors` for 1-click unban.
   const shouldCreateD1Stub = store.mode === 'd1' && !existingRec && (action === 'ban' || action === 'trust');
+  if (shouldCreateD1Stub && !rec.last_seen_at) {
+    rec.last_seen_at = new Date().toISOString();
+  }
   if (recordDirty || shouldCreateD1Stub) {
     await store.putVisitor(uid, rec);
   }
 
   if (store.mode === 'kv') {
     await addToVisitorIndex(env, uid);
-    await invalidateVisitorSummaryCache(env);
   }
+  await invalidateVisitorSummaryCache(env);
   return await getVisitorDetail(env, uid, null, recordDirty || existingRec || shouldCreateD1Stub ? rec : null);
 }
 
@@ -1127,11 +1151,7 @@ export async function recallAdminVisitorMessage(
   if (removeRes.removed && storedRec) {
     storedRec.photo_count = removeRes.photoCount;
     storedRec.link_count = removeRes.linkCount;
-    if (store.mode === 'kv') {
-      await Promise.all([store.putVisitor(uid, storedRec), invalidateVisitorSummaryCache(env)]);
-    } else {
-      await store.putVisitor(uid, storedRec);
-    }
+    await Promise.all([store.putVisitor(uid, storedRec), invalidateVisitorSummaryCache(env)]);
   }
   return { ok: true, deletedPmMessageId: target.id };
 }

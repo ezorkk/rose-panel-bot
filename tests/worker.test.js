@@ -369,13 +369,11 @@ describe('Visitor profiles & moderation (telegram_private_chatbot KV compatibili
     expect(listSpy).toHaveBeenCalledTimes(0);
 
     const ov2 = await getVisitorOverview(env);
-    if (storageMode === 'kv') {
-      expect(ov2.cached).toBe(true);
-    } else {
-      expect(ov2.cached).toBe(false);
+    expect(ov2.cached).toBe(true);
+    expect(ov2.stats.total).toBe(2);
+    if (storageMode === 'd1') {
       expect(await kv.get('cache:visitor_summary')).toBeNull();
     }
-    expect(ov2.stats.total).toBe(2);
 
     await applyVisitorAction(env, '88802', 'ban');
     const ov3 = await getVisitorOverview(env);
@@ -5369,26 +5367,10 @@ describe('Monthly unique visitor counter (v1.8)', () => {
     const cfgDefault = await loadPanelConfig(env);
     expect(cfgDefault.profile.showVisitCounter).toBe(false);
 
-    // Seed this month (42) + last month (31) totals in the active storage engine
+    // Seed this month + last month totals in KV (verifies KV mode AND D1 mid-month upgrade continuity!)
     const { thisMonthKey, lastMonthKey } = getMonthKeys(new Date(), cfgDefault.community.timezoneOffsetHours);
-    if (storageMode === 'kv') {
-      await kv.put(`visit:count:${thisMonthKey}`, JSON.stringify({ n: 42 }));
-      await kv.put(`visit:count:${lastMonthKey}`, JSON.stringify({ n: 31 }));
-    } else {
-      await ensureSchema(env);
-      const stmts = [];
-      for (let i = 1; i <= 42; i += 1) {
-        stmts.push(
-          env.DB.prepare(`INSERT INTO visit_seen (month, uid) VALUES (?, ?)`).bind(thisMonthKey, String(10000 + i))
-        );
-      }
-      for (let i = 1; i <= 31; i += 1) {
-        stmts.push(
-          env.DB.prepare(`INSERT INTO visit_seen (month, uid) VALUES (?, ?)`).bind(lastMonthKey, String(20000 + i))
-        );
-      }
-      await env.DB.batch(stmts);
-    }
+    await kv.put(`visit:count:${thisMonthKey}`, JSON.stringify({ n: 42 }));
+    await kv.put(`visit:count:${lastMonthKey}`, JSON.stringify({ n: 31 }));
 
     const guestInit = await signInitData(
       { user: JSON.stringify({ id: 74001, first_name: 'Viewer' }), auth_date: Math.floor(Date.now() / 1000) },
@@ -7591,31 +7573,41 @@ describe('Cloudflare D1 storage layer, schema idempotency, map fallback & daily 
     expect(fullHist.messages[74].text).toBe('msg #75');
   });
 
-  it('reads topic_map and dm_map from D1 only (Stage 3 removes legacy KV fallback with 0 KV reads on miss)', async () => {
+  it('time-gates KV fallback for legacy tmsg:* (30d) and dmmap:* (7d) using meta.d1_since, then stops with 0 KV reads', async () => {
     const kv = createMemoryKV();
     const db = createD1Shim();
     const env = { TOPIC_MAP: kv, DB: db };
     const store = getStore(env);
+    await ensureSchema(env);
 
-    // Legacy KV keys present, but D1 does NOT fall back to KV in Stage 3
+    const d1Since = Number(await db.prepare(`SELECT value FROM meta WHERE key = 'd1_since'`).first('value'));
+    expect(d1Since).toBeGreaterThan(0);
+
+    // Pre-upgrade KV keys exist
     await kv.put(`${TOPIC_MSG_MAP_PREFIX}901`, JSON.stringify({ g: '-100555', u: '70001', p: 42 }));
     await kv.put(`${DM_MAP_PREFIX}801`, JSON.stringify({ u: '70002', p: 55 }));
+    await kv.put(`${DM_MAP_PREFIX}802`, '70003');
 
+    // Within 7d/30d of d1_since -> fallback succeeds so straight v1.11 -> v2.2 upgrades never lose recent replies/reactions
+    expect(await store.getTopicMap('-100555', 901, d1Since + 1000)).toEqual({ uid: '70001', pmMessageId: 42 });
+    expect(await store.getTopicMap('-100999', 901, d1Since + 1000)).toBeNull();
+    expect(await store.getDmMap(801, d1Since + 1000)).toEqual({ uid: '70002', pmMessageId: 55 });
+    expect(await store.getDmMap(802, d1Since + 1000)).toEqual({ uid: '70003', pmMessageId: null });
+
+    // Past 7d -> dm_map stops reading KV; past 30d -> topic_map stops reading KV (0 KV reads on miss)
     const kvGetSpy = vi.spyOn(kv, 'get');
-    expect(await store.getTopicMap('-100555', 901)).toBeNull();
-    expect(await store.getDmMap(801)).toBeNull();
+    const after7d = d1Since + 7 * 86400 * 1000 + 1;
+    const after30d = d1Since + 30 * 86400 * 1000 + 1;
+    expect(await store.getDmMap(801, after7d)).toBeNull();
+    expect(await store.getTopicMap('-100555', 901, after30d)).toBeNull();
     expect(kvGetSpy).not.toHaveBeenCalled();
 
-    // Writing & reading via D1 works cleanly with group isolation and 0 KV writes
+    // Direct D1 hits always work with 0 KV reads & 0 KV writes
     const kvPutSpy = vi.spyOn(kv, 'put');
-    await store.putTopicMap('-100555', 901, '70001', 42);
-    await store.putDmMap(801, '70002', 55);
-    await store.putDmMap(802, '70003', null);
-
-    expect(await store.getTopicMap('-100555', 901)).toEqual({ uid: '70001', pmMessageId: 42 });
-    expect(await store.getTopicMap('-100999', 901)).toBeNull();
-    expect(await store.getDmMap(801)).toEqual({ uid: '70002', pmMessageId: 55 });
-    expect(await store.getDmMap(802)).toEqual({ uid: '70003', pmMessageId: null });
+    await store.putTopicMap('-100555', 905, '70005', 45);
+    await store.putDmMap(805, '70006', 66);
+    expect(await store.getTopicMap('-100555', 905)).toEqual({ uid: '70005', pmMessageId: 45 });
+    expect(await store.getDmMap(805)).toEqual({ uid: '70006', pmMessageId: 66 });
     expect(kvPutSpy).not.toHaveBeenCalled();
     expect(kvGetSpy).not.toHaveBeenCalled();
   });
@@ -9126,21 +9118,47 @@ describe('Cloudflare D1 Stage 3: visitors, atomic rate_limits, visit_seen & visi
     expect(await kv.get('cache:visitor_summary')).toBeNull();
     expect(kvPutSpy).not.toHaveBeenCalled();
 
-    // 4. Subsequent listVisitors & getVisitorOverview perform 0 kv.list calls and 0 KV writes
+    // 4. Subsequent getVisitorOverview hits D1 meta cache with 0 kv.list, 0 kv.get, and 0 kv.put calls!
     const listSpy = vi.spyOn(kv, 'list');
+    const getSpy = vi.spyOn(kv, 'get');
     const ov = await getVisitorOverview(env);
     expect(ov.stats.total).toBe(4);
-    expect(ov.cached).toBe(false);
+    expect(ov.cached).toBe(true);
     expect(listSpy).not.toHaveBeenCalled();
+    expect(getSpy).not.toHaveBeenCalled();
     expect(kvPutSpy).not.toHaveBeenCalled();
 
-    // 5. Direct ban action on an unseen UID ensures it is inserted into D1 `visitors` so it appears in banned list
+    // 5. Direct ban action on an unseen UID ensures it is inserted into D1 `visitors` with non-null last_seen_at
     const bannedNew = await applyVisitorAction(env, '93005', 'ban');
     expect(bannedNew.isBanned).toBe(true);
+    expect(bannedNew.last_seen_at).toBeTruthy();
+    // Orphan banned placeholder 93003 also received non-null last_seen_at so it never drops off the bottom
+    const orphanRow = await db.prepare(`SELECT last_seen_at FROM visitors WHERE uid = '93003'`).first();
+    expect(orphanRow?.last_seen_at).toBeGreaterThan(0);
+    // Overview cache was invalidated immediately on mutation
+    const ovAfterBan = await getVisitorOverview(env);
+    expect(ovAfterBan.cached).toBe(false);
+    expect(ovAfterBan.stats.banned).toBe(2);
     const bannedList = await listVisitors(env, { filter: 'banned' });
     expect(bannedList.items.map((v) => v.userId).sort()).toEqual(['93003', '93005']);
 
-    // 6. migrateVisitor also imports KV `user:{uid}` when migrating a visitor on a fresh DB
+    // 6. Backfill advances cleanly past 350 stale `visitors:index` entries and finishes within bounded runs
+    const staleKv = createMemoryKV();
+    const staleIds = Array.from({ length: 350 }, (_, i) => String(800000 + i));
+    await staleKv.put('visitors:index', JSON.stringify(staleIds));
+    await staleKv.put('user:800349', JSON.stringify({ first_name: 'TailSurvivor', last_seen_at: '2026-02-01T00:00:00.000Z' }));
+    const staleDb = createD1Shim();
+    const staleEnv = { TOPIC_MAP: staleKv, DB: staleDb };
+    const r1 = await ensureVisitorsBackfilled(staleEnv);
+    expect(r1.finished).toBe(false);
+    const r2 = await ensureVisitorsBackfilled(staleEnv);
+    expect(r2.finished).toBe(false);
+    const r3 = await ensureVisitorsBackfilled(staleEnv);
+    expect(r3.finished).toBe(true);
+    expect(await isVisitorsBackfilled(staleEnv)).toBe(true);
+    expect((await getVisitorDetail(staleEnv, '800349'))?.displayName).toBe('TailSurvivor');
+
+    // 7. migrateVisitor also imports KV `user:{uid}` when migrating a visitor on a fresh DB
     const db2 = createD1Shim();
     const env2 = { TOPIC_MAP: kv, DB: db2 };
     await migrateVisitor(env2, '93002');
@@ -9180,25 +9198,67 @@ describe('Cloudflare D1 Stage 3: visitors, atomic rate_limits, visit_seen & visi
     const remainingKeys = (await db.prepare(`SELECT key FROM rate_limits ORDER BY key`).all()).results.map((r) => r.key);
     expect(remainingKeys).toEqual(['rl:msg:94001']);
     expect(kvPutSpy).not.toHaveBeenCalled();
+
+    // Fail-open on transient D1 error so visitor messages are never silently dropped
+    const brokenEnv = {
+      TOPIC_MAP: kv,
+      DB: {
+        prepare() {
+          throw new Error('D1 transient error');
+        },
+        async batch() {
+          throw new Error('D1 transient error');
+        },
+      },
+    };
+    expect(await checkRateLimit(brokenEnv, 'rl:msg:94009', 10, 60, t0)).toBe(true);
   });
 
-  it('counts concurrent monthly visits atomically in D1 visit_seen with 0 KV writes and fails open on D1 errors', async () => {
+  it('preserves mid-month KV visit counts without double-counting, purges old visit_seen months, and fails open', async () => {
     const kv = createMemoryKV();
     const db = createD1Shim();
     const botToken = '123456:D1_VISIT_CONC';
     const env = { TOPIC_MAP: kv, DB: db, BOT_TOKEN: botToken, ADMIN_IDS: '900001' };
-    const kvPutSpy = vi.spyOn(kv, 'put');
     const cfg = { community: { timezoneOffsetHours: 8 } };
-    const nowDate = new Date('2026-07-15T08:00:00Z');
+    const julyDate = new Date('2026-07-15T08:00:00Z'); // 202607
+    const augDate = new Date('2026-08-02T08:00:00Z'); // 202608
+    const sepDate = new Date('2026-09-02T08:00:00Z'); // 202609
 
-    // 20 distinct visitors + 10 duplicate concurrent calls -> strictly 20 unique counted, 0 KV writes
+    // Pre-upgrade KV counts: June had 15, July already had 10 (including returning visitor 96000)
+    await kv.put('visit:count:202606', JSON.stringify({ n: 15 }));
+    await kv.put('visit:count:202607', JSON.stringify({ n: 10 }));
+    await kv.put('visit:seen:202607:96000', '1');
+
+    const kvPutSpy = vi.spyOn(kv, 'put');
+
+    // 20 distinct visitors (96000 is already in KV, 96001..96019 are 19 brand-new) + 10 duplicates
     const uids = [
       ...Array.from({ length: 20 }, (_, i) => String(96000 + i)),
       ...Array.from({ length: 10 }, (_, i) => String(96000 + i)),
     ];
-    await Promise.all(uids.map((uid) => recordMonthlyVisit(env, uid, cfg, nowDate)));
-    expect(await getVisitStats(env, cfg, nowDate)).toEqual({ thisMonth: 20, lastMonth: 0 });
+    await Promise.all(uids.map((uid) => recordMonthlyVisit(env, uid, cfg, julyDate)));
+    // Exact continuity: July = 10 (KV) + 19 (new in D1, 96000 flagged in_kv=1) = 29; June = 15 (KV)
+    expect(await getVisitStats(env, cfg, julyDate)).toEqual({ thisMonth: 29, lastMonth: 15 });
     expect(kvPutSpy).not.toHaveBeenCalled();
+
+    // Repeat visit by 96000 in July hits D1 first -> 0 KV reads
+    const kvGetSpy = vi.spyOn(kv, 'get');
+    await recordMonthlyVisit(env, '96000', cfg, julyDate);
+    expect(kvGetSpy).not.toHaveBeenCalled();
+
+    // Next month (Aug > visit_d1_since 202607): pure D1 with 0 KV reads for August, keeps July = 29 as lastMonth
+    await recordMonthlyVisit(env, '96000', cfg, augDate);
+    kvGetSpy.mockClear();
+    expect(await getVisitStats(env, cfg, augDate, { includeLastMonth: false })).toEqual({ thisMonth: 1 });
+    expect(kvGetSpy).not.toHaveBeenCalled();
+    expect(await getVisitStats(env, cfg, augDate)).toEqual({ thisMonth: 1, lastMonth: 29 });
+
+    // Daily cleanup in Nov 2026 purges visit_seen months < 202609 (202607 & 202608 deleted; 202609 preserved)
+    await recordMonthlyVisit(env, '96001', cfg, sepDate);
+    const cleaned = await cleanupExpiredMaps(env, Date.UTC(2026, 10, 5, 0, 2, 0)); // 2026-11-05 UTC -> cutoff 202609
+    expect(cleaned.deletedVisitSeen).toBe(21); // 20 July rows + 1 Aug row
+    const remainingMonths = (await db.prepare(`SELECT DISTINCT month FROM visit_seen`).all()).results.map((r) => r.month);
+    expect(remainingMonths).toEqual(['202609']);
 
     // Fail-open when D1 throws during /api/bootstrap
     const brokenDb = {
@@ -9222,7 +9282,7 @@ describe('Cloudflare D1 Stage 3: visitors, atomic rate_limits, visit_seen & visi
     expect((await res.json()).ok).toBe(true);
   });
 
-  it('always delivers visitor profile card for username-less visitors and falls back if tg://user mention fails', async () => {
+  it('delivers username-less visitor card with 400-only mention fallback, no duplicate on 500, and 0 KV writes on repeat topic PMs', async () => {
     const kv = createMemoryKV();
     const db = createD1Shim();
     const env = {
@@ -9236,6 +9296,7 @@ describe('Cloudflare D1 Stage 3: visitors, atomic rate_limits, visit_seen & visi
 
     const origFetch = globalThis.fetch;
     const calls = [];
+    let simulate500 = false;
     globalThis.fetch = vi.fn(async (url, init) => {
       const method = String(url).split('/').pop();
       const body = init?.body ? JSON.parse(init.body) : {};
@@ -9243,7 +9304,12 @@ describe('Cloudflare D1 Stage 3: visitors, atomic rate_limits, visit_seen & visi
       if (method === 'createForumTopic') {
         return new Response(JSON.stringify({ ok: true, result: { message_thread_id: 777 } }), { status: 200 });
       }
-      // Simulate Telegram rejecting tg://user?id= mention on the first card sendMessage
+      if (simulate500 && method === 'sendMessage' && String(body.text || '').includes('访客资料卡')) {
+        return new Response(JSON.stringify({ ok: false, error_code: 500, description: 'Internal Server Error' }), {
+          status: 500,
+        });
+      }
+      // Simulate Telegram rejecting tg://user?id= mention on the first card sendMessage (400)
       if (method === 'sendMessage' && String(body.text || '').includes('tg://user?id=95001')) {
         return new Response(
           JSON.stringify({ ok: false, error_code: 400, description: 'Bad Request: BUTTON_USER_PRIVACY_RESTRICTED' }),
@@ -9278,8 +9344,44 @@ describe('Cloudflare D1 Stage 3: visitors, atomic rate_limits, visit_seen & visi
       expect(fallbackCard).toBeTruthy();
       expect(fallbackCard.body.text).toContain('<b>NoHandle</b>');
       expect(fallbackCard.body.text).toContain('<i>未设置</i>');
-      // Message itself was still copied into the topic cleanly
       expect(calls.some((c) => c.method === 'copyMessage' && c.body.message_thread_id === 777)).toBe(true);
+
+      // Second PM from same visitor in existing topic performs 0 KV puts (no redundant `thread:777` rewrite!)
+      const kvPutSpy = vi.spyOn(kv, 'put');
+      await handleTelegramUpdate(
+        {
+          message: {
+            message_id: 2,
+            from: { id: 95001, first_name: 'NoHandle' },
+            chat: { id: 95001, type: 'private' },
+            text: '第二条消息',
+          },
+        },
+        env,
+        'https://panel.test'
+      );
+      expect(kvPutSpy).not.toHaveBeenCalled();
+
+      // A 500 error on sendVisitorCardMessage must NOT trigger a duplicate fallback sendMessage
+      simulate500 = true;
+      calls.length = 0;
+      await kv.put('verified:95002', 'emoji:v1');
+      await expect(
+        handleTelegramUpdate(
+          {
+            message: {
+              message_id: 10,
+              from: { id: 95002, first_name: 'Err500' },
+              chat: { id: 95002, type: 'private' },
+              text: '触发500',
+            },
+          },
+          env,
+          'https://panel.test'
+        )
+      ).rejects.toThrow(/Internal Server Error/);
+      const cardAttempts = calls.filter((c) => c.method === 'sendMessage' && String(c.body.text || '').includes('访客资料卡'));
+      expect(cardAttempts).toHaveLength(1);
     } finally {
       globalThis.fetch = origFetch;
     }

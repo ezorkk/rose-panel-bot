@@ -4,14 +4,50 @@
 // reconstructs the exact v1.11.0 response structures, and never deletes legacy KV keys.
 
 import { CHAT_RETENTION_DAYS_OPTIONS, normalizeChatRetentionDays, safeGetJSON } from '../config.js';
-import { ensureSchema } from './d1Schema.js';
+import { ensureSchema, getD1SinceMs } from './d1Schema.js';
 import {
   DM_MAP_TTL_SECONDS,
   MAX_MESSAGES,
   TOPIC_MSG_MAP_TTL_SECONDS,
   matchRecallEntryInPmList,
+  readKvDmMapEntry,
+  readKvTopicMapEntry,
 } from './kvStore.js';
 import { ensureVisitorsBackfilled, isVisitorsBackfilled, serializeVisitorRow } from './migrate.js';
+
+const VISITOR_OVERVIEW_CACHE_META_KEY = 'visitor_overview_cache';
+const VISIT_D1_SINCE_META_KEY = 'visit_d1_since';
+const visitD1SinceCache = new WeakMap();
+
+async function ensureVisitD1SinceMonth(env, currentMonthKey) {
+  const db = env?.DB;
+  if (!db) return currentMonthKey;
+  if (visitD1SinceCache.has(db)) {
+    return visitD1SinceCache.get(db);
+  }
+  await ensureSchema(env);
+  const res = await db.batch([
+    db.prepare(`INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)`).bind(VISIT_D1_SINCE_META_KEY, currentMonthKey),
+    db.prepare(`SELECT value FROM meta WHERE key = ?`).bind(VISIT_D1_SINCE_META_KEY),
+  ]);
+  const stored = String(res?.[1]?.results?.[0]?.value || currentMonthKey).trim();
+  const valid = /^\d{6}$/.test(stored) ? stored : currentMonthKey;
+  visitD1SinceCache.set(db, valid);
+  return valid;
+}
+
+function getVisitSeenCutoffMonth(nowMs) {
+  // Keep current UTC month + previous 2 UTC months so `thisMonth` & `lastMonth` remain intact
+  // across every possible owner timezone offset (UTC-12 .. UTC+14).
+  const d = new Date(nowMs);
+  let year = d.getUTCFullYear();
+  let month = d.getUTCMonth() + 1 - 2;
+  while (month <= 0) {
+    month += 12;
+    year -= 1;
+  }
+  return `${year}${String(month).padStart(2, '0')}`;
+}
 
 export const D1_PHOTO_QUERY_LIMIT = 500;
 export const D1_LINK_QUERY_LIMIT = 500;
@@ -166,11 +202,13 @@ export async function cleanupExpiredMaps(env, nowMs = Date.now(), options = {}) 
   const ts = Number.isFinite(Number(nowMs)) ? Math.trunc(Number(nowMs)) : Date.now();
   const topicCutoff = ts - TOPIC_MSG_MAP_TTL_SECONDS * 1000;
   const dmCutoff = ts - DM_MAP_TTL_SECONDS * 1000;
+  const visitCutoffMonth = getVisitSeenCutoffMonth(ts);
 
   const mapRes = await db.batch([
     db.prepare(`DELETE FROM topic_map WHERE created_at < ?`).bind(topicCutoff),
     db.prepare(`DELETE FROM dm_map WHERE created_at < ?`).bind(dmCutoff),
     db.prepare(`DELETE FROM rate_limits WHERE expires_at <= ?`).bind(ts),
+    db.prepare(`DELETE FROM visit_seen WHERE month < ?`).bind(visitCutoffMonth),
   ]);
 
   const retentionDays = normalizeChatRetentionDays(options?.retentionDays);
@@ -254,6 +292,7 @@ export async function cleanupExpiredMaps(env, nowMs = Date.now(), options = {}) 
     deletedTopicMaps: Number(mapRes?.[0]?.meta?.changes || 0),
     deletedDmMaps: Number(mapRes?.[1]?.meta?.changes || 0),
     deletedRateLimits: Number(mapRes?.[2]?.meta?.changes || 0),
+    deletedVisitSeen: Number(mapRes?.[3]?.meta?.changes || 0),
     retentionDays,
     deletedMessages,
     deletedLinks,
@@ -968,23 +1007,33 @@ export function createD1Store(env, hooks = {}) {
         .run();
     },
 
-    async getTopicMap(groupId, topicMsgId) {
+    async getTopicMap(groupId, topicMsgId, nowMs = Date.now()) {
       const tid = Number(topicMsgId);
       const gid = String(groupId ?? '').trim();
       if (!db || !gid || !Number.isInteger(tid) || tid <= 0) return null;
       await ensureSchema(env);
 
+      const ts = Number.isFinite(Number(nowMs)) ? Math.trunc(Number(nowMs)) : Date.now();
       const row = await db
         .prepare(`SELECT uid, pm_message_id, created_at FROM topic_map WHERE group_id = ? AND topic_msg_id = ?`)
         .bind(gid, tid)
         .first();
       if (row) {
-        const minCreatedAt = Date.now() - TOPIC_MSG_MAP_TTL_SECONDS * 1000;
+        const minCreatedAt = ts - TOPIC_MSG_MAP_TTL_SECONDS * 1000;
         if (Number(row.created_at) < minCreatedAt) return null;
         const uid = String(row.uid || '').trim();
         const pmId = Number(row.pm_message_id);
         if (!/^\d+$/.test(uid) || !Number.isInteger(pmId) || pmId <= 0) return null;
         return { uid, pmMessageId: pmId };
+      }
+
+      // Time-gated KV fallback: only read legacy KV `tmsg:*` within 30 days of D1 initialization
+      // so users upgrading straight from v1.11 never lose recent mappings; stops automatically after 30d.
+      if (kv) {
+        const d1Since = await getD1SinceMs(env);
+        if (d1Since > 0 && ts < d1Since + TOPIC_MSG_MAP_TTL_SECONDS * 1000) {
+          return readKvTopicMapEntry(kv, gid, tid);
+        }
       }
       return null;
     },
@@ -1004,22 +1053,32 @@ export function createD1Store(env, hooks = {}) {
         .run();
     },
 
-    async getDmMap(ownerMsgId) {
+    async getDmMap(ownerMsgId, nowMs = Date.now()) {
       const msgId = Number(ownerMsgId);
       if (!db || !Number.isFinite(msgId) || msgId <= 0) return null;
       await ensureSchema(env);
 
+      const ts = Number.isFinite(Number(nowMs)) ? Math.trunc(Number(nowMs)) : Date.now();
       const row = await db
         .prepare(`SELECT uid, pm_message_id, created_at FROM dm_map WHERE owner_msg_id = ?`)
         .bind(Math.trunc(msgId))
         .first();
       if (row) {
-        const minCreatedAt = Date.now() - DM_MAP_TTL_SECONDS * 1000;
+        const minCreatedAt = ts - DM_MAP_TTL_SECONDS * 1000;
         if (Number(row.created_at) < minCreatedAt) return null;
         const uid = String(row.uid || '').trim();
         if (!/^\d+$/.test(uid)) return null;
         const pmId = toNullablePositiveInt(row.pm_message_id);
         return { uid, pmMessageId: pmId };
+      }
+
+      // Time-gated KV fallback: only read legacy KV `dmmap:*` within 7 days of D1 initialization
+      // so DM quote-replies & reactions keep working across upgrades; stops automatically after 7d.
+      if (kv) {
+        const d1Since = await getD1SinceMs(env);
+        if (d1Since > 0 && ts < d1Since + DM_MAP_TTL_SECONDS * 1000) {
+          return readKvDmMapEntry(kv, msgId);
+        }
       }
       return null;
     },
@@ -1150,23 +1209,25 @@ export function createD1Store(env, hooks = {}) {
     },
 
     async listVisitorRecords(options = {}) {
-      if (!db) return [];
+      if (!db) return { rows: [], totalCount: 0 };
       const rawLimit = Number(options?.limit);
       const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 500) : 120;
       await ensureSchema(env);
       await ensureVisitorsBackfilled(env);
 
-      const res = await db
-        .prepare(
-          `SELECT uid, data FROM visitors
-           ORDER BY last_seen_at DESC, updated_at DESC, uid DESC
-           LIMIT ?`
-        )
-        .bind(limit)
-        .all();
+      const [rowsRes, countRes] = await db.batch([
+        db
+          .prepare(
+            `SELECT uid, data FROM visitors
+             ORDER BY last_seen_at DESC, updated_at DESC, uid DESC
+             LIMIT ?`
+          )
+          .bind(limit),
+        db.prepare(`SELECT COUNT(*) AS cnt FROM visitors`),
+      ]);
 
-      const out = [];
-      for (const row of res?.results || []) {
+      const rows = [];
+      for (const row of rowsRes?.results || []) {
         const uid = String(row?.uid || '').trim();
         if (!/^\d+$/.test(uid)) continue;
         let record = { userId: uid };
@@ -1180,9 +1241,50 @@ export function createD1Store(env, hooks = {}) {
             // Fall back to minimal record
           }
         }
-        out.push({ uid, record });
+        rows.push({ uid, record });
       }
-      return out;
+      const totalCount = Math.max(rows.length, Number(countRes?.results?.[0]?.cnt || 0));
+      return { rows, totalCount };
+    },
+
+    async getVisitorOverviewCache(maxAgeMs) {
+      if (!db) return null;
+      await ensureSchema(env);
+      const row = await db
+        .prepare(`SELECT value FROM meta WHERE key = ?`)
+        .bind(VISITOR_OVERVIEW_CACHE_META_KEY)
+        .first();
+      if (!row?.value) return null;
+      try {
+        const parsed = JSON.parse(row.value);
+        if (
+          parsed &&
+          parsed.stats &&
+          typeof parsed.stats.pendingReview === 'number' &&
+          Array.isArray(parsed.sourceStats) &&
+          Date.now() - Number(parsed.cachedAt || 0) < maxAgeMs
+        ) {
+          return parsed;
+        }
+      } catch {
+        // Ignore corrupt cache
+      }
+      return null;
+    },
+
+    async putVisitorOverviewCache(payload) {
+      if (!db || !payload || typeof payload !== 'object') return;
+      await ensureSchema(env);
+      await db
+        .prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)`)
+        .bind(VISITOR_OVERVIEW_CACHE_META_KEY, JSON.stringify(payload))
+        .run();
+    },
+
+    async invalidateVisitorOverviewCache() {
+      if (!db) return;
+      await ensureSchema(env);
+      await db.prepare(`DELETE FROM meta WHERE key = ?`).bind(VISITOR_OVERVIEW_CACHE_META_KEY).run();
     },
 
     async checkRateLimit(key, limit = 40, windowSec = 60, nowMs = Date.now()) {
@@ -1224,9 +1326,32 @@ export function createD1Store(env, hooks = {}) {
       if (!db || !/^\d{6}$/.test(cleanMonth) || !/^\d+$/.test(cleanUid)) {
         return { recorded: false };
       }
-      await ensureSchema(env);
+      const d1SinceMonth = await ensureVisitD1SinceMonth(env, cleanMonth);
+
+      // During the upgrade transition month (`cleanMonth <= d1SinceMonth`), check D1 first (0 KV reads
+      // on repeat visits), then check KV `visit:seen:*` once for unseen UIDs so returning visitors
+      // already counted in KV `visit:count:*` are inserted directly with `in_kv = 1` (never double-counted).
+      if (kv && cleanMonth <= d1SinceMonth) {
+        const existing = await db
+          .prepare(`SELECT 1 AS ok FROM visit_seen WHERE month = ? AND uid = ?`)
+          .bind(cleanMonth, cleanUid)
+          .first();
+        if (existing) {
+          return { recorded: false, monthKey: cleanMonth };
+        }
+        const alreadyInKv = Boolean(await kv.get(`visit:seen:${cleanMonth}:${cleanUid}`));
+        const res = await db
+          .prepare(`INSERT OR IGNORE INTO visit_seen (month, uid, in_kv) VALUES (?, ?, ?)`)
+          .bind(cleanMonth, cleanUid, alreadyInKv ? 1 : 0)
+          .run();
+        return {
+          recorded: !alreadyInKv && Number(res?.meta?.changes || 0) > 0,
+          monthKey: cleanMonth,
+        };
+      }
+
       const res = await db
-        .prepare(`INSERT OR IGNORE INTO visit_seen (month, uid) VALUES (?, ?)`)
+        .prepare(`INSERT OR IGNORE INTO visit_seen (month, uid, in_kv) VALUES (?, ?, 0)`)
         .bind(cleanMonth, cleanUid)
         .run();
       return {
@@ -1241,29 +1366,42 @@ export function createD1Store(env, hooks = {}) {
       if (!db || !/^\d{6}$/.test(cleanThis)) {
         return cleanLast ? { thisMonth: 0, lastMonth: 0 } : { thisMonth: 0 };
       }
-      await ensureSchema(env);
+      const d1SinceMonth = await ensureVisitD1SinceMonth(env, cleanThis);
+
+      const needKvThis = Boolean(kv && cleanThis <= d1SinceMonth);
+      const needKvLast = Boolean(kv && cleanLast && cleanLast <= d1SinceMonth);
 
       if (!cleanLast) {
-        const row = await db
-          .prepare(`SELECT COUNT(*) AS cnt FROM visit_seen WHERE month = ?`)
-          .bind(cleanThis)
-          .first();
-        return { thisMonth: Math.max(0, Number(row?.cnt) || 0) };
+        const [d1Row, kvThis] = await Promise.all([
+          db.prepare(`SELECT COUNT(*) AS cnt FROM visit_seen WHERE month = ? AND in_kv = 0`).bind(cleanThis).first(),
+          needKvThis ? safeGetJSON(kv, `visit:count:${cleanThis}`, null) : Promise.resolve(null),
+        ]);
+        const d1Count = Math.max(0, Number(d1Row?.cnt) || 0);
+        const kvCount = Math.max(0, Number(kvThis?.n) || 0);
+        return { thisMonth: kvCount + d1Count };
       }
 
-      const res = await db
-        .prepare(`SELECT month, COUNT(*) AS cnt FROM visit_seen WHERE month IN (?, ?) GROUP BY month`)
-        .bind(cleanThis, cleanLast)
-        .all();
-      let thisMonth = 0;
-      let lastMonth = 0;
-      for (const row of res?.results || []) {
+      const [d1Res, kvThis, kvLast] = await Promise.all([
+        db
+          .prepare(`SELECT month, COUNT(*) AS cnt FROM visit_seen WHERE month IN (?, ?) AND in_kv = 0 GROUP BY month`)
+          .bind(cleanThis, cleanLast)
+          .all(),
+        needKvThis ? safeGetJSON(kv, `visit:count:${cleanThis}`, null) : Promise.resolve(null),
+        needKvLast ? safeGetJSON(kv, `visit:count:${cleanLast}`, null) : Promise.resolve(null),
+      ]);
+
+      let d1This = 0;
+      let d1Last = 0;
+      for (const row of d1Res?.results || []) {
         const m = String(row?.month || '');
         const cnt = Math.max(0, Number(row?.cnt) || 0);
-        if (m === cleanThis) thisMonth = cnt;
-        else if (m === cleanLast) lastMonth = cnt;
+        if (m === cleanThis) d1This = cnt;
+        else if (m === cleanLast) d1Last = cnt;
       }
-      return { thisMonth, lastMonth };
+      return {
+        thisMonth: Math.max(0, Number(kvThis?.n) || 0) + d1This,
+        lastMonth: Math.max(0, Number(kvLast?.n) || 0) + d1Last,
+      };
     },
   };
 }

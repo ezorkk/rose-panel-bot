@@ -19,7 +19,11 @@ const FALLBACK_MIGRATION_TS = 1700000000000;
 // Per-isolate cache of UIDs confirmed present in `migrated_visitors`, keyed by `env.DB`
 const migratedUidCache = new WeakMap();
 const VISITORS_BACKFILL_META_KEY = 'visitors_kv_migrated';
-const BACKFILL_MAX_VISITORS_PER_CALL = 300;
+const VISITORS_BACKFILL_STATE_KEY = 'visitors_kv_backfill_state';
+const BACKFILL_MAX_RUNS = 6;
+const BACKFILL_INDEX_SLICE = 150;
+const BACKFILL_BANNED_LIMIT = 200;
+const BACKFILL_USER_PAGE_LIMIT = 150;
 const BACKFILL_KV_READ_CONCURRENCY = 20;
 const visitorsBackfilledCache = new WeakMap();
 const visitorsBackfillInFlight = new WeakMap();
@@ -523,9 +527,13 @@ export async function isVisitorsBackfilled(env) {
 }
 
 /**
- * One-time automatic backfill of legacy KV visitor profiles (`visitors:index`, `user:*`, and orphan
- * `banned:*` keys) into the D1 `visitors` table. Never deletes any KV keys.
- * Bounded per invocation so large legacy deployments stay safely within Worker limits.
+ * Bounded, cursor-advancing one-time backfill of legacy KV visitor profiles (`visitors:index`,
+ * `user:*`, and orphan `banned:*` keys up to KV parity cap) into D1 `visitors`.
+ * - Advances deterministically past stale/missing UIDs (never stalls on dead `visitors:index` entries).
+ * - Hard-capped at `BACKFILL_MAX_RUNS` runs so it can never burn KV list quota indefinitely.
+ * - Placeholder records for orphan `banned:*` keys receive `last_seen_at = nowIso` so they surface
+ *   for 1-click unban instead of sorting to the bottom as NULL.
+ * - Never deletes any KV keys.
  */
 export async function ensureVisitorsBackfilled(env) {
   const db = env?.DB;
@@ -538,50 +546,140 @@ export async function ensureVisitorsBackfilled(env) {
 
   const work = (async () => {
     await ensureSchema(env);
-    const metaRow = await db
-      .prepare(`SELECT value FROM meta WHERE key = ?`)
-      .bind(VISITORS_BACKFILL_META_KEY)
-      .first();
-    if (metaRow?.value === '1') {
+    const metaRes = await db
+      .prepare(`SELECT key, value FROM meta WHERE key IN (?, ?)`)
+      .bind(VISITORS_BACKFILL_META_KEY, VISITORS_BACKFILL_STATE_KEY)
+      .all();
+
+    let doneFlag = false;
+    let state = {
+      runs: 0,
+      indexOffset: 0,
+      indexDone: false,
+      bannedDone: false,
+      userCursor: null,
+      userDone: false,
+    };
+    for (const row of metaRes?.results || []) {
+      if (row?.key === VISITORS_BACKFILL_META_KEY && row.value === '1') {
+        doneFlag = true;
+      } else if (row?.key === VISITORS_BACKFILL_STATE_KEY && row.value) {
+        try {
+          const parsed = JSON.parse(row.value);
+          if (parsed && typeof parsed === 'object') {
+            state = {
+              runs: Math.max(0, Number(parsed.runs) || 0),
+              indexOffset: Math.max(0, Number(parsed.indexOffset) || 0),
+              indexDone: Boolean(parsed.indexDone),
+              bannedDone: Boolean(parsed.bannedDone),
+              userCursor: typeof parsed.userCursor === 'string' && parsed.userCursor ? parsed.userCursor : null,
+              userDone: Boolean(parsed.userDone),
+            };
+          }
+        } catch {
+          // Reset corrupt state cleanly
+        }
+      }
+    }
+
+    if (doneFlag) {
       visitorsBackfilledCache.set(db, true);
       return { alreadyDone: true };
     }
 
-    const [indexedRaw, userListed, bannedListed, existingRes] = await Promise.all([
-      safeGetJSON(kv, 'visitors:index', []),
-      listKvPrefixUidsWithStatus(kv, 'user:'),
-      listKvPrefixUidsWithStatus(kv, 'banned:'),
-      db.prepare(`SELECT uid FROM visitors`).all(),
-    ]);
-
+    state.runs += 1;
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    const existingRes = await db.prepare(`SELECT uid FROM visitors`).all();
     const existingSet = new Set();
     for (const r of existingRes?.results || []) {
       const uid = String(r?.uid || '').trim();
       if (/^\d+$/.test(uid)) existingSet.add(uid);
     }
 
-    const bannedSet = new Set(bannedListed.uids);
-    const candidateSet = new Set();
-    for (const id of Array.isArray(indexedRaw) ? indexedRaw : []) {
-      const uid = String(id || '').trim();
-      if (/^\d+$/.test(uid)) candidateSet.add(uid);
+    const toImport = new Map(); // uid -> { fromBanned: boolean }
+
+    // Step A: bounded slice of `visitors:index` (advances offset past stale/missing UIDs too)
+    if (!state.indexDone) {
+      const indexedRaw = await safeGetJSON(kv, 'visitors:index', []);
+      const cleanIndexed = Array.from(
+        new Set((Array.isArray(indexedRaw) ? indexedRaw : []).map((id) => String(id || '').trim()).filter((u) => /^\d+$/.test(u)))
+      );
+      const slice = cleanIndexed.slice(state.indexOffset, state.indexOffset + BACKFILL_INDEX_SLICE);
+      for (const uid of slice) {
+        if (!existingSet.has(uid)) {
+          toImport.set(uid, { fromBanned: false });
+        }
+      }
+      state.indexOffset += slice.length;
+      if (state.indexOffset >= cleanIndexed.length) {
+        state.indexDone = true;
+      }
     }
-    for (const uid of userListed.uids) candidateSet.add(uid);
-    for (const uid of bannedListed.uids) candidateSet.add(uid);
 
-    const missingUids = Array.from(candidateSet).filter((u) => !existingSet.has(u));
-    const batchUids = missingUids.slice(0, BACKFILL_MAX_VISITORS_PER_CALL);
-    const nowMs = Date.now();
+    // Step B: single bounded page of `banned:` (matches KV mode's exact 200-key discovery cap)
+    if (!state.bannedDone) {
+      if (typeof kv.list === 'function') {
+        try {
+          const listedBanned = await kv.list({ prefix: 'banned:', limit: BACKFILL_BANNED_LIMIT });
+          for (const k of listedBanned?.keys || []) {
+            const uid = String(k?.name || '').slice(7);
+            if (/^\d+$/.test(uid) && !existingSet.has(uid)) {
+              toImport.set(uid, { fromBanned: true });
+            }
+          }
+        } catch {
+          // Non-fatal: still advance so quota isn't burned in a retry loop
+        }
+      }
+      state.bannedDone = true;
+    }
+
+    // Step C: 1 bounded page of `user:` per run (advances cursor cleanly)
+    if (!state.userDone) {
+      if (typeof kv.list === 'function') {
+        try {
+          const listedUsers = await kv.list(
+            state.userCursor
+              ? { prefix: 'user:', limit: BACKFILL_USER_PAGE_LIMIT, cursor: state.userCursor }
+              : { prefix: 'user:', limit: BACKFILL_USER_PAGE_LIMIT }
+          );
+          for (const k of listedUsers?.keys || []) {
+            const uid = String(k?.name || '').slice(5);
+            if (/^\d+$/.test(uid) && !existingSet.has(uid) && !toImport.has(uid)) {
+              toImport.set(uid, { fromBanned: false });
+            }
+          }
+          if (!listedUsers || listedUsers.list_complete || !listedUsers.cursor) {
+            state.userDone = true;
+            state.userCursor = null;
+          } else {
+            state.userCursor = listedUsers.cursor;
+          }
+        } catch {
+          // Retry on next run up to BACKFILL_MAX_RUNS
+        }
+      } else {
+        state.userDone = true;
+      }
+    }
+
+    const uidsToRead = Array.from(toImport.keys());
     const insertStmts = [];
-
-    for (let i = 0; i < batchUids.length; i += BACKFILL_KV_READ_CONCURRENCY) {
-      const slice = batchUids.slice(i, i + BACKFILL_KV_READ_CONCURRENCY);
+    for (let i = 0; i < uidsToRead.length; i += BACKFILL_KV_READ_CONCURRENCY) {
+      const slice = uidsToRead.slice(i, i + BACKFILL_KV_READ_CONCURRENCY);
       const recs = await Promise.all(slice.map((uid) => safeGetJSON(kv, `user:${uid}`, null)));
       for (let j = 0; j < slice.length; j += 1) {
         const uid = slice[j];
         const kvRec = recs[j];
+        const info = toImport.get(uid);
+        // Orphan `banned:*` placeholders receive `last_seen_at: nowIso` so they surface near the top for 1-click unban
         const record =
-          kvRec && typeof kvRec === 'object' ? kvRec : bannedSet.has(uid) ? { userId: uid } : null;
+          kvRec && typeof kvRec === 'object'
+            ? kvRec
+            : info?.fromBanned
+              ? { userId: uid, last_seen_at: nowIso }
+              : null;
         if (!record) continue;
         const row = serializeVisitorRow(uid, record, nowMs);
         insertStmts.push(
@@ -596,22 +694,25 @@ export async function ensureVisitorsBackfilled(env) {
     }
 
     const finishedAll =
-      userListed.complete && bannedListed.complete && missingUids.length <= BACKFILL_MAX_VISITORS_PER_CALL;
-    const markMetaStmt = finishedAll
-      ? db
-          .prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, '1')`)
-          .bind(VISITORS_BACKFILL_META_KEY)
-      : null;
+      (state.indexDone && state.bannedDone && state.userDone) || state.runs >= BACKFILL_MAX_RUNS;
+    const finalizeStmts = finishedAll
+      ? [
+          db.prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, '1')`).bind(VISITORS_BACKFILL_META_KEY),
+          db.prepare(`DELETE FROM meta WHERE key = ?`).bind(VISITORS_BACKFILL_STATE_KEY),
+        ]
+      : [
+          db
+            .prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)`)
+            .bind(VISITORS_BACKFILL_STATE_KEY, JSON.stringify(state)),
+        ];
 
     if (insertStmts.length === 0) {
-      if (markMetaStmt) {
-        await markMetaStmt.run();
-      }
+      await db.batch(finalizeStmts);
     } else {
       for (let offset = 0; offset < insertStmts.length; offset += D1_BATCH_CHUNK_SIZE) {
         const chunk = insertStmts.slice(offset, offset + D1_BATCH_CHUNK_SIZE);
-        if (markMetaStmt && offset + D1_BATCH_CHUNK_SIZE >= insertStmts.length) {
-          chunk.push(markMetaStmt);
+        if (offset + D1_BATCH_CHUNK_SIZE >= insertStmts.length) {
+          chunk.push(...finalizeStmts);
         }
         await db.batch(chunk);
       }
@@ -620,7 +721,7 @@ export async function ensureVisitorsBackfilled(env) {
     if (finishedAll) {
       visitorsBackfilledCache.set(db, true);
     }
-    return { backfilled: insertStmts.length, finished: finishedAll };
+    return { backfilled: insertStmts.length, finished: finishedAll, runs: state.runs };
   })();
 
   visitorsBackfillInFlight.set(db, work);
@@ -740,6 +841,10 @@ export async function migrateVisitorsBatch(env, options = {}) {
   const total = allUids.length;
   const remaining = pendingUids.length - batchMigrated;
   const done = total - remaining;
+
+  if (remaining <= 0 && queriesUsed + 4 <= queryBudget) {
+    await ensureVisitorsBackfilled(env).catch(() => {});
+  }
 
   return {
     ok: true,

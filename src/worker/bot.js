@@ -410,9 +410,15 @@ async function sendVisitorCardMessage(env, chatId, threadId, requestOrigin, deta
       reply_markup: replyMarkup,
     });
   } catch (err) {
-    // Fallback without tg://user?id= text_mention link if Telegram rejects privacy-restricted mention links
-    const fallbackText = buildVisitorCardText(detail, { linkName: false });
-    if (fallbackText !== text) {
+    // Only fall back to plain-name card on Telegram 400 entity/mention/privacy rejections
+    // (never resend on timeout, 429, 5xx, or `thread not found` so we never duplicate cards).
+    const isMentionOrEntityError =
+      Number(err?.code) === 400 &&
+      /can't parse entities|entity|mention|user_privacy|privacy_restricted|user_id_invalid|user not found|peer_id_invalid/i.test(
+        String(err?.message || '')
+      );
+    const fallbackText = isMentionOrEntityError ? buildVisitorCardText(detail, { linkName: false }) : text;
+    if (isMentionOrEntityError && fallbackText !== text) {
       return tgCall(env, 'sendMessage', {
         chat_id: chatId,
         ...threadPart,
@@ -453,7 +459,12 @@ function buildVisitorModerationKeyboard(env, requestOrigin, detail, { isGroup = 
 
 export async function checkRateLimit(env, key, limit = 40, windowSec = 60, nowMs = Date.now()) {
   if (!env?.DB && !env?.TOPIC_MAP) return true;
-  return getStore(env).checkRateLimit(key, limit, windowSec, nowMs);
+  try {
+    return await getStore(env).checkRateLimit(key, limit, windowSec, nowMs);
+  } catch {
+    // Fail-open on transient D1/KV errors so rate-limit outages never silently drop visitor messages
+    return true;
+  }
 }
 
 async function extractStickersFromMessage(env, msg) {
@@ -553,7 +564,12 @@ async function ensureVisitorTopic(env, requestOrigin, tgUser, preview = '') {
   const existing = await getStore(env).getVisitor(uid);
 
   if (existing?.thread_id) {
-    await env.TOPIC_MAP.put(`thread:${existing.thread_id}`, uid);
+    // Avoid rewriting `thread:{id}` on every incoming message (saves 1 KV write per visitor PM)
+    const threadKey = `thread:${existing.thread_id}`;
+    const mappedUid = await env.TOPIC_MAP.get(threadKey);
+    if (mappedUid !== uid) {
+      await env.TOPIC_MAP.put(threadKey, uid);
+    }
     return { threadId: existing.thread_id, isNew: false };
   }
 
