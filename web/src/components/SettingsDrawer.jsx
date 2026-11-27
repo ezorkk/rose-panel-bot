@@ -34,7 +34,6 @@ import { TgStickerMedia, TicketEmblem } from './Emblems.jsx';
 import {
   CHANGELOG_URL,
   FEEDBACK_URL,
-  HIDE_STAR_STRIP_STORAGE_KEY,
   REPO_URL,
   StarSupportBanner,
 } from './WhatsNewModal.jsx';
@@ -114,13 +113,6 @@ export default function SettingsDrawer({
   const [alertNodes, setAlertNodes] = useState([]);
   const [loadingAlertNodes, setLoadingAlertNodes] = useState(false);
   const [sendingAlertTest, setSendingAlertTest] = useState(false);
-  const [hideStarStrip, setHideStarStrip] = useState(() => {
-    try {
-      return localStorage.getItem(HIDE_STAR_STRIP_STORAGE_KEY) === '1';
-    } catch {
-      return false;
-    }
-  });
 
   // Version check (Scheme A) & optional Fork 1-click sync (Scheme B)
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -129,6 +121,17 @@ export default function SettingsDrawer({
   const [syncResult, setSyncResult] = useState(null);
   const [forkCardOpen, setForkCardOpen] = useState(() => Boolean(adminConfig?.updater?.forkRepo?.trim()));
   const [forkAdvancedOpen, setForkAdvancedOpen] = useState(false);
+  const [profilePanels, setProfilePanels] = useState({
+    emblem: false,
+    ticket: false,
+    splash: false,
+    nav: false,
+    promo: false,
+  });
+  const toggleProfilePanel = (key) => {
+    haptic('light');
+    setProfilePanels((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
 
   useEffect(() => {
     if (updateInfo?.hasUpdate) setForkCardOpen(true);
@@ -731,7 +734,14 @@ export default function SettingsDrawer({
                 key={tab.id}
                 className={`chip ${section === tab.id ? 'active' : ''}`}
                 style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 5 }}
-                onClick={() => setSection(tab.id)}
+                onClick={() => {
+                  if (section === tab.id) {
+                    haptic('light');
+                    settingsBodyRef.current?.scrollTo?.({ top: 0, behavior: 'smooth' });
+                  } else {
+                    setSection(tab.id);
+                  }
+                }}
               >
                 {tab.label}
                 {tab.badge && (
@@ -753,621 +763,726 @@ export default function SettingsDrawer({
 
         <div className="settings-sheet-body" ref={settingsBodyRef}>
         {/* Section 1: Profile & Ticket Emblem (TG Stickers / Custom Emojis!) */}
-        {section === 'profile' && (
-          <>
-            {/* Ticket Stub Emblem Picker Card */}
-            <div className="card">
-              <div className="card-header" style={{ marginBottom: 10 }}>
-                <span className="card-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <Sparkles size={15} color="var(--accent)" /> 名片主徽章（支持 TG 贴纸 / 收藏表情）
-                </span>
-              </div>
+        {section === 'profile' && (() => {
+          const emblemModeLabel =
+            emblem.type === 'tg_sticker' ? 'TG 贴纸' : emblem.type === 'url' ? '图片链接' : '内置玫瑰';
+          const splashStyle = draft.profile?.splash?.style || 'emblem';
+          const splashStyleLabel =
+            splashStyle === 'emoji' ? '表情跳动' : splashStyle === 'skeleton' ? '骨架屏' : '徽章呼吸';
+          const enableCheckin = Boolean(draft.community?.enableCheckin);
+          const fullOrder = normalizeNavOrderDraft(draft.ui?.navOrder);
+          const visibleOrder = fullOrder.filter((id) => id !== 'leaderboard' || enableCheckin);
+          const navMeta = {
+            profile: { label: enableCheckin ? '票根' : '名片', note: '' },
+            sites: { label: '小站', note: '' },
+            probe: {
+              label: '探针',
+              note:
+                draft.probe?.visibility === 'private'
+                  ? '仅自己可见'
+                  : !draft.probe?.url && !draft.probe?.demoMode
+                    ? '未配置'
+                    : '',
+            },
+            visitors: { label: '访客', note: '仅站长' },
+            leaderboard: { label: '榜单', note: '群签到访客可见' },
+          };
+          const defaultNavLabel = navMeta[visibleOrder[0]]?.label || '名片';
+          const moveNavItem = (idx, delta) => {
+            const targetIdx = idx + delta;
+            if (targetIdx < 0 || targetIdx >= visibleOrder.length) return;
+            const nextVisible = [...visibleOrder];
+            [nextVisible[idx], nextVisible[targetIdx]] = [nextVisible[targetIdx], nextVisible[idx]];
+            const hidden = fullOrder.filter((id) => !nextVisible.includes(id));
+            const nextFull = [...nextVisible, ...hidden];
+            setDraft((prev) => ({
+              ...prev,
+              ui: { ...(prev.ui || {}), navOrder: nextFull },
+            }));
+            haptic('light');
+          };
 
-              <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 12 }}>
-                <div
-                  style={{
-                    width: 72,
-                    height: 72,
-                    borderRadius: 18,
-                    background: 'var(--bg-subtle)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    flexShrink: 0,
-                  }}
-                >
-                  <TicketEmblem emblem={emblem} size={60} />
-                </div>
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  {[
-                    { id: 'builtin', label: '内置玫瑰' },
-                    { id: 'tg_sticker', label: 'TG 贴纸·表情' },
-                    { id: 'url', label: '图片链接' },
-                  ].map((mode) => (
-                    <button
-                      key={mode.id}
-                      type="button"
-                      className={`pill ${emblem.type === mode.id ? 'rose' : ''}`}
-                      style={{ cursor: 'pointer' }}
-                      onClick={() => updateEmblem({ type: mode.id })}
-                    >
-                      {mode.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {emblem.type === 'builtin' && (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
-                  {[
-                    { id: 'owner', label: '玫瑰花瓣' },
-                    { id: 'bottle', label: '水晶药水瓶' },
-                    { id: 'crown', label: '星辰皇冠' },
-                  ].map((opt) => (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      className={`sticker-cell ${emblem.variant === opt.id ? 'selected' : ''}`}
-                      onClick={() => updateEmblem({ type: 'builtin', variant: opt.id })}
-                    >
-                      <TicketEmblem emblem={{ type: 'builtin', variant: opt.id }} size={44} />
-                      <span style={{ fontSize: 11, marginTop: 4 }}>{opt.label}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {emblem.type === 'url' && (
-                <div className="field" style={{ marginBottom: 0 }}>
-                  <label className="field-label">透明底 PNG / WebP / GIF 图片链接</label>
+          return (
+            <>
+              {/* Core Profile Card (always expanded — most frequently edited) */}
+              <div className="card">
+                <div className="field">
+                  <label className="field-label">显示昵称（顶栏标题）</label>
                   <input
                     className="input"
-                    value={emblem.url || ''}
-                    onChange={(e) => updateEmblem({ type: 'url', url: e.target.value })}
-                    placeholder="https://example.com/badge.webp"
+                    value={draft.profile.displayName}
+                    onChange={(e) => updateField('profile', 'displayName', e.target.value)}
                   />
                 </div>
-              )}
-
-              {emblem.type === 'tg_sticker' && (
-                <div>
-                  <div
-                    style={{
-                      fontSize: 12,
-                      color: 'var(--accent)',
-                      background: 'var(--accent-soft)',
-                      borderRadius: 12,
-                      padding: '8px 10px',
-                      marginBottom: 10,
-                      lineHeight: 1.5,
-                    }}
+                <div className="field">
+                  <label className="field-label">Bot / 个人账号标识（名片主标题，留空则显示昵称）</label>
+                  <input
+                    className="input"
+                    value={draft.profile.handle}
+                    onChange={(e) => updateField('profile', 'handle', e.target.value)}
+                  />
+                </div>
+                <div className="field">
+                  <label className="field-label">当前状态文案</label>
+                  <input
+                    className="input"
+                    value={draft.profile.statusText}
+                    onChange={(e) => updateField('profile', 'statusText', e.target.value)}
+                    placeholder="例如：在线营业中 / 摸鱼中 / 勿扰"
+                  />
+                </div>
+                <div className="field">
+                  <label className="field-label">个人简介</label>
+                  <textarea
+                    className="textarea"
+                    value={draft.profile.tagline}
+                    onChange={(e) => updateField('profile', 'tagline', e.target.value)}
+                  />
+                </div>
+                <div className="field">
+                  <label className="field-label">名片头像来源（站长与访客看到一致，不暴露数字 UID）</label>
+                  <select
+                    className="input"
+                    value={draft.profile.avatarMode || (draft.profile.avatarUrl ? 'custom' : 'bot')}
+                    onChange={(e) => updateField('profile', 'avatarMode', e.target.value)}
                   >
-                    💡 <b>最快捷方式</b>：直接私聊机器人发 <code>/set</code>，再发任意一张贴纸、收藏的 TG 自定义表情或贴纸包链接即可秒设！也可在下方贴贴纸包链接挑选：
-                  </div>
-
-                  <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
+                    <option value="bot">🤖 自动同步机器人头像（默认推荐，隐藏私人主号）</option>
+                    <option value="owner">👤 自动同步站长本人 TG 头像（服务端隐匿代理）</option>
+                    <option value="custom">🖼️ 自定义头像图片链接</option>
+                  </select>
+                </div>
+                {(draft.profile.avatarMode === 'custom' || (!draft.profile.avatarMode && draft.profile.avatarUrl)) && (
+                  <div className="field">
+                    <label className="field-label">自定义头像图片链接（支持 https:// 图床直链）</label>
                     <input
                       className="input"
-                      value={packInput}
-                      onChange={(e) => setPackInput(e.target.value)}
-                      placeholder="粘贴 t.me/addstickers/... 或 addemoji/..."
+                      value={draft.profile.avatarUrl}
+                      onChange={(e) => updateField('profile', 'avatarUrl', e.target.value)}
+                      placeholder="https://..."
                     />
-                    <button
-                      type="button"
-                      className="btn btn-soft"
-                      style={{ flexShrink: 0 }}
-                      disabled={loadingPack}
-                      onClick={handleFetchStickerPack}
-                    >
-                      {loadingPack ? <RefreshCw size={14} className="spin" /> : '拉取'}
+                  </div>
+                )}
+                <div className="field">
+                  <label className="field-label">置顶公告（留空则隐藏）</label>
+                  <input
+                    className="input"
+                    value={draft.profile.notice}
+                    onChange={(e) => updateField('profile', 'notice', e.target.value)}
+                    placeholder="可选：向访客展示一条置顶公告"
+                  />
+                </div>
+                <div className="field">
+                  <label className="field-label">个人标签（可选，逗号或空格分隔）</label>
+                  <input
+                    className="input"
+                    value={draft.profile.tags || ''}
+                    onChange={(e) => updateField('profile', 'tags', e.target.value)}
+                    placeholder="例如：VPS 折腾, 自托管, 开源, ACG"
+                  />
+                </div>
+
+                <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <span className="field-label" style={{ margin: 0 }}>社交与联系方式</span>
+                    <button className="btn btn-soft btn-sm" onClick={handleAddSocial}>
+                      <Plus size={13} /> 添加
                     </button>
                   </div>
-
-                  {loadedPack?.stickers?.length > 0 && (
-                    <div style={{ marginBottom: 12 }}>
-                      <div className="field-label">
-                        「{loadedPack.title}」点击选用（支持静态 / 动态）
+                  {(draft.profile.socials || []).map((soc, idx) => (
+                    <div
+                      key={soc.id || idx}
+                      style={{
+                        background: 'var(--bg-subtle)',
+                        borderRadius: 14,
+                        padding: 10,
+                        marginBottom: 8,
+                      }}
+                    >
+                      <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+                        <input
+                          className="input"
+                          style={{ background: 'var(--bg-elevated)' }}
+                          value={soc.label}
+                          placeholder="名称"
+                          onChange={(e) => handleUpdateSocial(idx, 'label', e.target.value)}
+                        />
+                        <button className="icon-btn" onClick={() => handleRemoveSocial(idx)}>
+                          <Trash2 size={14} color="var(--red)" />
+                        </button>
                       </div>
-                      <div className="sticker-grid">
-                        {loadedPack.stickers.map((st) => (
-                          <button
-                            key={st.fileId}
-                            type="button"
-                            className={`sticker-cell ${emblem.fileId === st.fileId ? 'selected' : ''}`}
-                            onClick={() => handleSelectSticker(st)}
-                          >
-                            <TgStickerMedia
-                              fileId={st.thumbFileId || st.fileId}
-                              format={st.thumbFileId ? 'webp' : st.format}
-                              emoji={st.emoji}
-                              size={42}
-                              previewOnly
-                            />
-                          </button>
-                        ))}
-                      </div>
+                      <input
+                        className="input"
+                        style={{ background: 'var(--bg-elevated)', marginBottom: 6 }}
+                        value={soc.value}
+                        placeholder="展示文字"
+                        onChange={(e) => handleUpdateSocial(idx, 'value', e.target.value)}
+                      />
+                      <input
+                        className="input"
+                        style={{ background: 'var(--bg-elevated)' }}
+                        value={soc.url}
+                        placeholder="跳转 URL（留空则点击复制）"
+                        onChange={(e) => handleUpdateSocial(idx, 'url', e.target.value)}
+                      />
                     </div>
-                  )}
-
-                  {emblem.savedStickers?.length > 0 && (
-                    <div>
-                      <div className="field-label">我的收藏徽章库（点击切换）</div>
-                      <div className="sticker-grid">
-                        {emblem.savedStickers.map((st) => (
-                          <button
-                            key={st.fileId}
-                            type="button"
-                            className={`sticker-cell ${emblem.fileId === st.fileId ? 'selected' : ''}`}
-                            onClick={() => handleSelectSticker(st)}
-                          >
-                            <TgStickerMedia
-                              fileId={st.thumbFileId || st.fileId}
-                              format={st.thumbFileId ? 'webp' : st.format}
-                              emoji={st.emoji}
-                              size={42}
-                              previewOnly
-                            />
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
+                  ))}
                 </div>
-              )}
-            </div>
-
-            <div className="card">
-              <div className="field">
-                <label className="field-label">显示昵称（顶栏标题）</label>
-                <input
-                  className="input"
-                  value={draft.profile.displayName}
-                  onChange={(e) => updateField('profile', 'displayName', e.target.value)}
-                />
-              </div>
-              <div className="field">
-                <label className="field-label">Bot / 个人账号标识（名片主标题，留空则显示昵称）</label>
-                <input
-                  className="input"
-                  value={draft.profile.handle}
-                  onChange={(e) => updateField('profile', 'handle', e.target.value)}
-                />
-              </div>
-              <div className="field">
-                <label className="field-label">当前状态文案</label>
-                <input
-                  className="input"
-                  value={draft.profile.statusText}
-                  onChange={(e) => updateField('profile', 'statusText', e.target.value)}
-                  placeholder="例如：在线营业中 / 摸鱼中 / 勿扰"
-                />
-              </div>
-              <div className="field">
-                <label className="field-label">个人简介</label>
-                <textarea
-                  className="textarea"
-                  value={draft.profile.tagline}
-                  onChange={(e) => updateField('profile', 'tagline', e.target.value)}
-                />
-              </div>
-              <div className="field">
-                <label className="field-label">名片头像来源（站长与访客看到一致，不暴露数字 UID）</label>
-                <select
-                  className="input"
-                  value={draft.profile.avatarMode || (draft.profile.avatarUrl ? 'custom' : 'bot')}
-                  onChange={(e) => updateField('profile', 'avatarMode', e.target.value)}
-                >
-                  <option value="bot">🤖 自动同步机器人头像（默认推荐，隐藏私人主号）</option>
-                  <option value="owner">👤 自动同步站长本人 TG 头像（服务端隐匿代理）</option>
-                  <option value="custom">🖼️ 自定义头像图片链接</option>
-                </select>
-              </div>
-              {(draft.profile.avatarMode === 'custom' || (!draft.profile.avatarMode && draft.profile.avatarUrl)) && (
-                <div className="field">
-                  <label className="field-label">自定义头像图片链接（支持 https:// 图床直链）</label>
-                  <input
-                    className="input"
-                    value={draft.profile.avatarUrl}
-                    onChange={(e) => updateField('profile', 'avatarUrl', e.target.value)}
-                    placeholder="https://..."
-                  />
-                </div>
-              )}
-              <div className="field">
-                <label className="field-label">置顶公告（留空则隐藏）</label>
-                <input
-                  className="input"
-                  value={draft.profile.notice}
-                  onChange={(e) => updateField('profile', 'notice', e.target.value)}
-                  placeholder="可选：向访客展示一条置顶公告"
-                />
-              </div>
-              <div className="field">
-                <label className="field-label">个人标签（可选，逗号或空格分隔）</label>
-                <input
-                  className="input"
-                  value={draft.profile.tags || ''}
-                  onChange={(e) => updateField('profile', 'tags', e.target.value)}
-                  placeholder="例如：VPS 折腾, 自托管, 开源, ACG"
-                />
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-                <div className="field">
-                  <label className="field-label">右侧票根顶部小标（留空隐藏）</label>
-                  <input
-                    className="input"
-                    value={draft.profile.ownerTag ?? ''}
-                    onChange={(e) => updateField('profile', 'ownerTag', e.target.value)}
-                    placeholder="例如：个人名片"
-                  />
-                </div>
-                <div className="field">
-                  <label className="field-label">右侧票根主头衔（留空隐藏）</label>
-                  <input
-                    className="input"
-                    value={draft.profile.badgeTitle ?? ''}
-                    onChange={(e) => updateField('profile', 'badgeTitle', e.target.value)}
-                    placeholder="例如：站长 · Owner"
-                  />
-                </div>
-              </div>
-              <div className="field">
-                <label className="field-label">右侧票根副标（留空隐藏）</label>
-                <input
-                  className="input"
-                  value={draft.profile.joinedText ?? ''}
-                  onChange={(e) => updateField('profile', 'joinedText', e.target.value)}
-                  placeholder="可选：留空则不显示，也可填写城市或个性短句"
-                />
-              </div>
-              <div className="field">
-                <label className="field-label">下方说明卡标题（如「来信礼仪」「关于我」）</label>
-                <input
-                  className="input"
-                  value={draft.profile.noteTitle ?? '来信礼仪'}
-                  onChange={(e) => updateField('profile', 'noteTitle', e.target.value)}
-                  placeholder="来信礼仪"
-                />
-              </div>
-              <div className="field">
-                <label className="field-label">下方说明卡内容（每行一条，全部留空则隐藏）</label>
-                <textarea
-                  className="textarea"
-                  value={draft.profile.noteLines ?? ''}
-                  onChange={(e) => updateField('profile', 'noteLines', e.target.value)}
-                  placeholder="例如：初次私聊请直接说明来意，不用只发「在吗」"
-                />
               </div>
 
-              <div
-                style={{
-                  marginTop: 12,
-                  paddingTop: 12,
-                  borderTop: '1px solid var(--border)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: 12,
-                }}
-              >
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600 }}>在名片上公开显示本月访客数</div>
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3, lineHeight: 1.5 }}>
-                    只统计通过 Telegram 打开名片的访客，每人每月计一次，不含你自己。
-                  </div>
-                </div>
+              {/* Collapsible 1: Ticket Stub Emblem Picker */}
+              <div className="card update-fork-card">
                 <button
                   type="button"
-                  role="switch"
-                  aria-checked={Boolean(draft.profile.showVisitCounter)}
-                  className={`switch ${draft.profile.showVisitCounter ? 'on' : ''}`}
-                  onClick={() => updateField('profile', 'showVisitCounter', !draft.profile.showVisitCounter)}
+                  className="update-collapse-head"
+                  aria-expanded={profilePanels.emblem}
+                  onClick={() => toggleProfilePanel('emblem')}
                 >
-                  <span className="switch-knob" />
+                  <span className="update-collapse-title">
+                    <Sparkles size={14} color="var(--accent)" style={{ flexShrink: 0 }} />
+                    <span>名片主徽章</span>
+                    <span className="update-collapse-badge">{emblemModeLabel}</span>
+                  </span>
+                  {profilePanels.emblem ? (
+                    <ChevronDown size={16} style={{ flexShrink: 0 }} />
+                  ) : (
+                    <ChevronRight size={16} style={{ flexShrink: 0 }} />
+                  )}
                 </button>
-              </div>
 
-              <div
-                style={{
-                  marginTop: 12,
-                  paddingTop: 12,
-                  borderTop: '1px solid var(--border)',
-                }}
-              >
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: 12,
-                  }}
-                >
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600 }}>在名片底部显示 RosePanel 署名</div>
-                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3, lineHeight: 1.5 }}>
-                      署名能帮助更多人发现 RosePanel，感谢你的支持 🌹
+                {profilePanels.emblem && (
+                  <div className="update-fork-body">
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 12 }}>
+                      <div
+                        style={{
+                          width: 72,
+                          height: 72,
+                          borderRadius: 18,
+                          background: 'var(--bg-subtle)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          flexShrink: 0,
+                        }}
+                      >
+                        <TicketEmblem emblem={emblem} size={60} />
+                      </div>
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        {[
+                          { id: 'builtin', label: '内置玫瑰' },
+                          { id: 'tg_sticker', label: 'TG 贴纸·表情' },
+                          { id: 'url', label: '图片链接' },
+                        ].map((mode) => (
+                          <button
+                            key={mode.id}
+                            type="button"
+                            className={`pill ${emblem.type === mode.id ? 'rose' : ''}`}
+                            style={{ cursor: 'pointer' }}
+                            onClick={() => updateEmblem({ type: mode.id })}
+                          >
+                            {mode.label}
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                  </div>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={draft.profile.showPoweredBy !== false}
-                    className={`switch ${draft.profile.showPoweredBy !== false ? 'on' : ''}`}
-                    onClick={() => updateField('profile', 'showPoweredBy', !(draft.profile.showPoweredBy !== false))}
-                  >
-                    <span className="switch-knob" />
-                  </button>
-                </div>
 
-                {draft.profile.showPoweredBy !== false && (
-                  <div className="powered-by-preview">
-                    <span className="powered-by-preview-text">
-                      {BRAND_SIGNATURE} · <span className="card-powered-by-cta">想要同款？</span>
-                    </span>
-                    <span className="powered-by-preview-badge">访客可见</span>
+                    {emblem.type === 'builtin' && (
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+                        {[
+                          { id: 'owner', label: '玫瑰花瓣' },
+                          { id: 'bottle', label: '水晶药水瓶' },
+                          { id: 'crown', label: '星辰皇冠' },
+                        ].map((opt) => (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            className={`sticker-cell ${emblem.variant === opt.id ? 'selected' : ''}`}
+                            onClick={() => updateEmblem({ type: 'builtin', variant: opt.id })}
+                          >
+                            <TicketEmblem emblem={{ type: 'builtin', variant: opt.id }} size={44} />
+                            <span style={{ fontSize: 11, marginTop: 4 }}>{opt.label}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    {emblem.type === 'url' && (
+                      <div className="field" style={{ marginBottom: 0 }}>
+                        <label className="field-label">透明底 PNG / WebP / GIF 图片链接</label>
+                        <input
+                          className="input"
+                          value={emblem.url || ''}
+                          onChange={(e) => updateEmblem({ type: 'url', url: e.target.value })}
+                          placeholder="https://example.com/badge.webp"
+                        />
+                      </div>
+                    )}
+
+                    {emblem.type === 'tg_sticker' && (
+                      <div>
+                        <div
+                          style={{
+                            fontSize: 12,
+                            color: 'var(--accent)',
+                            background: 'var(--accent-soft)',
+                            borderRadius: 12,
+                            padding: '8px 10px',
+                            marginBottom: 10,
+                            lineHeight: 1.5,
+                          }}
+                        >
+                          💡 <b>最快捷方式</b>：直接私聊机器人发 <code>/set</code>，再发任意一张贴纸、收藏的 TG 自定义表情或贴纸包链接即可秒设！也可在下方贴贴纸包链接挑选：
+                        </div>
+
+                        <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
+                          <input
+                            className="input"
+                            value={packInput}
+                            onChange={(e) => setPackInput(e.target.value)}
+                            placeholder="粘贴 t.me/addstickers/... 或 addemoji/..."
+                          />
+                          <button
+                            type="button"
+                            className="btn btn-soft"
+                            style={{ flexShrink: 0 }}
+                            disabled={loadingPack}
+                            onClick={handleFetchStickerPack}
+                          >
+                            {loadingPack ? <RefreshCw size={14} className="spin" /> : '拉取'}
+                          </button>
+                        </div>
+
+                        {loadedPack?.stickers?.length > 0 && (
+                          <div style={{ marginBottom: 12 }}>
+                            <div className="field-label">
+                              「{loadedPack.title}」点击选用（支持静态 / 动态）
+                            </div>
+                            <div className="sticker-grid">
+                              {loadedPack.stickers.map((st) => (
+                                <button
+                                  key={st.fileId}
+                                  type="button"
+                                  className={`sticker-cell ${emblem.fileId === st.fileId ? 'selected' : ''}`}
+                                  onClick={() => handleSelectSticker(st)}
+                                >
+                                  <TgStickerMedia
+                                    fileId={st.thumbFileId || st.fileId}
+                                    format={st.thumbFileId ? 'webp' : st.format}
+                                    emoji={st.emoji}
+                                    size={42}
+                                    previewOnly
+                                  />
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {emblem.savedStickers?.length > 0 && (
+                          <div>
+                            <div className="field-label">我的收藏徽章库（点击切换）</div>
+                            <div className="sticker-grid">
+                              {emblem.savedStickers.map((st) => (
+                                <button
+                                  key={st.fileId}
+                                  type="button"
+                                  className={`sticker-cell ${emblem.fileId === st.fileId ? 'selected' : ''}`}
+                                  onClick={() => handleSelectSticker(st)}
+                                >
+                                  <TgStickerMedia
+                                    fileId={st.thumbFileId || st.fileId}
+                                    format={st.thumbFileId ? 'webp' : st.format}
+                                    emoji={st.emoji}
+                                    size={42}
+                                    previewOnly
+                                  />
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
 
-              <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
-                <div className="field-label" style={{ marginBottom: 8 }}>
-                  开屏加载页风格（新访客首次打开 0ms 即显）
-                </div>
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
-                  {[
-                    { id: 'emblem', label: '✨ 徽章呼吸' },
-                    { id: 'emoji', label: '🌹 表情跳动' },
-                    { id: 'skeleton', label: '🪄 卡片骨架屏' },
-                  ].map((opt) => (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      className={`pill ${(draft.profile?.splash?.style || 'emblem') === opt.id ? 'rose' : ''}`}
-                      style={{ cursor: 'pointer' }}
-                      onClick={() => updateSplash({ style: opt.id })}
-                    >
-                      {opt.label}
-                    </button>
-                  ))}
-                </div>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  {(draft.profile?.splash?.style || 'emblem') === 'emoji' && (
-                    <input
-                      className="input"
-                      style={{ width: 64, textAlign: 'center' }}
-                      value={draft.profile?.splash?.emoji ?? '🌹'}
-                      onChange={(e) => updateSplash({ emoji: e.target.value })}
-                      placeholder="🌹"
-                    />
+              {/* Collapsible 2: Ticket Labels, Etiquette Card & Visibility Toggles */}
+              <div className="card update-fork-card">
+                <button
+                  type="button"
+                  className="update-collapse-head"
+                  aria-expanded={profilePanels.ticket}
+                  onClick={() => toggleProfilePanel('ticket')}
+                >
+                  <span className="update-collapse-title">
+                    <span>🎫 票根细节与展示开关</span>
+                    <span className="update-collapse-badge">
+                      {draft.profile.noteLines?.trim() ? draft.profile.noteTitle?.trim() || '来信礼仪' : '票根 / 署名'}
+                    </span>
+                  </span>
+                  {profilePanels.ticket ? (
+                    <ChevronDown size={16} style={{ flexShrink: 0 }} />
+                  ) : (
+                    <ChevronRight size={16} style={{ flexShrink: 0 }} />
                   )}
-                  <input
-                    className="input"
-                    value={draft.profile?.splash?.text ?? '正在打开个人面板…'}
-                    onChange={(e) => updateSplash({ text: e.target.value })}
-                    placeholder="加载提示文案，如：正在打开个人面板…"
-                  />
-                </div>
-              </div>
+                </button>
 
-              <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                  <span className="field-label" style={{ margin: 0 }}>社交与联系方式</span>
-                  <button className="btn btn-soft btn-sm" onClick={handleAddSocial}>
-                    <Plus size={13} /> 添加
-                  </button>
-                </div>
-                {(draft.profile.socials || []).map((soc, idx) => (
-                  <div
-                    key={soc.id || idx}
-                    style={{
-                      background: 'var(--bg-subtle)',
-                      borderRadius: 14,
-                      padding: 10,
-                      marginBottom: 8,
-                    }}
-                  >
-                    <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+                {profilePanels.ticket && (
+                  <div className="update-fork-body">
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                      <div className="field">
+                        <label className="field-label">右侧票根顶部小标（留空隐藏）</label>
+                        <input
+                          className="input"
+                          value={draft.profile.ownerTag ?? ''}
+                          onChange={(e) => updateField('profile', 'ownerTag', e.target.value)}
+                          placeholder="例如：个人名片"
+                        />
+                      </div>
+                      <div className="field">
+                        <label className="field-label">右侧票根主头衔（留空隐藏）</label>
+                        <input
+                          className="input"
+                          value={draft.profile.badgeTitle ?? ''}
+                          onChange={(e) => updateField('profile', 'badgeTitle', e.target.value)}
+                          placeholder="例如：站长 · Owner"
+                        />
+                      </div>
+                    </div>
+                    <div className="field">
+                      <label className="field-label">右侧票根副标（留空隐藏）</label>
                       <input
                         className="input"
-                        style={{ background: 'var(--bg-elevated)' }}
-                        value={soc.label}
-                        placeholder="名称"
-                        onChange={(e) => handleUpdateSocial(idx, 'label', e.target.value)}
+                        value={draft.profile.joinedText ?? ''}
+                        onChange={(e) => updateField('profile', 'joinedText', e.target.value)}
+                        placeholder="可选：留空则不显示，也可填写城市或个性短句"
                       />
-                      <button className="icon-btn" onClick={() => handleRemoveSocial(idx)}>
-                        <Trash2 size={14} color="var(--red)" />
+                    </div>
+                    <div className="field">
+                      <label className="field-label">下方说明卡标题（如「来信礼仪」「关于我」）</label>
+                      <input
+                        className="input"
+                        value={draft.profile.noteTitle ?? '来信礼仪'}
+                        onChange={(e) => updateField('profile', 'noteTitle', e.target.value)}
+                        placeholder="来信礼仪"
+                      />
+                    </div>
+                    <div className="field">
+                      <label className="field-label">下方说明卡内容（每行一条，全部留空则隐藏）</label>
+                      <textarea
+                        className="textarea"
+                        value={draft.profile.noteLines ?? ''}
+                        onChange={(e) => updateField('profile', 'noteLines', e.target.value)}
+                        placeholder="例如：初次私聊请直接说明来意，不用只发「在吗」"
+                      />
+                    </div>
+
+                    <div
+                      style={{
+                        marginTop: 12,
+                        paddingTop: 12,
+                        borderTop: '1px solid var(--border)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: 12,
+                      }}
+                    >
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600 }}>在名片上公开显示本月访客数</div>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3, lineHeight: 1.5 }}>
+                          只统计通过 Telegram 打开名片的访客，每人每月计一次，不含你自己。
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={Boolean(draft.profile.showVisitCounter)}
+                        className={`switch ${draft.profile.showVisitCounter ? 'on' : ''}`}
+                        onClick={() => updateField('profile', 'showVisitCounter', !draft.profile.showVisitCounter)}
+                      >
+                        <span className="switch-knob" />
                       </button>
                     </div>
-                    <input
-                      className="input"
-                      style={{ background: 'var(--bg-elevated)', marginBottom: 6 }}
-                      value={soc.value}
-                      placeholder="展示文字"
-                      onChange={(e) => handleUpdateSocial(idx, 'value', e.target.value)}
-                    />
-                    <input
-                      className="input"
-                      style={{ background: 'var(--bg-elevated)' }}
-                      value={soc.url}
-                      placeholder="跳转 URL（留空则点击复制）"
-                      onChange={(e) => handleUpdateSocial(idx, 'url', e.target.value)}
-                    />
-                  </div>
-                ))}
-              </div>
-            </div>
 
-            {/* Navigation Order Card */}
-            {(() => {
-              const enableCheckin = Boolean(draft.community?.enableCheckin);
-              const fullOrder = normalizeNavOrderDraft(draft.ui?.navOrder);
-              const visibleOrder = fullOrder.filter((id) => id !== 'leaderboard' || enableCheckin);
-              const navMeta = {
-                profile: { label: enableCheckin ? '票根' : '名片', note: '' },
-                sites: { label: '小站', note: '' },
-                probe: {
-                  label: '探针',
-                  note:
-                    draft.probe?.visibility === 'private'
-                      ? '仅自己可见'
-                      : !draft.probe?.url && !draft.probe?.demoMode
-                        ? '未配置'
-                        : '',
-                },
-                visitors: { label: '访客', note: '仅站长' },
-                leaderboard: { label: '榜单', note: '群签到访客可见' },
-              };
-              const moveNavItem = (idx, delta) => {
-                const targetIdx = idx + delta;
-                if (targetIdx < 0 || targetIdx >= visibleOrder.length) return;
-                const nextVisible = [...visibleOrder];
-                [nextVisible[idx], nextVisible[targetIdx]] = [nextVisible[targetIdx], nextVisible[idx]];
-                const hidden = fullOrder.filter((id) => !nextVisible.includes(id));
-                const nextFull = [...nextVisible, ...hidden];
-                setDraft((prev) => ({
-                  ...prev,
-                  ui: { ...(prev.ui || {}), navOrder: nextFull },
-                }));
-                haptic('light');
-              };
-
-              return (
-                <div className="card">
-                  <div className="card-header" style={{ marginBottom: 4 }}>
-                    <span className="card-title">🧭 导航顺序</span>
-                  </div>
-                  <div className="row-desc wrap" style={{ marginBottom: 10 }}>
-                    第一个是打开面板时的默认页；访客看不到的页面会自动跳过
-                  </div>
-                  <div className="nav-order-list">
-                    {visibleOrder.map((id, idx) => {
-                      const info = navMeta[id] || { label: id, note: '' };
-                      return (
-                        <div className="nav-order-row" key={id}>
-                          <div className="nav-order-left">
-                            <span className="nav-order-idx">{idx + 1}</span>
-                            <span className="nav-order-label">{info.label}</span>
-                            {idx === 0 && (
-                              <span className="pill rose" style={{ padding: '2px 7px', fontSize: 10 }}>
-                                默认页
-                              </span>
-                            )}
-                            {info.note && (
-                              <span className="pill" style={{ padding: '2px 7px', fontSize: 10 }}>
-                                {info.note}
-                              </span>
-                            )}
-                          </div>
-                          <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-                            <button
-                              type="button"
-                              className="icon-btn"
-                              disabled={idx === 0}
-                              title="上移"
-                              aria-label={`上移 ${info.label}`}
-                              onClick={() => moveNavItem(idx, -1)}
-                            >
-                              <ArrowUp size={13} />
-                            </button>
-                            <button
-                              type="button"
-                              className="icon-btn"
-                              disabled={idx === visibleOrder.length - 1}
-                              title="下移"
-                              aria-label={`下移 ${info.label}`}
-                              onClick={() => moveNavItem(idx, 1)}
-                            >
-                              <ArrowDown size={13} />
-                            </button>
+                    <div
+                      style={{
+                        marginTop: 12,
+                        paddingTop: 12,
+                        borderTop: '1px solid var(--border)',
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          gap: 12,
+                        }}
+                      >
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontSize: 13, fontWeight: 600 }}>在名片底部显示 RosePanel 署名</div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3, lineHeight: 1.5 }}>
+                            署名能帮助更多人发现 RosePanel，感谢你的支持 🌹
                           </div>
                         </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-            })()}
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={draft.profile.showPoweredBy !== false}
+                          className={`switch ${draft.profile.showPoweredBy !== false ? 'on' : ''}`}
+                          onClick={() => updateField('profile', 'showPoweredBy', !(draft.profile.showPoweredBy !== false))}
+                        >
+                          <span className="switch-knob" />
+                        </button>
+                      </div>
 
-            {/* Promo & Referral Links Helper (Section 8) */}
-            <div className="card">
-              <div className="card-header" style={{ marginBottom: 8 }}>
-                <span className="card-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <Link2 size={15} color="var(--accent)" /> 名片分享 · 推广链接
-                </span>
-              </div>
-              {(() => {
-                const botUsername = String(botInfo?.username || draft.botUsername || '')
-                  .trim()
-                  .replace(/^@/, '');
-                const appShortName = String(botInfo?.appShortName || '')
-                  .trim()
-                  .replace(/^\/+|\/+$/g, '');
-                if (!botUsername) {
-                  return (
-                    <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-                      需要先配置 <code>BOT_USERNAME</code>。
+                      {draft.profile.showPoweredBy !== false && (
+                        <div className="powered-by-preview">
+                          <span className="powered-by-preview-text">
+                            {BRAND_SIGNATURE} · <span className="card-powered-by-cta">想要同款？</span>
+                          </span>
+                          <span className="powered-by-preview-badge">访客可见</span>
+                        </div>
+                      )}
                     </div>
-                  );
-                }
-                const siteShareBase =
-                  String(shareUrl || '').trim() ||
-                  (typeof window !== 'undefined' ? `${window.location.origin}/` : '');
-                const cardShareLink = appShortName
-                  ? buildSourceLink(`https://t.me/${botUsername}/${appShortName}`, 'link', 'app')
-                  : buildSourceLink(siteShareBase, 'link', 'web');
-                const promoLinks = [
-                  {
-                    id: 'site',
-                    label: '放在个人小站的「联系我」按钮',
-                    url: buildSourceLink(`https://t.me/${botUsername}`, 'site', 'bot'),
-                  },
-                  {
-                    id: 'channel',
-                    label: '放在频道简介',
-                    url: buildSourceLink(`https://t.me/${botUsername}`, 'channel', 'bot'),
-                  },
-                  ...(cardShareLink
-                    ? [
-                        {
-                          id: 'card',
-                          label: '分享名片',
-                          url: cardShareLink,
-                        },
-                      ]
-                    : []),
-                ];
-                return (
-                  <>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                      {promoLinks.map((item) => (
-                        <div key={item.id} className="promo-link-row">
-                          <div style={{ minWidth: 0, flex: 1 }}>
-                            <div className="promo-link-label">{item.label}</div>
-                            <div className="promo-link-url">{item.url}</div>
-                          </div>
-                          <button
-                            type="button"
-                            className="btn btn-soft btn-sm"
-                            style={{ flexShrink: 0 }}
-                            onClick={async () => {
-                              const ok = await copyText(item.url);
-                              onToast(ok ? `已复制「${item.label}」链接` : '复制失败');
-                            }}
-                          >
-                            <Copy size={12} /> 复制
-                          </button>
-                        </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Collapsible 3: 0ms Splash Screen Style */}
+              <div className="card update-fork-card">
+                <button
+                  type="button"
+                  className="update-collapse-head"
+                  aria-expanded={profilePanels.splash}
+                  onClick={() => toggleProfilePanel('splash')}
+                >
+                  <span className="update-collapse-title">
+                    <span>🪄 开屏加载页风格</span>
+                    <span className="update-collapse-badge">{splashStyleLabel}</span>
+                  </span>
+                  {profilePanels.splash ? (
+                    <ChevronDown size={16} style={{ flexShrink: 0 }} />
+                  ) : (
+                    <ChevronRight size={16} style={{ flexShrink: 0 }} />
+                  )}
+                </button>
+
+                {profilePanels.splash && (
+                  <div className="update-fork-body">
+                    <div className="row-desc wrap" style={{ marginBottom: 10 }}>
+                      新访客首次打开面板时 0ms 即显的开屏动画与提示语
+                    </div>
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
+                      {[
+                        { id: 'emblem', label: '✨ 徽章呼吸' },
+                        { id: 'emoji', label: '🌹 表情跳动' },
+                        { id: 'skeleton', label: '🪄 卡片骨架屏' },
+                      ].map((opt) => (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          className={`pill ${splashStyle === opt.id ? 'rose' : ''}`}
+                          style={{ cursor: 'pointer' }}
+                          onClick={() => updateSplash({ style: opt.id })}
+                        >
+                          {opt.label}
+                        </button>
                       ))}
                     </div>
-                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 10, lineHeight: 1.55 }}>
-                      也可以把 <code>src_</code> 后面换成任意英文渠道名，例如 <code>src_nodeseek</code>，来源统计里就会单独显示。
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      {splashStyle === 'emoji' && (
+                        <input
+                          className="input"
+                          style={{ width: 64, textAlign: 'center' }}
+                          value={draft.profile?.splash?.emoji ?? '🌹'}
+                          onChange={(e) => updateSplash({ emoji: e.target.value })}
+                          placeholder="🌹"
+                        />
+                      )}
+                      <input
+                        className="input"
+                        value={draft.profile?.splash?.text ?? '正在打开个人面板…'}
+                        onChange={(e) => updateSplash({ text: e.target.value })}
+                        placeholder="加载提示文案，如：正在打开个人面板…"
+                      />
                     </div>
-                  </>
-                );
-              })()}
-            </div>
-          </>
-        )}
+                  </div>
+                )}
+              </div>
+
+              {/* Collapsible 4: Navigation Order */}
+              <div className="card update-fork-card">
+                <button
+                  type="button"
+                  className="update-collapse-head"
+                  aria-expanded={profilePanels.nav}
+                  onClick={() => toggleProfilePanel('nav')}
+                >
+                  <span className="update-collapse-title">
+                    <span>🧭 导航顺序</span>
+                    <span className="update-collapse-badge">默认：{defaultNavLabel}</span>
+                  </span>
+                  {profilePanels.nav ? (
+                    <ChevronDown size={16} style={{ flexShrink: 0 }} />
+                  ) : (
+                    <ChevronRight size={16} style={{ flexShrink: 0 }} />
+                  )}
+                </button>
+
+                {profilePanels.nav && (
+                  <div className="update-fork-body">
+                    <div className="row-desc wrap" style={{ marginBottom: 10 }}>
+                      第一个是打开面板时的默认页；访客看不到的页面会自动跳过
+                    </div>
+                    <div className="nav-order-list">
+                      {visibleOrder.map((id, idx) => {
+                        const info = navMeta[id] || { label: id, note: '' };
+                        return (
+                          <div className="nav-order-row" key={id}>
+                            <div className="nav-order-left">
+                              <span className="nav-order-idx">{idx + 1}</span>
+                              <span className="nav-order-label">{info.label}</span>
+                              {idx === 0 && (
+                                <span className="pill rose" style={{ padding: '2px 7px', fontSize: 10 }}>
+                                  默认页
+                                </span>
+                              )}
+                              {info.note && (
+                                <span className="pill" style={{ padding: '2px 7px', fontSize: 10 }}>
+                                  {info.note}
+                                </span>
+                              )}
+                            </div>
+                            <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                              <button
+                                type="button"
+                                className="icon-btn"
+                                disabled={idx === 0}
+                                title="上移"
+                                aria-label={`上移 ${info.label}`}
+                                onClick={() => moveNavItem(idx, -1)}
+                              >
+                                <ArrowUp size={13} />
+                              </button>
+                              <button
+                                type="button"
+                                className="icon-btn"
+                                disabled={idx === visibleOrder.length - 1}
+                                title="下移"
+                                aria-label={`下移 ${info.label}`}
+                                onClick={() => moveNavItem(idx, 1)}
+                              >
+                                <ArrowDown size={13} />
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Collapsible 5: Promo & Referral Links Helper */}
+              <div className="card update-fork-card">
+                <button
+                  type="button"
+                  className="update-collapse-head"
+                  aria-expanded={profilePanels.promo}
+                  onClick={() => toggleProfilePanel('promo')}
+                >
+                  <span className="update-collapse-title">
+                    <Link2 size={14} color="var(--accent)" style={{ flexShrink: 0 }} />
+                    <span>名片分享 · 推广链接</span>
+                    <span className="update-collapse-badge">来源追踪</span>
+                  </span>
+                  {profilePanels.promo ? (
+                    <ChevronDown size={16} style={{ flexShrink: 0 }} />
+                  ) : (
+                    <ChevronRight size={16} style={{ flexShrink: 0 }} />
+                  )}
+                </button>
+
+                {profilePanels.promo && (
+                  <div className="update-fork-body">
+                    {(() => {
+                      const botUsername = String(botInfo?.username || draft.botUsername || '')
+                        .trim()
+                        .replace(/^@/, '');
+                      const appShortName = String(botInfo?.appShortName || '')
+                        .trim()
+                        .replace(/^\/+|\/+$/g, '');
+                      if (!botUsername) {
+                        return (
+                          <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+                            需要先配置 <code>BOT_USERNAME</code>。
+                          </div>
+                        );
+                      }
+                      const siteShareBase =
+                        String(shareUrl || '').trim() ||
+                        (typeof window !== 'undefined' ? `${window.location.origin}/` : '');
+                      const cardShareLink = appShortName
+                        ? buildSourceLink(`https://t.me/${botUsername}/${appShortName}`, 'link', 'app')
+                        : buildSourceLink(siteShareBase, 'link', 'web');
+                      const promoLinks = [
+                        {
+                          id: 'site',
+                          label: '放在个人小站的「联系我」按钮',
+                          url: buildSourceLink(`https://t.me/${botUsername}`, 'site', 'bot'),
+                        },
+                        {
+                          id: 'channel',
+                          label: '放在频道简介',
+                          url: buildSourceLink(`https://t.me/${botUsername}`, 'channel', 'bot'),
+                        },
+                        ...(cardShareLink
+                          ? [
+                              {
+                                id: 'card',
+                                label: '分享名片',
+                                url: cardShareLink,
+                              },
+                            ]
+                          : []),
+                      ];
+                      return (
+                        <>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                            {promoLinks.map((item) => (
+                              <div key={item.id} className="promo-link-row">
+                                <div style={{ minWidth: 0, flex: 1 }}>
+                                  <div className="promo-link-label">{item.label}</div>
+                                  <div className="promo-link-url">{item.url}</div>
+                                </div>
+                                <button
+                                  type="button"
+                                  className="btn btn-soft btn-sm"
+                                  style={{ flexShrink: 0 }}
+                                  onClick={async () => {
+                                    const ok = await copyText(item.url);
+                                    onToast(ok ? `已复制「${item.label}」链接` : '复制失败');
+                                  }}
+                                >
+                                  <Copy size={12} /> 复制
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 10, lineHeight: 1.55 }}>
+                            也可以把 <code>src_</code> 后面换成任意英文渠道名，例如 <code>src_nodeseek</code>，来源统计里就会单独显示。
+                          </div>
+                        </>
+                      );
+                    })()}
+                  </div>
+                )}
+              </div>
+            </>
+          );
+        })()}
 
         {/* Section 2: Sites (Public & Private Bookmarks + Reorder) */}
         {section === 'sites' && (
@@ -3300,35 +3415,37 @@ export default function SettingsDrawer({
           );
         })()}
 
-        {(section === 'update' || !hideStarStrip) && (
-          <StarSupportBanner
-            onDismiss={
-              section === 'update'
-                ? null
-                : () => {
-                    try {
-                      localStorage.setItem(HIDE_STAR_STRIP_STORAGE_KEY, '1');
-                    } catch {
-                      // Ignore storage errors
-                    }
-                    setHideStarStrip(true);
-                  }
-            }
-          />
-        )}
+        {section === 'update' ? (
+          <>
+            <StarSupportBanner onDismiss={null} />
 
-        <div style={{ marginTop: 10 }}>
-          <button
-            type="button"
-            className="btn btn-subtle btn-sm btn-block"
-            onClick={() => {
-              haptic('light');
-              openExternalUrl(FEEDBACK_URL);
-            }}
-          >
-            💬 意见反馈
-          </button>
-        </div>
+            <div style={{ marginTop: 10 }}>
+              <button
+                type="button"
+                className="btn btn-subtle btn-sm btn-block"
+                onClick={() => {
+                  haptic('light');
+                  openExternalUrl(FEEDBACK_URL);
+                }}
+              >
+                💬 意见反馈
+              </button>
+            </div>
+          </>
+        ) : (
+          <div style={{ marginTop: 10 }}>
+            <button
+              type="button"
+              className="btn btn-subtle btn-sm btn-block"
+              onClick={() => {
+                haptic('light');
+                settingsBodyRef.current?.scrollTo?.({ top: 0, behavior: 'smooth' });
+              }}
+            >
+              <ArrowUp size={14} /> 回到顶部
+            </button>
+          </div>
+        )}
         </div>
 
         {(section !== 'update' || isDirty) && (
