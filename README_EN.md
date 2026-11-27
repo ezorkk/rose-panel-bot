@@ -291,6 +291,7 @@ Then reverse-proxy `127.0.0.1:8787` with Caddy for automatic HTTPS.
 ## <img src="docs/assets/stickers/hug.webp" width="22" height="22" align="absmiddle" /> Credits & Tech Stack
 
 - Protocol & Ecosystem: [Komari Monitor](https://github.com/komari-monitor/komari) · [Combot Anti-Spam (CAS)](https://cas.chat/) · [jikssha/telegram_private_chatbot](https://github.com/jikssha/telegram_private_chatbot)
+- Community & Acknowledgements: [LINUX DO](https://linux.do/) · [NodeSeek](https://www.nodeseek.com/)
 - Open-Source Stack: [Cloudflare Workers](https://workers.cloudflare.com/) · [Telegram Mini Apps](https://core.telegram.org/bots/webapps) · [React](https://react.dev/) · [Vite](https://vitejs.dev/) · [Lucide Icons](https://lucide.dev/) · [lottie-web](https://github.com/airbnb/lottie-web)
 
 ---

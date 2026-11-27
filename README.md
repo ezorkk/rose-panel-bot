@@ -292,6 +292,7 @@ npx wrangler dev --ip 127.0.0.1 --port 8787 --persist-to ./.wrangler/state --sho
 ## <img src="docs/assets/stickers/hug.webp" width="22" height="22" align="absmiddle" /> 致谢与技术栈
 
 - 协议适配与兼容：[Komari Monitor](https://github.com/komari-monitor/komari) · [Combot Anti-Spam (CAS)](https://cas.chat/) · [jikssha/telegram_private_chatbot](https://github.com/jikssha/telegram_private_chatbot)
+- 社区交流与致谢：[LINUX DO](https://linux.do/) · [NodeSeek](https://www.nodeseek.com/)
 - 开源基础设施：[Cloudflare Workers](https://workers.cloudflare.com/) · [Telegram Mini Apps](https://core.telegram.org/bots/webapps) · [React](https://react.dev/) · [Vite](https://vitejs.dev/) · [Lucide Icons](https://lucide.dev/) · [lottie-web](https://github.com/airbnb/lottie-web)
 
 ---
