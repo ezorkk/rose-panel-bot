@@ -1,17 +1,17 @@
-// Cloudflare D1 implementation of the Stage 1 (v2.0) chat history & message mapping store.
+// Cloudflare D1 implementation of the chat history, mappings, visitors, rate limits & visit stats store.
 // Unifies `messages`, `photos`, and `pmMessageIds` into `messages` (+ `message_links` for URLs),
+// stores visitor profiles in `visitors`, atomic rate limits in `rate_limits`, monthly visits in `visit_seen`,
 // reconstructs the exact v1.11.0 response structures, and never deletes legacy KV keys.
 
-import { CHAT_RETENTION_DAYS_OPTIONS, normalizeChatRetentionDays } from '../config.js';
+import { CHAT_RETENTION_DAYS_OPTIONS, normalizeChatRetentionDays, safeGetJSON } from '../config.js';
 import { ensureSchema } from './d1Schema.js';
 import {
   DM_MAP_TTL_SECONDS,
   MAX_MESSAGES,
   TOPIC_MSG_MAP_TTL_SECONDS,
   matchRecallEntryInPmList,
-  readKvDmMapEntry,
-  readKvTopicMapEntry,
 } from './kvStore.js';
+import { ensureVisitorsBackfilled, isVisitorsBackfilled, serializeVisitorRow } from './migrate.js';
 
 export const D1_PHOTO_QUERY_LIMIT = 500;
 export const D1_LINK_QUERY_LIMIT = 500;
@@ -149,9 +149,9 @@ export function shouldRunDailyCleanup(nowMs = Date.now()) {
 }
 
 /**
- * Purges expired rows from `topic_map` (>30 days) and `dm_map` (>7 days),
- * and when `retentionDays` is set (`180` or `365`), deletes expired `messages`
- * along with their corresponding `message_links` in bounded batches (`LIMIT 500`
+ * Purges expired rows from `topic_map` (>30 days), `dm_map` (>7 days), and `rate_limits`
+ * (`expires_at <= nowMs`), and when `retentionDays` is set (`180` or `365`), deletes expired
+ * `messages` along with their corresponding `message_links` in bounded batches (`LIMIT 500`
  * per batch, capped at `maxBatches` per daily run so a first-time retention switch
  * never risks hitting Worker CPU or D1 query limits; remaining rows are cleaned up
  * automatically on subsequent days). Never deletes KV backups or `migrated_visitors`.
@@ -170,6 +170,7 @@ export async function cleanupExpiredMaps(env, nowMs = Date.now(), options = {}) 
   const mapRes = await db.batch([
     db.prepare(`DELETE FROM topic_map WHERE created_at < ?`).bind(topicCutoff),
     db.prepare(`DELETE FROM dm_map WHERE created_at < ?`).bind(dmCutoff),
+    db.prepare(`DELETE FROM rate_limits WHERE expires_at <= ?`).bind(ts),
   ]);
 
   const retentionDays = normalizeChatRetentionDays(options?.retentionDays);
@@ -252,6 +253,7 @@ export async function cleanupExpiredMaps(env, nowMs = Date.now(), options = {}) 
     ok: true,
     deletedTopicMaps: Number(mapRes?.[0]?.meta?.changes || 0),
     deletedDmMaps: Number(mapRes?.[1]?.meta?.changes || 0),
+    deletedRateLimits: Number(mapRes?.[2]?.meta?.changes || 0),
     retentionDays,
     deletedMessages,
     deletedLinks,
@@ -984,11 +986,6 @@ export function createD1Store(env, hooks = {}) {
         if (!/^\d+$/.test(uid) || !Number.isInteger(pmId) || pmId <= 0) return null;
         return { uid, pmMessageId: pmId };
       }
-
-      // Stage 1 fallback: check legacy KV `tmsg:*` once if D1 had no row (removed after v2.2)
-      if (kv) {
-        return readKvTopicMapEntry(kv, gid, tid);
-      }
       return null;
     },
 
@@ -1024,12 +1021,249 @@ export function createD1Store(env, hooks = {}) {
         const pmId = toNullablePositiveInt(row.pm_message_id);
         return { uid, pmMessageId: pmId };
       }
+      return null;
+    },
 
-      // Stage 1 fallback: check legacy KV `dmmap:*` once if D1 had no row (removed after v2.2)
-      if (kv) {
-        return readKvDmMapEntry(kv, msgId);
+    async getVisitor(uid) {
+      const cleanUid = String(uid || '').trim();
+      if (!db || !/^\d+$/.test(cleanUid)) return null;
+      await ensureSchema(env);
+
+      const row = await db.prepare(`SELECT data FROM visitors WHERE uid = ?`).bind(cleanUid).first();
+      if (row?.data) {
+        try {
+          const parsed = JSON.parse(row.data);
+          if (parsed && typeof parsed === 'object') return parsed;
+        } catch {
+          return null;
+        }
+      }
+
+      // Lazy single-visitor KV -> D1 fallback before the one-time visitors backfill has completed
+      if (kv && !(await isVisitorsBackfilled(env))) {
+        const kvRec = await safeGetJSON(kv, `user:${cleanUid}`, null);
+        if (kvRec && typeof kvRec === 'object') {
+          const serialized = serializeVisitorRow(cleanUid, kvRec);
+          await db
+            .prepare(
+              `INSERT OR IGNORE INTO visitors (uid, data, last_seen_at, source, updated_at)
+               VALUES (?, ?, ?, ?, ?)`
+            )
+            .bind(
+              serialized.uid,
+              serialized.data,
+              serialized.lastSeenAt,
+              serialized.source,
+              serialized.updatedAt
+            )
+            .run()
+            .catch(() => {});
+          return { ...kvRec, userId: cleanUid };
+        }
       }
       return null;
+    },
+
+    async putVisitor(uid, record) {
+      const cleanUid = String(uid || '').trim();
+      if (!db || !/^\d+$/.test(cleanUid) || !record || typeof record !== 'object') return;
+      await ensureSchema(env);
+      const serialized = serializeVisitorRow(cleanUid, record);
+      await db
+        .prepare(
+          `INSERT INTO visitors (uid, data, last_seen_at, source, updated_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(uid) DO UPDATE SET
+             data = excluded.data,
+             last_seen_at = excluded.last_seen_at,
+             source = excluded.source,
+             updated_at = excluded.updated_at`
+        )
+        .bind(
+          serialized.uid,
+          serialized.data,
+          serialized.lastSeenAt,
+          serialized.source,
+          serialized.updatedAt
+        )
+        .run();
+    },
+
+    async getVisitorsByUids(uids = []) {
+      const map = new Map();
+      if (!db || !Array.isArray(uids) || uids.length === 0) return map;
+      const cleanUids = Array.from(new Set(uids.map((u) => String(u || '').trim()).filter((u) => /^\d+$/.test(u))));
+      if (cleanUids.length === 0) return map;
+      await ensureSchema(env);
+
+      for (let i = 0; i < cleanUids.length; i += 80) {
+        const slice = cleanUids.slice(i, i + 80);
+        const placeholders = slice.map(() => '?').join(', ');
+        const res = await db
+          .prepare(`SELECT uid, data FROM visitors WHERE uid IN (${placeholders})`)
+          .bind(...slice)
+          .all();
+        for (const row of res?.results || []) {
+          if (!row?.uid || !row?.data) continue;
+          try {
+            const parsed = JSON.parse(row.data);
+            if (parsed && typeof parsed === 'object') {
+              map.set(String(row.uid), parsed);
+            }
+          } catch {
+            // Skip malformed row
+          }
+        }
+      }
+
+      const missing = cleanUids.filter((u) => !map.has(u));
+      if (missing.length > 0 && kv && !(await isVisitorsBackfilled(env))) {
+        const kvRecs = await Promise.all(missing.map((u) => safeGetJSON(kv, `user:${u}`, null)));
+        const insertStmts = [];
+        const nowMs = Date.now();
+        for (let i = 0; i < missing.length; i += 1) {
+          const kvRec = kvRecs[i];
+          if (!kvRec || typeof kvRec !== 'object') continue;
+          const uid = missing[i];
+          const serialized = serializeVisitorRow(uid, kvRec, nowMs);
+          map.set(uid, { ...kvRec, userId: uid });
+          insertStmts.push(
+            db
+              .prepare(
+                `INSERT OR IGNORE INTO visitors (uid, data, last_seen_at, source, updated_at)
+                 VALUES (?, ?, ?, ?, ?)`
+              )
+              .bind(
+                serialized.uid,
+                serialized.data,
+                serialized.lastSeenAt,
+                serialized.source,
+                serialized.updatedAt
+              )
+          );
+        }
+        if (insertStmts.length > 0) {
+          await db.batch(insertStmts).catch(() => {});
+        }
+      }
+      return map;
+    },
+
+    async listVisitorRecords(options = {}) {
+      if (!db) return [];
+      const rawLimit = Number(options?.limit);
+      const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 500) : 120;
+      await ensureSchema(env);
+      await ensureVisitorsBackfilled(env);
+
+      const res = await db
+        .prepare(
+          `SELECT uid, data FROM visitors
+           ORDER BY last_seen_at DESC, updated_at DESC, uid DESC
+           LIMIT ?`
+        )
+        .bind(limit)
+        .all();
+
+      const out = [];
+      for (const row of res?.results || []) {
+        const uid = String(row?.uid || '').trim();
+        if (!/^\d+$/.test(uid)) continue;
+        let record = { userId: uid };
+        if (row?.data) {
+          try {
+            const parsed = JSON.parse(row.data);
+            if (parsed && typeof parsed === 'object') {
+              record = { ...parsed, userId: uid };
+            }
+          } catch {
+            // Fall back to minimal record
+          }
+        }
+        out.push({ uid, record });
+      }
+      return out;
+    },
+
+    async checkRateLimit(key, limit = 40, windowSec = 60, nowMs = Date.now()) {
+      const cleanKey = String(key || '').trim();
+      const maxLimit = Number(limit);
+      if (!cleanKey || !db) return true;
+      if (!Number.isFinite(maxLimit) || maxLimit <= 0) return false;
+      await ensureSchema(env);
+
+      const ts = Number.isFinite(Number(nowMs)) ? Math.trunc(Number(nowMs)) : Date.now();
+      const winSec = Math.max(1, Math.trunc(Number.isFinite(Number(windowSec)) ? Number(windowSec) : 60));
+      const expiresAt = ts + winSec * 1000;
+
+      const row = await db
+        .prepare(
+          `INSERT INTO rate_limits (key, count, expires_at)
+           VALUES (?, 1, ?)
+           ON CONFLICT(key) DO UPDATE SET
+             count = CASE
+               WHEN rate_limits.expires_at <= ? THEN 1
+               WHEN rate_limits.count <= ? THEN rate_limits.count + 1
+               ELSE rate_limits.count
+             END,
+             expires_at = CASE
+               WHEN rate_limits.expires_at <= ? THEN excluded.expires_at
+               ELSE rate_limits.expires_at
+             END
+           RETURNING count`
+        )
+        .bind(cleanKey, expiresAt, ts, maxLimit, ts)
+        .first();
+
+      return Number(row?.count || 0) <= maxLimit;
+    },
+
+    async recordMonthlyVisit(monthKey, uid) {
+      const cleanMonth = String(monthKey || '').trim();
+      const cleanUid = String(uid ?? '').trim();
+      if (!db || !/^\d{6}$/.test(cleanMonth) || !/^\d+$/.test(cleanUid)) {
+        return { recorded: false };
+      }
+      await ensureSchema(env);
+      const res = await db
+        .prepare(`INSERT OR IGNORE INTO visit_seen (month, uid) VALUES (?, ?)`)
+        .bind(cleanMonth, cleanUid)
+        .run();
+      return {
+        recorded: Number(res?.meta?.changes || 0) > 0,
+        monthKey: cleanMonth,
+      };
+    },
+
+    async getMonthlyVisitCounts(thisMonthKey, lastMonthKey = null) {
+      const cleanThis = String(thisMonthKey || '').trim();
+      const cleanLast = lastMonthKey ? String(lastMonthKey).trim() : '';
+      if (!db || !/^\d{6}$/.test(cleanThis)) {
+        return cleanLast ? { thisMonth: 0, lastMonth: 0 } : { thisMonth: 0 };
+      }
+      await ensureSchema(env);
+
+      if (!cleanLast) {
+        const row = await db
+          .prepare(`SELECT COUNT(*) AS cnt FROM visit_seen WHERE month = ?`)
+          .bind(cleanThis)
+          .first();
+        return { thisMonth: Math.max(0, Number(row?.cnt) || 0) };
+      }
+
+      const res = await db
+        .prepare(`SELECT month, COUNT(*) AS cnt FROM visit_seen WHERE month IN (?, ?) GROUP BY month`)
+        .bind(cleanThis, cleanLast)
+        .all();
+      let thisMonth = 0;
+      let lastMonth = 0;
+      for (const row of res?.results || []) {
+        const m = String(row?.month || '');
+        const cnt = Math.max(0, Number(row?.cnt) || 0);
+        if (m === cleanThis) thisMonth = cnt;
+        else if (m === cleanLast) lastMonth = cnt;
+      }
+      return { thisMonth, lastMonth };
     },
   };
 }

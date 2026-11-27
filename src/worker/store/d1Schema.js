@@ -1,8 +1,8 @@
-// Cloudflare D1 schema definition & per-isolate automatic DDL initializer for Stage 1 (v2.0).
+// Cloudflare D1 schema definition & per-isolate automatic DDL initializer (Stage 1–3, v2.0–v2.2).
 // Deployers never need to run manual SQL migrations: `ensureSchema(env)` runs idempotently
 // via `env.DB.batch([...])` and caches the resolved Promise per `env.DB` binding instance.
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 const SCHEMA_DDL_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS meta (
@@ -62,6 +62,25 @@ const SCHEMA_DDL_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS migrated_visitors (
     uid         TEXT PRIMARY KEY,
     migrated_at INTEGER NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS visitors (
+    uid          TEXT PRIMARY KEY,
+    data         TEXT NOT NULL,
+    last_seen_at INTEGER,
+    source       TEXT,
+    updated_at   INTEGER NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_visitors_last_seen ON visitors(last_seen_at)`,
+  `CREATE TABLE IF NOT EXISTS rate_limits (
+    key        TEXT PRIMARY KEY,
+    count      INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_rate_limits_expires ON rate_limits(expires_at)`,
+  `CREATE TABLE IF NOT EXISTS visit_seen (
+    month TEXT NOT NULL,
+    uid   TEXT NOT NULL,
+    PRIMARY KEY (month, uid)
   )`,
 ];
 

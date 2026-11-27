@@ -18,6 +18,11 @@ const FALLBACK_MIGRATION_TS = 1700000000000;
 
 // Per-isolate cache of UIDs confirmed present in `migrated_visitors`, keyed by `env.DB`
 const migratedUidCache = new WeakMap();
+const VISITORS_BACKFILL_META_KEY = 'visitors_kv_migrated';
+const BACKFILL_MAX_VISITORS_PER_CALL = 300;
+const BACKFILL_KV_READ_CONCURRENCY = 20;
+const visitorsBackfilledCache = new WeakMap();
+const visitorsBackfillInFlight = new WeakMap();
 
 function getMigratedSet(db) {
   let set = migratedUidCache.get(db);
@@ -54,9 +59,33 @@ function parseTimestampMs(isoCandidate, numericCandidate, fallbackMs) {
   return Math.trunc(fallbackMs);
 }
 
+export function serializeVisitorRow(uid, record = {}, nowMs = Date.now()) {
+  const cleanUid = String(uid || '').trim();
+  const obj = record && typeof record === 'object' ? { ...record, userId: cleanUid } : { userId: cleanUid };
+  let lastSeenAt = null;
+  const rawLast = obj.last_seen_at;
+  if (typeof rawLast === 'number' && Number.isFinite(rawLast) && rawLast > 0) {
+    lastSeenAt = Math.trunc(rawLast);
+  } else if (typeof rawLast === 'string' && rawLast.trim()) {
+    const parsed = Date.parse(rawLast);
+    if (Number.isFinite(parsed) && parsed > 0) lastSeenAt = Math.trunc(parsed);
+  }
+  const rawSource = typeof obj.source === 'string' ? obj.source.trim() : '';
+  const source = rawSource || null;
+  const updatedAt = Math.trunc(Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now());
+  return {
+    uid: cleanUid,
+    data: JSON.stringify(obj),
+    lastSeenAt,
+    source,
+    updatedAt,
+  };
+}
+
 /**
- * Migrates a single visitor's KV `history:{uid}` into D1 (`messages` + `message_links`)
- * and marks `uid` in `migrated_visitors`. Safe under concurrent calls and partial-failure retries.
+ * Migrates a single visitor's KV `history:{uid}` (and `user:{uid}` profile) into D1
+ * (`messages` + `message_links` + `visitors`) and marks `uid` in `migrated_visitors`.
+ * Safe under concurrent calls and partial-failure retries.
  */
 export async function migrateVisitor(env, uid, options = {}) {
   const db = env?.DB;
@@ -108,14 +137,37 @@ export async function migrateVisitor(env, uid, options = {}) {
   }
 
   const kv = env?.TOPIC_MAP || null;
-  const kvHistory = kv ? await safeGetJSON(kv, `history:${cleanUid}`, null) : null;
+  const needUserFromKv = Boolean(kv && visitorsBackfilledCache.get(db) !== true);
+  const [kvHistory, kvUser] = kv
+    ? await Promise.all([
+        safeGetJSON(kv, `history:${cleanUid}`, null),
+        needUserFromKv ? safeGetJSON(kv, `user:${cleanUid}`, null) : Promise.resolve(null),
+      ])
+    : [null, null];
   const nowMs = Date.now();
 
+  const visitorInsertStmt =
+    kvUser && typeof kvUser === 'object'
+      ? (() => {
+          const row = serializeVisitorRow(cleanUid, kvUser, nowMs);
+          return db
+            .prepare(
+              `INSERT OR IGNORE INTO visitors (uid, data, last_seen_at, source, updated_at)
+               VALUES (?, ?, ?, ?, ?)`
+            )
+            .bind(row.uid, row.data, row.lastSeenAt, row.source, row.updatedAt);
+        })()
+      : null;
+
   if (!kvHistory || typeof kvHistory !== 'object') {
-    await db
+    const markStmt = db
       .prepare(`INSERT OR IGNORE INTO migrated_visitors (uid, migrated_at) VALUES (?, ?)`)
-      .bind(cleanUid, nowMs)
-      .run();
+      .bind(cleanUid, nowMs);
+    if (visitorInsertStmt) {
+      await db.batch([visitorInsertStmt, markStmt]);
+    } else {
+      await markStmt.run();
+    }
     queriesUsed += 1;
     memSet.add(cleanUid);
     return {
@@ -387,6 +439,9 @@ export async function migrateVisitor(env, uid, options = {}) {
   const markStmt = db
     .prepare(`INSERT OR IGNORE INTO migrated_visitors (uid, migrated_at) VALUES (?, ?)`)
     .bind(cleanUid, nowMs);
+  if (visitorInsertStmt) {
+    writeStmts.push(visitorInsertStmt);
+  }
 
   if (writeStmts.length === 0) {
     await markStmt.run();
@@ -421,16 +476,16 @@ export async function ensureVisitorMigrated(env, uid) {
   await migrateVisitor(env, cleanUid);
 }
 
-async function listKvPrefixUids(kv, prefix) {
+async function listKvPrefixUidsWithStatus(kv, prefix) {
   const found = [];
-  if (!kv || typeof kv.list !== 'function') return found;
+  if (!kv || typeof kv.list !== 'function') return { uids: found, complete: true };
   let cursor = undefined;
   for (let page = 0; page < KV_LIST_MAX_PAGES; page += 1) {
     let listed;
     try {
       listed = await kv.list(cursor ? { prefix, limit: 1000, cursor } : { prefix, limit: 1000 });
     } catch {
-      break;
+      return { uids: found, complete: false };
     }
     for (const k of listed?.keys || []) {
       const uid = String(k?.name || '').slice(prefix.length);
@@ -438,10 +493,144 @@ async function listKvPrefixUids(kv, prefix) {
         found.push(uid);
       }
     }
-    if (!listed || listed.list_complete || !listed.cursor) break;
+    if (!listed || listed.list_complete || !listed.cursor) {
+      return { uids: found, complete: true };
+    }
     cursor = listed.cursor;
   }
-  return found;
+  return { uids: found, complete: false };
+}
+
+async function listKvPrefixUids(kv, prefix) {
+  const { uids } = await listKvPrefixUidsWithStatus(kv, prefix);
+  return uids;
+}
+
+export async function isVisitorsBackfilled(env) {
+  const db = env?.DB;
+  if (!db) return true;
+  if (visitorsBackfilledCache.get(db) === true) return true;
+  await ensureSchema(env);
+  const row = await db
+    .prepare(`SELECT value FROM meta WHERE key = ?`)
+    .bind(VISITORS_BACKFILL_META_KEY)
+    .first();
+  if (row?.value === '1') {
+    visitorsBackfilledCache.set(db, true);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * One-time automatic backfill of legacy KV visitor profiles (`visitors:index`, `user:*`, and orphan
+ * `banned:*` keys) into the D1 `visitors` table. Never deletes any KV keys.
+ * Bounded per invocation so large legacy deployments stay safely within Worker limits.
+ */
+export async function ensureVisitorsBackfilled(env) {
+  const db = env?.DB;
+  const kv = env?.TOPIC_MAP || null;
+  if (!db || !kv) return { skipped: true };
+  if (visitorsBackfilledCache.get(db) === true) return { alreadyDone: true };
+
+  const inFlight = visitorsBackfillInFlight.get(db);
+  if (inFlight) return inFlight;
+
+  const work = (async () => {
+    await ensureSchema(env);
+    const metaRow = await db
+      .prepare(`SELECT value FROM meta WHERE key = ?`)
+      .bind(VISITORS_BACKFILL_META_KEY)
+      .first();
+    if (metaRow?.value === '1') {
+      visitorsBackfilledCache.set(db, true);
+      return { alreadyDone: true };
+    }
+
+    const [indexedRaw, userListed, bannedListed, existingRes] = await Promise.all([
+      safeGetJSON(kv, 'visitors:index', []),
+      listKvPrefixUidsWithStatus(kv, 'user:'),
+      listKvPrefixUidsWithStatus(kv, 'banned:'),
+      db.prepare(`SELECT uid FROM visitors`).all(),
+    ]);
+
+    const existingSet = new Set();
+    for (const r of existingRes?.results || []) {
+      const uid = String(r?.uid || '').trim();
+      if (/^\d+$/.test(uid)) existingSet.add(uid);
+    }
+
+    const bannedSet = new Set(bannedListed.uids);
+    const candidateSet = new Set();
+    for (const id of Array.isArray(indexedRaw) ? indexedRaw : []) {
+      const uid = String(id || '').trim();
+      if (/^\d+$/.test(uid)) candidateSet.add(uid);
+    }
+    for (const uid of userListed.uids) candidateSet.add(uid);
+    for (const uid of bannedListed.uids) candidateSet.add(uid);
+
+    const missingUids = Array.from(candidateSet).filter((u) => !existingSet.has(u));
+    const batchUids = missingUids.slice(0, BACKFILL_MAX_VISITORS_PER_CALL);
+    const nowMs = Date.now();
+    const insertStmts = [];
+
+    for (let i = 0; i < batchUids.length; i += BACKFILL_KV_READ_CONCURRENCY) {
+      const slice = batchUids.slice(i, i + BACKFILL_KV_READ_CONCURRENCY);
+      const recs = await Promise.all(slice.map((uid) => safeGetJSON(kv, `user:${uid}`, null)));
+      for (let j = 0; j < slice.length; j += 1) {
+        const uid = slice[j];
+        const kvRec = recs[j];
+        const record =
+          kvRec && typeof kvRec === 'object' ? kvRec : bannedSet.has(uid) ? { userId: uid } : null;
+        if (!record) continue;
+        const row = serializeVisitorRow(uid, record, nowMs);
+        insertStmts.push(
+          db
+            .prepare(
+              `INSERT OR IGNORE INTO visitors (uid, data, last_seen_at, source, updated_at)
+               VALUES (?, ?, ?, ?, ?)`
+            )
+            .bind(row.uid, row.data, row.lastSeenAt, row.source, row.updatedAt)
+        );
+      }
+    }
+
+    const finishedAll =
+      userListed.complete && bannedListed.complete && missingUids.length <= BACKFILL_MAX_VISITORS_PER_CALL;
+    const markMetaStmt = finishedAll
+      ? db
+          .prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, '1')`)
+          .bind(VISITORS_BACKFILL_META_KEY)
+      : null;
+
+    if (insertStmts.length === 0) {
+      if (markMetaStmt) {
+        await markMetaStmt.run();
+      }
+    } else {
+      for (let offset = 0; offset < insertStmts.length; offset += D1_BATCH_CHUNK_SIZE) {
+        const chunk = insertStmts.slice(offset, offset + D1_BATCH_CHUNK_SIZE);
+        if (markMetaStmt && offset + D1_BATCH_CHUNK_SIZE >= insertStmts.length) {
+          chunk.push(markMetaStmt);
+        }
+        await db.batch(chunk);
+      }
+    }
+
+    if (finishedAll) {
+      visitorsBackfilledCache.set(db, true);
+    }
+    return { backfilled: insertStmts.length, finished: finishedAll };
+  })();
+
+  visitorsBackfillInFlight.set(db, work);
+  try {
+    return await work;
+  } finally {
+    if (visitorsBackfillInFlight.get(db) === work) {
+      visitorsBackfillInFlight.delete(db);
+    }
+  }
 }
 
 async function discoverVisitorMigrationSet(env) {
