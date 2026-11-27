@@ -95,7 +95,7 @@ export async function rememberPendingSource(env, userId, rawSource) {
   const pendingKey = `src:${uid}`;
   const [existingPending, existingUser] = await Promise.all([
     env.TOPIC_MAP.get(pendingKey),
-    safeGetJSON(env.TOPIC_MAP, `user:${uid}`, null),
+    getStore(env).getVisitor(uid),
   ]);
   if (existingPending || existingUser?.source) {
     return false;
@@ -137,9 +137,14 @@ export function computeSourceStats(visitors = []) {
 }
 
 export async function invalidateVisitorSummaryCache(env) {
-  if (!env?.TOPIC_MAP) return;
   try {
-    await env.TOPIC_MAP.delete(VISITOR_SUMMARY_CACHE_KEY);
+    if (env?.DB) {
+      await getStore(env).invalidateVisitorOverviewCache();
+      return;
+    }
+    if (env?.TOPIC_MAP) {
+      await env.TOPIC_MAP.delete(VISITOR_SUMMARY_CACHE_KEY);
+    }
   } catch {
     // Ignore cache invalidation errors
   }
@@ -218,10 +223,11 @@ export function extractPhotoFromMessage(msg = {}) {
 }
 
 export async function upsertVisitorProfile(env, tgUser, extra = {}) {
-  if (!env.TOPIC_MAP || !tgUser?.id) return null;
+  if ((!env?.TOPIC_MAP && !env?.DB) || !tgUser?.id) return null;
   const uid = String(tgUser.id);
-  const key = `user:${uid}`;
-  const existing = (await safeGetJSON(env.TOPIC_MAP, key, {})) || {};
+  const store = getStore(env);
+  const storedExisting = await store.getVisitor(uid);
+  const existing = storedExisting || {};
   const now = new Date().toISOString();
 
   const existingTotal = Number(existing.msg_count) || 0;
@@ -233,7 +239,7 @@ export async function upsertVisitorProfile(env, tgUser, extra = {}) {
   let resolvedSource = existing.source || '';
   let resolvedSourceAt = existing.source_at || null;
   let consumedPendingKey = '';
-  if (!resolvedSource) {
+  if (!resolvedSource && env?.TOPIC_MAP) {
     const rawPending = await env.TOPIC_MAP.get(`src:${uid}`);
     const pendingSource = normalizeSourceParam(rawPending || '');
     if (pendingSource) {
@@ -264,31 +270,40 @@ export async function upsertVisitorProfile(env, tgUser, extra = {}) {
     ...(extra.closed !== undefined ? { closed: extra.closed } : {}),
   };
 
-  await safePutJSON(env.TOPIC_MAP, key, updated);
-  if (consumedPendingKey) {
+  await store.putVisitor(uid, updated);
+  if (consumedPendingKey && env?.TOPIC_MAP) {
     await env.TOPIC_MAP.delete(consumedPendingKey).catch(() => {});
   }
-  await addToVisitorIndex(env, uid);
-  await invalidateVisitorSummaryCache(env);
+  if (store.mode === 'kv') {
+    await addToVisitorIndex(env, uid);
+  }
+  // Only invalidate overview cache when overview stats/sourceStats could actually change
+  // (brand-new visitor, closed toggle, or first-touch source attribution) so active chats stay cache-warm.
+  const overviewStatsChanged =
+    !storedExisting ||
+    (extra.closed !== undefined && Boolean(extra.closed) !== Boolean(storedExisting.closed)) ||
+    Boolean(resolvedSource && resolvedSource !== storedExisting.source);
+  if (overviewStatsChanged) {
+    await invalidateVisitorSummaryCache(env);
+  }
   return updated;
 }
 
 /**
- * Appends a held probation message onto `user:{uid}.pendingReview` (max 10, 7-day retention),
- * reusing the existing visitor profile write so no extra KV key is introduced.
+ * Appends a held probation message onto the visitor profile's `pendingReview` (max 10, 7-day retention).
  */
 export async function addPendingReviewMessage(env, tgUser, entry) {
-  if (!env?.TOPIC_MAP || !tgUser?.id || !entry?.pmMessageId) return null;
+  if ((!env?.TOPIC_MAP && !env?.DB) || !tgUser?.id || !entry?.pmMessageId) return null;
   const uid = String(tgUser.id);
-  const key = `user:${uid}`;
-  const existing = (await safeGetJSON(env.TOPIC_MAP, key, {})) || {};
+  const store = getStore(env);
+  const existing = (await store.getVisitor(uid)) || {};
   const nowMs = typeof entry.at === 'number' ? entry.at : Date.now();
   const nowIso = new Date(nowMs).toISOString();
 
   let resolvedSource = existing.source || '';
   let resolvedSourceAt = existing.source_at || null;
   let consumedPendingKey = '';
-  if (!resolvedSource) {
+  if (!resolvedSource && env?.TOPIC_MAP) {
     const rawPending = await env.TOPIC_MAP.get(`src:${uid}`);
     const pendingSource = normalizeSourceParam(rawPending || '');
     if (pendingSource) {
@@ -336,24 +351,26 @@ export async function addPendingReviewMessage(env, tgUser, entry) {
     pendingReview: nextPending,
   };
 
-  await safePutJSON(env.TOPIC_MAP, key, updated);
-  if (consumedPendingKey) {
+  await store.putVisitor(uid, updated);
+  if (consumedPendingKey && env?.TOPIC_MAP) {
     await env.TOPIC_MAP.delete(consumedPendingKey).catch(() => {});
   }
-  await addToVisitorIndex(env, uid);
+  if (store.mode === 'kv') {
+    await addToVisitorIndex(env, uid);
+  }
   await invalidateVisitorSummaryCache(env);
   return { record: updated, pendingReview: nextPending };
 }
 
 export async function clearPendingReviewMessages(env, userId) {
   const uid = String(userId || '').trim();
-  if (!env?.TOPIC_MAP || !/^\d+$/.test(uid)) return null;
-  const key = `user:${uid}`;
-  const rec = await safeGetJSON(env.TOPIC_MAP, key, null);
+  if ((!env?.TOPIC_MAP && !env?.DB) || !/^\d+$/.test(uid)) return null;
+  const store = getStore(env);
+  const rec = await store.getVisitor(uid);
   if (!rec) return null;
   if (rec.pendingReview !== undefined) {
     delete rec.pendingReview;
-    await safePutJSON(env.TOPIC_MAP, key, rec);
+    await store.putVisitor(uid, rec);
     await invalidateVisitorSummaryCache(env);
   }
   return rec;
@@ -365,7 +382,7 @@ export async function clearPendingReviewMessages(env, userId) {
  */
 export async function recordVisitorExchange(env, userId, msg, options = {}) {
   const uid = String(userId || '');
-  if (!env.TOPIC_MAP || !/^\d+$/.test(uid)) return null;
+  if ((!env?.TOPIC_MAP && !env?.DB) || !/^\d+$/.test(uid)) return null;
 
   const {
     sender = 'visitor', // 'visitor' | 'admin'
@@ -387,7 +404,6 @@ export async function recordVisitorExchange(env, userId, msg, options = {}) {
 
   const nowMs = Date.now();
   const nowIso = new Date(nowMs).toISOString();
-  const userKey = `user:${uid}`;
 
   const photo = extractPhotoFromMessage(msg);
   const urls = extractLinksFromMessage(msg);
@@ -445,10 +461,10 @@ export async function recordVisitorExchange(env, userId, msg, options = {}) {
       topicThreadId: hasTopicCopy ? numericThreadId : null,
       topicChatId: validTopicChatId,
     }),
-    safeGetJSON(env.TOPIC_MAP, userKey, { userId: uid }),
+    store.getVisitor(uid),
   ]);
 
-  // Sync summary counters onto user:<uid> (remains in KV during Stage 1)
+  // Sync summary counters onto visitor profile (D1 `visitors` table in D1 mode, `user:<uid>` in KV mode)
   const rec = storedRec || { userId: uid };
   const prevTotal = Number(rec.msg_count) || 0;
   const prevVisitor = rec.visitor_msg_count !== undefined ? Number(rec.visitor_msg_count) || 0 : prevTotal;
@@ -476,11 +492,21 @@ export async function recordVisitorExchange(env, userId, msg, options = {}) {
     rec.last_preview = sender === 'admin' ? `我：${preview}`.slice(0, 120) : preview.slice(0, 120);
   }
 
-  await Promise.all([
-    safePutJSON(env.TOPIC_MAP, userKey, rec),
-    addToVisitorIndex(env, uid),
-    invalidateVisitorSummaryCache(env),
-  ]);
+  // Routine message exchanges only change per-visitor message/media counts & previews; keep the
+  // 10-minute overview cache warm unless this is a brand-new visitor with no prior profile row.
+  const isNewVisitor = !storedRec;
+  if (store.mode === 'kv') {
+    await Promise.all([
+      store.putVisitor(uid, rec),
+      addToVisitorIndex(env, uid),
+      ...(isNewVisitor ? [invalidateVisitorSummaryCache(env)] : []),
+    ]);
+  } else {
+    await Promise.all([
+      store.putVisitor(uid, rec),
+      ...(isNewVisitor ? [invalidateVisitorSummaryCache(env)] : []),
+    ]);
+  }
 
   return {
     photoAdded: Boolean(photo),
@@ -574,9 +600,15 @@ export async function searchVisitorMessages(env, options = {}) {
 
   const uniqueUids = Array.from(new Set(rawItems.map((it) => String(it.uid || '')).filter((u) => /^\d+$/.test(u))));
   const visitorMap = new Map();
-  if (env?.TOPIC_MAP && uniqueUids.length > 0) {
-    const supergroupId = await resolveSupergroupId(env);
-    const details = await Promise.all(uniqueUids.map((uid) => getVisitorDetail(env, uid, supergroupId)));
+  if ((env?.DB || env?.TOPIC_MAP) && uniqueUids.length > 0) {
+    const store = getStore(env);
+    const [recordsByUid, supergroupId] = await Promise.all([
+      store.getVisitorsByUids(uniqueUids),
+      resolveSupergroupId(env),
+    ]);
+    const details = await Promise.all(
+      uniqueUids.map((uid) => getVisitorDetail(env, uid, supergroupId, recordsByUid.get(uid) ?? null))
+    );
     for (let i = 0; i < uniqueUids.length; i += 1) {
       if (details[i]) {
         visitorMap.set(uniqueUids[i], {
@@ -616,14 +648,13 @@ export async function searchVisitorMessages(env, options = {}) {
  */
 export async function clearVisitorHistory(env, userId, mode = 'archive', tgCallFn = null) {
   const uid = String(userId || '');
-  if (!env.TOPIC_MAP || !/^\d+$/.test(uid)) {
+  if ((!env?.TOPIC_MAP && !env?.DB) || !/^\d+$/.test(uid)) {
     throw new Error('Invalid userId');
   }
 
   const store = getStore(env);
-  const history = await store.getHistory(uid);
-  const userKey = `user:${uid}`;
-  const rec = (await safeGetJSON(env.TOPIC_MAP, userKey, { userId: uid })) || { userId: uid };
+  const [history, storedRec] = await Promise.all([store.getHistory(uid), store.getVisitor(uid)]);
+  const rec = storedRec || { userId: uid };
 
   let deletedTopic = false;
   let deletedPmCount = 0;
@@ -671,11 +702,13 @@ export async function clearVisitorHistory(env, userId, mode = 'archive', tgCallF
         // Topic may already be deleted
       }
       delete rec.thread_id;
-      await env.TOPIC_MAP.delete(`thread:${oldThreadId}`);
+      if (env?.TOPIC_MAP) {
+        await env.TOPIC_MAP.delete(`thread:${oldThreadId}`);
+      }
     }
   }
 
-  // Clear message store (KV or D1) & reset KV profile counters
+  // Clear message store (KV or D1) & reset profile counters
   await store.clearHistory(uid, mode);
   rec.msg_count = 0;
   rec.visitor_msg_count = 0;
@@ -683,10 +716,10 @@ export async function clearVisitorHistory(env, userId, mode = 'archive', tgCallF
   rec.photo_count = 0;
   rec.link_count = 0;
   rec.last_preview = '';
-  await safePutJSON(env.TOPIC_MAP, userKey, rec);
+  await store.putVisitor(uid, rec);
   await invalidateVisitorSummaryCache(env);
 
-  const visitor = await getVisitorDetail(env, uid);
+  const visitor = await getVisitorDetail(env, uid, null, rec);
   return { visitor, deletedTopic, deletedPmCount };
 }
 
@@ -699,14 +732,15 @@ async function addToVisitorIndex(env, uid) {
   await safePutJSON(env.TOPIC_MAP, VISITOR_INDEX_KEY, filtered.slice(0, 500));
 }
 
-export async function getVisitorDetail(env, userId, knownSupergroupId = null) {
+export async function getVisitorDetail(env, userId, knownSupergroupId = null, knownRecord = undefined) {
   const uid = String(userId);
-  if (!env.TOPIC_MAP) return null;
+  if (!env?.TOPIC_MAP && !env?.DB) return null;
 
+  const kv = env?.TOPIC_MAP || null;
   const [rec, bannedVal, verifiedVal, resolvedGroupId] = await Promise.all([
-    safeGetJSON(env.TOPIC_MAP, `user:${uid}`, null),
-    env.TOPIC_MAP.get(`banned:${uid}`),
-    env.TOPIC_MAP.get(`verified:${uid}`),
+    knownRecord !== undefined ? Promise.resolve(knownRecord) : getStore(env).getVisitor(uid),
+    kv ? kv.get(`banned:${uid}`) : Promise.resolve(null),
+    kv ? kv.get(`verified:${uid}`) : Promise.resolve(null),
     knownSupergroupId !== null ? Promise.resolve(knownSupergroupId) : resolveSupergroupId(env),
   ]);
 
@@ -770,7 +804,7 @@ export async function getVisitorDetail(env, userId, knownSupergroupId = null) {
 
 export async function listVisitors(env, options = {}) {
   const { search = '', filter = 'all', limit = 60 } = options;
-  if (!env.TOPIC_MAP) {
+  if (!env?.TOPIC_MAP && !env?.DB) {
     return {
       stats: { total: 0, active: 0, trusted: 0, banned: 0, closed: 0, pendingReview: 0 },
       sourceStats: [],
@@ -778,62 +812,75 @@ export async function listVisitors(env, options = {}) {
     };
   }
 
-  const [indexedRaw, migrated, bannedMigrated] = await Promise.all([
-    safeGetJSON(env.TOPIC_MAP, VISITOR_INDEX_KEY, []),
-    env.TOPIC_MAP.get(VISITOR_MIGRATED_KEY),
-    env.TOPIC_MAP.get(VISITOR_BANNED_MIGRATED_KEY),
-  ]);
-  const indexed = Array.isArray(indexedRaw) ? indexedRaw : [];
-  let idList = Array.from(new Set(indexed.map(String)));
-  const idSet = new Set(idList);
+  const store = getStore(env);
+  let details = [];
 
-  // Run one-time legacy `user:*` discovery only until migrated, avoiding recurring KV.list quota burn
-  if (!migrated && typeof env.TOPIC_MAP.list === 'function') {
-    try {
-      const listed = await env.TOPIC_MAP.list({ prefix: 'user:', limit: 200 });
-      let discovered = 0;
-      for (const k of listed.keys || []) {
-        const uid = k.name.slice(5);
-        if (/^\d+$/.test(uid) && !idSet.has(uid)) {
-          idSet.add(uid);
-          idList.push(uid);
-          discovered += 1;
+  if (store.mode === 'd1') {
+    const [rows, supergroupId] = await Promise.all([
+      store.listVisitorRecords({ limit: 120 }),
+      resolveSupergroupId(env),
+    ]);
+    details = (
+      await Promise.all(rows.map(({ uid, record }) => getVisitorDetail(env, uid, supergroupId, record)))
+    ).filter(Boolean);
+  } else {
+    const [indexedRaw, migrated, bannedMigrated] = await Promise.all([
+      safeGetJSON(env.TOPIC_MAP, VISITOR_INDEX_KEY, []),
+      env.TOPIC_MAP.get(VISITOR_MIGRATED_KEY),
+      env.TOPIC_MAP.get(VISITOR_BANNED_MIGRATED_KEY),
+    ]);
+    const indexed = Array.isArray(indexedRaw) ? indexedRaw : [];
+    let idList = Array.from(new Set(indexed.map(String)));
+    const idSet = new Set(idList);
+
+    // Run one-time legacy `user:*` discovery only until migrated, avoiding recurring KV.list quota burn
+    if (!migrated && typeof env.TOPIC_MAP.list === 'function') {
+      try {
+        const listed = await env.TOPIC_MAP.list({ prefix: 'user:', limit: 200 });
+        let discovered = 0;
+        for (const k of listed.keys || []) {
+          const uid = k.name.slice(5);
+          if (/^\d+$/.test(uid) && !idSet.has(uid)) {
+            idSet.add(uid);
+            idList.push(uid);
+            discovered += 1;
+          }
         }
-      }
-      if (discovered > 0) {
-        await safePutJSON(env.TOPIC_MAP, VISITOR_INDEX_KEY, idList.slice(0, 500));
-      }
-      await env.TOPIC_MAP.put(VISITOR_MIGRATED_KEY, '1');
-    } catch {
-      // Ignore list failure
-    }
-  }
-
-  // One-time orphan `banned:*` discovery so pre-v1.5.3 honeypot/CAS auto-bans appear in Admin -> Banned for 1-click unban
-  if (!bannedMigrated && typeof env.TOPIC_MAP.list === 'function') {
-    try {
-      const listedBanned = await env.TOPIC_MAP.list({ prefix: 'banned:', limit: 200 });
-      const prepended = [];
-      for (const k of listedBanned.keys || []) {
-        const uid = k.name.slice(7);
-        if (/^\d+$/.test(uid) && !idSet.has(uid)) {
-          idSet.add(uid);
-          prepended.push(uid);
+        if (discovered > 0) {
+          await safePutJSON(env.TOPIC_MAP, VISITOR_INDEX_KEY, idList.slice(0, 500));
         }
+        await env.TOPIC_MAP.put(VISITOR_MIGRATED_KEY, '1');
+      } catch {
+        // Ignore list failure
       }
-      if (prepended.length > 0) {
-        idList = [...prepended, ...idList].slice(0, 500);
-        await safePutJSON(env.TOPIC_MAP, VISITOR_INDEX_KEY, idList);
-      }
-      await env.TOPIC_MAP.put(VISITOR_BANNED_MIGRATED_KEY, '1');
-    } catch {
-      // Ignore list failure
     }
-  }
 
-  const allIds = idList.slice(0, 120);
-  const supergroupId = await resolveSupergroupId(env);
-  const details = (await Promise.all(allIds.map((uid) => getVisitorDetail(env, uid, supergroupId)))).filter(Boolean);
+    // One-time orphan `banned:*` discovery so pre-v1.5.3 honeypot/CAS auto-bans appear in Admin -> Banned for 1-click unban
+    if (!bannedMigrated && typeof env.TOPIC_MAP.list === 'function') {
+      try {
+        const listedBanned = await env.TOPIC_MAP.list({ prefix: 'banned:', limit: 200 });
+        const prepended = [];
+        for (const k of listedBanned.keys || []) {
+          const uid = k.name.slice(7);
+          if (/^\d+$/.test(uid) && !idSet.has(uid)) {
+            idSet.add(uid);
+            prepended.push(uid);
+          }
+        }
+        if (prepended.length > 0) {
+          idList = [...prepended, ...idList].slice(0, 500);
+          await safePutJSON(env.TOPIC_MAP, VISITOR_INDEX_KEY, idList);
+        }
+        await env.TOPIC_MAP.put(VISITOR_BANNED_MIGRATED_KEY, '1');
+      } catch {
+        // Ignore list failure
+      }
+    }
+
+    const allIds = idList.slice(0, 120);
+    const supergroupId = await resolveSupergroupId(env);
+    details = (await Promise.all(allIds.map((uid) => getVisitorDetail(env, uid, supergroupId)))).filter(Boolean);
+  }
 
   details.sort((a, b) => {
     const ta = a.last_seen_at ? Date.parse(a.last_seen_at) : 0;
@@ -851,22 +898,31 @@ export async function listVisitors(env, options = {}) {
   };
   const sourceStats = computeSourceStats(details);
 
-  // Opportunistically refresh single-key summary cache only when missing or expired (avoids unnecessary KV writes)
+  // Cache overview in D1 `meta` (D1 mode, 0 KV writes/reads on warm open) or KV `cache:visitor_summary` (KV mode).
   if (!search && filter === 'all') {
-    const existingCache = await safeGetJSON(env.TOPIC_MAP, VISITOR_SUMMARY_CACHE_KEY, null);
-    const cacheFresh =
-      existingCache &&
-      existingCache.stats &&
-      typeof existingCache.stats.pendingReview === 'number' &&
-      Array.isArray(existingCache.sourceStats) &&
-      Date.now() - Number(existingCache.cachedAt || 0) < VISITOR_SUMMARY_TTL_MS;
-    if (!cacheFresh) {
-      await safePutJSON(
-        env.TOPIC_MAP,
-        VISITOR_SUMMARY_CACHE_KEY,
-        { stats, sourceStats, recent: details.slice(0, 5), cachedAt: Date.now() },
-        { expirationTtl: 600 }
-      ).catch(() => {});
+    if (store.mode === 'd1') {
+      const existingCache = await store.getVisitorOverviewCache(VISITOR_SUMMARY_TTL_MS).catch(() => null);
+      if (!existingCache) {
+        await store
+          .putVisitorOverviewCache({ stats, sourceStats, recent: details.slice(0, 5), cachedAt: Date.now() })
+          .catch(() => {});
+      }
+    } else {
+      const existingCache = await safeGetJSON(env.TOPIC_MAP, VISITOR_SUMMARY_CACHE_KEY, null);
+      const cacheFresh =
+        existingCache &&
+        existingCache.stats &&
+        typeof existingCache.stats.pendingReview === 'number' &&
+        Array.isArray(existingCache.sourceStats) &&
+        Date.now() - Number(existingCache.cachedAt || 0) < VISITOR_SUMMARY_TTL_MS;
+      if (!cacheFresh) {
+        await safePutJSON(
+          env.TOPIC_MAP,
+          VISITOR_SUMMARY_CACHE_KEY,
+          { stats, sourceStats, recent: details.slice(0, 5), cachedAt: Date.now() },
+          { expirationTtl: 600 }
+        ).catch(() => {});
+      }
     }
   }
 
@@ -896,7 +952,7 @@ export async function listVisitors(env, options = {}) {
  * Automatically invalidated whenever a visitor chats or admin moderates a visitor.
  */
 export async function getVisitorOverview(env) {
-  if (!env.TOPIC_MAP) {
+  if (!env?.TOPIC_MAP && !env?.DB) {
     return {
       stats: { total: 0, active: 0, trusted: 0, banned: 0, closed: 0, pendingReview: 0 },
       sourceStats: [],
@@ -904,19 +960,32 @@ export async function getVisitorOverview(env) {
       cached: false,
     };
   }
-  const cached = await safeGetJSON(env.TOPIC_MAP, VISITOR_SUMMARY_CACHE_KEY, null);
-  if (
-    cached &&
-    cached.stats &&
-    typeof cached.stats.pendingReview === 'number' &&
-    Date.now() - Number(cached.cachedAt || 0) < VISITOR_SUMMARY_TTL_MS
-  ) {
-    return {
-      stats: cached.stats,
-      sourceStats: Array.isArray(cached.sourceStats) ? cached.sourceStats : [],
-      recent: Array.isArray(cached.recent) ? cached.recent : [],
-      cached: true,
-    };
+  const store = getStore(env);
+  if (store.mode === 'd1') {
+    const cached = await store.getVisitorOverviewCache(VISITOR_SUMMARY_TTL_MS).catch(() => null);
+    if (cached) {
+      return {
+        stats: cached.stats,
+        sourceStats: Array.isArray(cached.sourceStats) ? cached.sourceStats : [],
+        recent: Array.isArray(cached.recent) ? cached.recent : [],
+        cached: true,
+      };
+    }
+  } else {
+    const cached = await safeGetJSON(env.TOPIC_MAP, VISITOR_SUMMARY_CACHE_KEY, null);
+    if (
+      cached &&
+      cached.stats &&
+      typeof cached.stats.pendingReview === 'number' &&
+      Date.now() - Number(cached.cachedAt || 0) < VISITOR_SUMMARY_TTL_MS
+    ) {
+      return {
+        stats: cached.stats,
+        sourceStats: Array.isArray(cached.sourceStats) ? cached.sourceStats : [],
+        recent: Array.isArray(cached.recent) ? cached.recent : [],
+        cached: true,
+      };
+    }
   }
   const listed = await listVisitors(env, { limit: 5 });
   return {
@@ -929,74 +998,92 @@ export async function getVisitorOverview(env) {
 
 export async function applyVisitorAction(env, userId, action, payload = {}) {
   const uid = String(userId);
-  if (!env.TOPIC_MAP || !/^\d+$/.test(uid)) {
+  if ((!env?.TOPIC_MAP && !env?.DB) || !/^\d+$/.test(uid)) {
     throw new Error('Invalid userId');
   }
 
-  const key = `user:${uid}`;
-  const rec = (await safeGetJSON(env.TOPIC_MAP, key, { userId: uid })) || { userId: uid };
+  const store = getStore(env);
+  const existingRec = await store.getVisitor(uid);
+  const rec = existingRec ? { ...existingRec } : { userId: uid };
+  let recordDirty = false;
 
   switch (action) {
     case 'ban': {
-      await env.TOPIC_MAP.put(`banned:${uid}`, '1');
-      await env.TOPIC_MAP.delete(`probation:${uid}`);
-      await env.TOPIC_MAP.delete(`rv_notify_cd:${uid}`);
-      let dirty = false;
+      if (env?.TOPIC_MAP) {
+        await env.TOPIC_MAP.put(`banned:${uid}`, '1');
+        await env.TOPIC_MAP.delete(`probation:${uid}`);
+        await env.TOPIC_MAP.delete(`rv_notify_cd:${uid}`);
+      }
       if (rec.casExempt) {
         delete rec.casExempt;
-        dirty = true;
+        recordDirty = true;
       }
       if (rec.pendingReview !== undefined) {
         delete rec.pendingReview;
-        dirty = true;
-      }
-      if (dirty) {
-        await safePutJSON(env.TOPIC_MAP, key, rec);
+        recordDirty = true;
       }
       break;
     }
     case 'unban':
-      await env.TOPIC_MAP.delete(`banned:${uid}`);
-      await env.TOPIC_MAP.delete(`verify_cool:${uid}`);
-      await env.TOPIC_MAP.delete(`verify_cool_hint:${uid}`);
+      if (env?.TOPIC_MAP) {
+        await env.TOPIC_MAP.delete(`banned:${uid}`);
+        await env.TOPIC_MAP.delete(`verify_cool:${uid}`);
+        await env.TOPIC_MAP.delete(`verify_cool_hint:${uid}`);
+      }
       rec.casExempt = true;
-      await safePutJSON(env.TOPIC_MAP, key, rec);
+      recordDirty = true;
       break;
     case 'trust':
-      await env.TOPIC_MAP.delete(`banned:${uid}`);
-      await env.TOPIC_MAP.delete(`verify_cool:${uid}`);
-      await env.TOPIC_MAP.delete(`verify_cool_hint:${uid}`);
-      await env.TOPIC_MAP.delete(`probation:${uid}`);
-      await env.TOPIC_MAP.put(`verified:${uid}`, 'trusted');
-      await env.TOPIC_MAP.delete(`needs_verify:${uid}`);
+      if (env?.TOPIC_MAP) {
+        await env.TOPIC_MAP.delete(`banned:${uid}`);
+        await env.TOPIC_MAP.delete(`verify_cool:${uid}`);
+        await env.TOPIC_MAP.delete(`verify_cool_hint:${uid}`);
+        await env.TOPIC_MAP.delete(`probation:${uid}`);
+        await env.TOPIC_MAP.put(`verified:${uid}`, 'trusted');
+        await env.TOPIC_MAP.delete(`needs_verify:${uid}`);
+      }
       break;
     case 'reset':
-      await env.TOPIC_MAP.delete(`verified:${uid}`);
-      await env.TOPIC_MAP.delete(`verify_cool:${uid}`);
-      await env.TOPIC_MAP.delete(`verify_cool_hint:${uid}`);
-      await env.TOPIC_MAP.delete(`probation:${uid}`);
-      await env.TOPIC_MAP.delete(`rv_notify_cd:${uid}`);
-      await env.TOPIC_MAP.put(`needs_verify:${uid}`, '1', { expirationTtl: 600 });
+      if (env?.TOPIC_MAP) {
+        await env.TOPIC_MAP.delete(`verified:${uid}`);
+        await env.TOPIC_MAP.delete(`verify_cool:${uid}`);
+        await env.TOPIC_MAP.delete(`verify_cool_hint:${uid}`);
+        await env.TOPIC_MAP.delete(`probation:${uid}`);
+        await env.TOPIC_MAP.delete(`rv_notify_cd:${uid}`);
+        await env.TOPIC_MAP.put(`needs_verify:${uid}`, '1', { expirationTtl: 600 });
+      }
       break;
     case 'close':
       rec.closed = true;
-      await safePutJSON(env.TOPIC_MAP, key, rec);
+      recordDirty = true;
       break;
     case 'open':
       rec.closed = false;
-      await safePutJSON(env.TOPIC_MAP, key, rec);
+      recordDirty = true;
       break;
     case 'note':
       rec.note = String(payload.note || '').slice(0, 300);
-      await safePutJSON(env.TOPIC_MAP, key, rec);
+      recordDirty = true;
       break;
     default:
       throw new Error(`Unsupported action: ${action}`);
   }
 
-  await addToVisitorIndex(env, uid);
+  // In D1 mode, ensure visitors acted upon via ban/trust (e.g. direct ban/trust by UID) exist in
+  // `visitors` with a fresh `last_seen_at` so they surface immediately in `listVisitors` for 1-click unban.
+  const shouldCreateD1Stub = store.mode === 'd1' && !existingRec && (action === 'ban' || action === 'trust');
+  if (shouldCreateD1Stub && !rec.last_seen_at) {
+    rec.last_seen_at = new Date().toISOString();
+  }
+  if (recordDirty || shouldCreateD1Stub) {
+    await store.putVisitor(uid, rec);
+  }
+
+  if (store.mode === 'kv') {
+    await addToVisitorIndex(env, uid);
+  }
   await invalidateVisitorSummaryCache(env);
-  return await getVisitorDetail(env, uid);
+  return await getVisitorDetail(env, uid, null, recordDirty || existingRec || shouldCreateD1Stub ? rec : null);
 }
 
 /**
@@ -1067,18 +1154,17 @@ export async function recallAdminVisitorMessage(
       : Promise.resolve();
 
   // Remove the recalled message (and its photo/link archive entries) from the active store,
-  // while reading `user:<uid>` in parallel to update KV summary counts.
-  const userKey = `user:${uid}`;
+  // while reading the visitor profile in parallel to update summary counts.
   const [removeRes, storedRec] = await Promise.all([
     store.removeAdminMessage(uid, Number(target.id)),
-    env.TOPIC_MAP ? safeGetJSON(env.TOPIC_MAP, userKey, null) : Promise.resolve(null),
+    store.getVisitor(uid),
     topicDelete,
   ]);
 
-  if (removeRes.removed && storedRec && env.TOPIC_MAP) {
+  if (removeRes.removed && storedRec) {
     storedRec.photo_count = removeRes.photoCount;
     storedRec.link_count = removeRes.linkCount;
-    await Promise.all([safePutJSON(env.TOPIC_MAP, userKey, storedRec), invalidateVisitorSummaryCache(env)]);
+    await store.putVisitor(uid, storedRec);
   }
   return { ok: true, deletedPmMessageId: target.id };
 }

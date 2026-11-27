@@ -1,8 +1,8 @@
-// Cloudflare D1 schema definition & per-isolate automatic DDL initializer for Stage 1 (v2.0).
+// Cloudflare D1 schema definition & per-isolate automatic DDL initializer (Stage 1–3, v2.0–v2.2).
 // Deployers never need to run manual SQL migrations: `ensureSchema(env)` runs idempotently
 // via `env.DB.batch([...])` and caches the resolved Promise per `env.DB` binding instance.
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 const SCHEMA_DDL_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS meta (
@@ -63,22 +63,55 @@ const SCHEMA_DDL_STATEMENTS = [
     uid         TEXT PRIMARY KEY,
     migrated_at INTEGER NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS visitors (
+    uid          TEXT PRIMARY KEY,
+    data         TEXT NOT NULL,
+    last_seen_at INTEGER,
+    source       TEXT,
+    updated_at   INTEGER NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_visitors_last_seen ON visitors(last_seen_at)`,
+  `CREATE TABLE IF NOT EXISTS rate_limits (
+    key        TEXT PRIMARY KEY,
+    count      INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_rate_limits_expires ON rate_limits(expires_at)`,
+  `CREATE TABLE IF NOT EXISTS visit_seen (
+    month TEXT NOT NULL,
+    uid   TEXT NOT NULL,
+    in_kv INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (month, uid)
+  )`,
 ];
 
 const schemaInitCache = new WeakMap();
+const d1SinceCache = new WeakMap();
 
 async function runSchemaInit(db) {
+  const nowStr = String(Date.now());
   const statements = SCHEMA_DDL_STATEMENTS.map((sql) => db.prepare(sql));
   statements.push(
-    db.prepare(`INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)`).bind(String(SCHEMA_VERSION))
+    db.prepare(`INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)`).bind(String(SCHEMA_VERSION)),
+    db.prepare(`INSERT OR IGNORE INTO meta (key, value) VALUES ('d1_since', ?)`).bind(nowStr),
+    db.prepare(`SELECT key, value FROM meta WHERE key IN ('schema_version', 'd1_since')`)
   );
-  statements.push(db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`));
 
   const results = await db.batch(statements);
-  const versionRow = results[results.length - 1]?.results?.[0] || null;
-  const currentVersion = Number(versionRow?.value || 0);
+  const metaRows = results[results.length - 1]?.results || [];
+  let currentVersion = 0;
+  let d1SinceMs = Number(nowStr);
+  for (const row of metaRows) {
+    if (row?.key === 'schema_version') {
+      currentVersion = Number(row.value || 0);
+    } else if (row?.key === 'd1_since') {
+      const parsed = Number(row.value);
+      if (Number.isFinite(parsed) && parsed > 0) d1SinceMs = Math.trunc(parsed);
+    }
+  }
+  d1SinceCache.set(db, d1SinceMs);
 
-  // Future schema versions (> 1) apply incremental ALTER TABLE upgrades here without dropping tables.
+  // Future schema versions (> 1) apply incremental upgrades here without dropping tables.
   if (currentVersion < SCHEMA_VERSION) {
     await db
       .prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)`)
@@ -87,6 +120,23 @@ async function runSchemaInit(db) {
   }
 
   return SCHEMA_VERSION;
+}
+
+export async function getD1SinceMs(env) {
+  const db = env?.DB;
+  if (!db) return 0;
+  if (d1SinceCache.has(db)) {
+    return d1SinceCache.get(db);
+  }
+  await ensureSchema(env);
+  if (d1SinceCache.has(db)) {
+    return d1SinceCache.get(db);
+  }
+  const row = await db.prepare(`SELECT value FROM meta WHERE key = 'd1_since'`).first();
+  const parsed = Number(row?.value);
+  const ts = Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : Date.now();
+  d1SinceCache.set(db, ts);
+  return ts;
 }
 
 export function isSchemaInitialized(env) {

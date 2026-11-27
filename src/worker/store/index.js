@@ -22,7 +22,9 @@ import {
   DEFAULT_MIGRATE_BATCH_SIZE,
   MIGRATE_QUERY_BUDGET,
   ensureVisitorMigrated,
+  ensureVisitorsBackfilled,
   getStorageStatus,
+  isVisitorsBackfilled,
   markVisitorMigratedInCache,
   migrateVisitor,
   migrateVisitorsBatch,
@@ -42,8 +44,10 @@ export {
   cleanupExpiredMaps,
   ensureSchema,
   ensureVisitorMigrated,
+  ensureVisitorsBackfilled,
   escapeLikePattern,
   getStorageStatus,
+  isVisitorsBackfilled,
   migrateVisitor,
   migrateVisitorsBatch,
   normalizeChatRetentionDays,
@@ -60,6 +64,8 @@ export {
   MAX_PM_IDS,
   TOPIC_MSG_MAP_PREFIX,
   TOPIC_MSG_MAP_TTL_SECONDS,
+  VISIT_COUNT_TTL_SECONDS,
+  VISIT_SEEN_TTL_SECONDS,
 } from './kvStore.js';
 
 export function getStore(env) {

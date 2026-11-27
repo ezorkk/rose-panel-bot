@@ -300,7 +300,7 @@ function serializePendingMessage(msg) {
   };
 }
 
-export function buildVisitorCardText(detail) {
+export function buildVisitorCardText(detail, { linkName = true } = {}) {
   const statusMap = {
     banned: '🚫 已拉黑',
     trusted: '⭐ 永久信任',
@@ -309,9 +309,10 @@ export function buildVisitorCardText(detail) {
     pending: '⏳ 待验证',
   };
   const safeUid = /^\d+$/.test(String(detail.userId || '')) ? String(detail.userId) : '';
-  const displayNameHtml = safeUid
-    ? `<a href="tg://user?id=${safeUid}"><b>${escapeHtml(detail.displayName)}</b></a>`
-    : `<b>${escapeHtml(detail.displayName)}</b>`;
+  const displayNameHtml =
+    linkName && safeUid
+      ? `<a href="tg://user?id=${safeUid}"><b>${escapeHtml(detail.displayName)}</b></a>`
+      : `<b>${escapeHtml(detail.displayName)}</b>`;
   const lines = [
     `👤 <b>访客资料卡</b>`,
     `━━━━━━━━━━━━━━━━`,
@@ -400,13 +401,34 @@ async function sendVisitorCardMessage(env, chatId, threadId, requestOrigin, deta
     }
   }
 
-  return tgCall(env, 'sendMessage', {
-    chat_id: chatId,
-    ...threadPart,
-    text,
-    parse_mode: 'HTML',
-    reply_markup: replyMarkup,
-  });
+  try {
+    return await tgCall(env, 'sendMessage', {
+      chat_id: chatId,
+      ...threadPart,
+      text,
+      parse_mode: 'HTML',
+      reply_markup: replyMarkup,
+    });
+  } catch (err) {
+    // Only fall back to plain-name card on Telegram 400 entity/mention/privacy rejections
+    // (never resend on timeout, 429, 5xx, or `thread not found` so we never duplicate cards).
+    const isMentionOrEntityError =
+      Number(err?.code) === 400 &&
+      /can't parse entities|entity|mention|user_privacy|privacy_restricted|user_id_invalid|user not found|peer_id_invalid/i.test(
+        String(err?.message || '')
+      );
+    const fallbackText = isMentionOrEntityError ? buildVisitorCardText(detail, { linkName: false }) : text;
+    if (isMentionOrEntityError && fallbackText !== text) {
+      return tgCall(env, 'sendMessage', {
+        chat_id: chatId,
+        ...threadPart,
+        text: fallbackText,
+        parse_mode: 'HTML',
+        reply_markup: replyMarkup,
+      });
+    }
+    throw err;
+  }
 }
 
 function buildVisitorModerationKeyboard(env, requestOrigin, detail, { isGroup = true } = {}) {
@@ -435,12 +457,14 @@ function buildVisitorModerationKeyboard(env, requestOrigin, detail, { isGroup = 
   return { inline_keyboard: [[profileBtn], row2] };
 }
 
-export async function checkRateLimit(env, key, limit = 40, windowSec = 60) {
-  if (!env.TOPIC_MAP) return true;
-  const count = Number((await env.TOPIC_MAP.get(key)) || 0);
-  if (count >= limit) return false;
-  await env.TOPIC_MAP.put(key, String(count + 1), { expirationTtl: windowSec });
-  return true;
+export async function checkRateLimit(env, key, limit = 40, windowSec = 60, nowMs = Date.now()) {
+  if (!env?.DB && !env?.TOPIC_MAP) return true;
+  try {
+    return await getStore(env).checkRateLimit(key, limit, windowSec, nowMs);
+  } catch {
+    // Fail-open on transient D1/KV errors so rate-limit outages never silently drop visitor messages
+    return true;
+  }
 }
 
 async function extractStickersFromMessage(env, msg) {
@@ -537,10 +561,15 @@ async function ensureVisitorTopic(env, requestOrigin, tgUser, preview = '') {
   }
 
   const uid = String(tgUser.id);
-  const existing = await safeGetJSON(env.TOPIC_MAP, `user:${uid}`, null);
+  const existing = await getStore(env).getVisitor(uid);
 
   if (existing?.thread_id) {
-    await env.TOPIC_MAP.put(`thread:${existing.thread_id}`, uid);
+    // Avoid rewriting `thread:{id}` on every incoming message (saves 1 KV write per visitor PM)
+    const threadKey = `thread:${existing.thread_id}`;
+    const mappedUid = await env.TOPIC_MAP.get(threadKey);
+    if (mappedUid !== uid) {
+      await env.TOPIC_MAP.put(threadKey, uid);
+    }
     return { threadId: existing.thread_id, isNew: false };
   }
 
@@ -553,14 +582,14 @@ async function ensureVisitorTopic(env, requestOrigin, tgUser, preview = '') {
   });
 
   const threadId = created.result.message_thread_id;
-  await upsertVisitorProfile(env, tgUser, {
+  const savedProfile = await upsertVisitorProfile(env, tgUser, {
     threadId,
     closed: false,
     lastPreview: preview,
   });
   await env.TOPIC_MAP.put(`thread:${threadId}`, uid);
 
-  const detail = await getVisitorDetail(env, uid, supergroupId);
+  const detail = await getVisitorDetail(env, uid, supergroupId, savedProfile || undefined);
   if (detail) {
     await sendVisitorCardMessage(env, supergroupId, threadId, requestOrigin, detail);
   }
@@ -614,9 +643,10 @@ async function forwardMessageToTopic(env, requestOrigin, msg, knownPreview = und
     });
   } catch (err) {
     if (/thread not found|topic_deleted|message thread not found/i.test(String(err.message))) {
-      const rec = (await safeGetJSON(env.TOPIC_MAP, `user:${uid}`, {})) || {};
+      const store = getStore(env);
+      const rec = (await store.getVisitor(uid)) || { userId: uid };
       delete rec.thread_id;
-      await safePutJSON(env.TOPIC_MAP, `user:${uid}`, rec);
+      await store.putVisitor(uid, rec);
       await env.TOPIC_MAP.delete(`thread:${threadId}`);
       ({ threadId } = await ensureVisitorTopic(env, requestOrigin, user, preview));
       copied = await tgCall(env, 'copyMessage', {
@@ -822,9 +852,10 @@ async function sendPendingReviewNotice(env, requestOrigin, tgUser, preview, reas
       await tgCall(env, 'sendMessage', payload);
     } catch (err) {
       if (/thread not found|topic_deleted|message thread not found/i.test(String(err.message))) {
-        const rec = (await safeGetJSON(env.TOPIC_MAP, `user:${uid}`, {})) || {};
+        const store = getStore(env);
+        const rec = (await store.getVisitor(uid)) || { userId: uid };
         delete rec.thread_id;
-        await safePutJSON(env.TOPIC_MAP, `user:${uid}`, rec);
+        await store.putVisitor(uid, rec);
         await env.TOPIC_MAP.delete(`thread:${threadId}`);
         ({ threadId } = await ensureVisitorTopic(env, requestOrigin, tgUser, ''));
         await tgCall(env, 'sendMessage', { ...payload, message_thread_id: threadId });
@@ -914,7 +945,7 @@ export async function reviewPendingVisitor(env, requestOrigin, targetUid, action
   }
 
   const cfg = config || (await loadPanelConfig(env));
-  const rec = await safeGetJSON(env.TOPIC_MAP, `user:${uid}`, null);
+  const rec = await getStore(env).getVisitor(uid);
   const pending = filterFreshPendingReview(rec?.pendingReview || []);
 
   if (pending.length === 0) {
@@ -2713,7 +2744,7 @@ export async function handleTelegramUpdate(update, env, requestOrigin) {
             return;
           }
 
-          const recForStart = await safeGetJSON(env.TOPIC_MAP, `user:${uid}`, null);
+          const recForStart = await getStore(env).getVisitor(uid);
           if (config.pmBot.enableCasCheck !== false && !recForStart?.casExempt) {
             const cas = await checkCasBlacklist(env, uid);
             if (cas.isSpammer) {
@@ -2778,7 +2809,7 @@ export async function handleTelegramUpdate(update, env, requestOrigin) {
     const allowed = await checkRateLimit(env, `rl:msg:${uid}`, 40, 60);
     if (!allowed) return;
 
-    const rec = await safeGetJSON(env.TOPIC_MAP, `user:${uid}`, null);
+    const rec = await getStore(env).getVisitor(uid);
     if (rec?.closed) {
       await tgCall(env, 'sendMessage', {
         chat_id: msg.chat.id,
@@ -3139,7 +3170,7 @@ export async function sendAdminDirectVisitorReply(env, requestOrigin, targetUid,
   // don't depend on delivering to the visitor, so they run while that Telegram call is in flight.
   const prefetch = (async () => {
     const [storedRec, groupId] = await Promise.all([
-      safeGetJSON(env.TOPIC_MAP, `user:${uid}`, { userId: uid }),
+      getStore(env).getVisitor(uid),
       resolveSupergroupId(env),
     ]);
     const visitorRec = storedRec || { userId: uid };
@@ -3177,7 +3208,7 @@ export async function sendAdminDirectVisitorReply(env, requestOrigin, targetUid,
   const { rec, supergroupId, quoted } = await prefetch;
   if (rec.closed) {
     rec.closed = false;
-    await safePutJSON(env.TOPIC_MAP, `user:${uid}`, rec);
+    await getStore(env).putVisitor(uid, rec);
   }
 
   const pmMessageId = sentPm?.message_id || null;
@@ -3253,9 +3284,10 @@ export async function sendAdminDirectVisitorReply(env, requestOrigin, targetUid,
         topicMsgId = mirrored?.result?.message_id || null;
       } catch (topicErr) {
         if (/thread not found|topic_deleted|message thread not found/i.test(String(topicErr.message))) {
-          const latestRec = (await safeGetJSON(env.TOPIC_MAP, `user:${uid}`, {})) || {};
+          const store = getStore(env);
+          const latestRec = (await store.getVisitor(uid)) || { userId: uid };
           delete latestRec.thread_id;
-          await safePutJSON(env.TOPIC_MAP, `user:${uid}`, latestRec);
+          await store.putVisitor(uid, latestRec);
           await env.TOPIC_MAP.delete(`thread:${threadId}`);
           ({ threadId } = await ensureVisitorTopic(env, requestOrigin, topicUser, preview));
           const mirroredRetry = await mirrorOnce(threadId);

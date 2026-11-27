@@ -16,6 +16,9 @@ export const TOPIC_MSG_MAP_TTL_SECONDS = 30 * 86400;
 export const DM_MAP_PREFIX = 'dmmap:';
 export const DM_MAP_TTL_SECONDS = 7 * 86400;
 
+export const VISIT_SEEN_TTL_SECONDS = 40 * 86400; // 40 days — covers any calendar month safely
+export const VISIT_COUNT_TTL_SECONDS = 400 * 86400; // 400 days — retains thisMonth & lastMonth across years
+
 export function parseKvDmMapRaw(raw) {
   if (!raw) return null;
   try {
@@ -411,6 +414,83 @@ export function createKvStore(env) {
 
     async getDmMap(ownerMsgId) {
       return readKvDmMapEntry(kv, ownerMsgId);
+    },
+
+    async getVisitor(uid) {
+      const cleanUid = String(uid || '').trim();
+      if (!kv || !/^\d+$/.test(cleanUid)) return null;
+      return safeGetJSON(kv, `user:${cleanUid}`, null);
+    },
+
+    async putVisitor(uid, record) {
+      const cleanUid = String(uid || '').trim();
+      if (!kv || !/^\d+$/.test(cleanUid) || !record || typeof record !== 'object') return;
+      await safePutJSON(kv, `user:${cleanUid}`, record);
+    },
+
+    async getVisitorsByUids(uids = []) {
+      const map = new Map();
+      if (!kv || !Array.isArray(uids) || uids.length === 0) return map;
+      const cleanUids = Array.from(new Set(uids.map((u) => String(u || '').trim()).filter((u) => /^\d+$/.test(u))));
+      const records = await Promise.all(cleanUids.map((u) => safeGetJSON(kv, `user:${u}`, null)));
+      for (let i = 0; i < cleanUids.length; i += 1) {
+        if (records[i]) map.set(cleanUids[i], records[i]);
+      }
+      return map;
+    },
+
+    async checkRateLimit(key, limit = 40, windowSec = 60) {
+      const cleanKey = String(key || '').trim();
+      const maxLimit = Number(limit);
+      if (!cleanKey || !kv) return true;
+      if (!Number.isFinite(maxLimit) || maxLimit <= 0) return false;
+      const count = Number((await kv.get(cleanKey)) || 0);
+      if (count >= maxLimit) return false;
+      const ttl = Math.max(1, Math.trunc(Number.isFinite(Number(windowSec)) ? Number(windowSec) : 60));
+      await kv.put(cleanKey, String(count + 1), { expirationTtl: ttl });
+      return true;
+    },
+
+    async recordMonthlyVisit(monthKey, uid) {
+      const cleanMonth = String(monthKey || '').trim();
+      const cleanUid = String(uid ?? '').trim();
+      if (!kv || !/^\d{6}$/.test(cleanMonth) || !/^\d+$/.test(cleanUid)) {
+        return { recorded: false };
+      }
+      const seenKey = `visit:seen:${cleanMonth}:${cleanUid}`;
+      const alreadySeen = await kv.get(seenKey);
+      if (alreadySeen) {
+        return { recorded: false, monthKey: cleanMonth };
+      }
+
+      await kv.put(seenKey, '1', { expirationTtl: VISIT_SEEN_TTL_SECONDS });
+
+      const countKey = `visit:count:${cleanMonth}`;
+      const current = await safeGetJSON(kv, countKey, null);
+      const nextCount = Math.max(0, Number(current?.n) || 0) + 1;
+      await safePutJSON(kv, countKey, { n: nextCount }, { expirationTtl: VISIT_COUNT_TTL_SECONDS });
+
+      return { recorded: true, monthKey: cleanMonth, count: nextCount };
+    },
+
+    async getMonthlyVisitCounts(thisMonthKey, lastMonthKey = null) {
+      const cleanThis = String(thisMonthKey || '').trim();
+      const cleanLast = lastMonthKey ? String(lastMonthKey).trim() : '';
+      if (!kv || !/^\d{6}$/.test(cleanThis)) {
+        return cleanLast ? { thisMonth: 0, lastMonth: 0 } : { thisMonth: 0 };
+      }
+      if (!cleanLast) {
+        const thisRec = await safeGetJSON(kv, `visit:count:${cleanThis}`, null);
+        return { thisMonth: Math.max(0, Number(thisRec?.n) || 0) };
+      }
+      const [thisRec, lastRec] = await Promise.all([
+        safeGetJSON(kv, `visit:count:${cleanThis}`, null),
+        safeGetJSON(kv, `visit:count:${cleanLast}`, null),
+      ]);
+      return {
+        thisMonth: Math.max(0, Number(thisRec?.n) || 0),
+        lastMonth: Math.max(0, Number(lastRec?.n) || 0),
+      };
     },
   };
 }
