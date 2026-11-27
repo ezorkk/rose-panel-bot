@@ -226,7 +226,8 @@ export async function upsertVisitorProfile(env, tgUser, extra = {}) {
   if ((!env?.TOPIC_MAP && !env?.DB) || !tgUser?.id) return null;
   const uid = String(tgUser.id);
   const store = getStore(env);
-  const existing = (await store.getVisitor(uid)) || {};
+  const storedExisting = await store.getVisitor(uid);
+  const existing = storedExisting || {};
   const now = new Date().toISOString();
 
   const existingTotal = Number(existing.msg_count) || 0;
@@ -276,7 +277,15 @@ export async function upsertVisitorProfile(env, tgUser, extra = {}) {
   if (store.mode === 'kv') {
     await addToVisitorIndex(env, uid);
   }
-  await invalidateVisitorSummaryCache(env);
+  // Only invalidate overview cache when overview stats/sourceStats could actually change
+  // (brand-new visitor, closed toggle, or first-touch source attribution) so active chats stay cache-warm.
+  const overviewStatsChanged =
+    !storedExisting ||
+    (extra.closed !== undefined && Boolean(extra.closed) !== Boolean(storedExisting.closed)) ||
+    Boolean(resolvedSource && resolvedSource !== storedExisting.source);
+  if (overviewStatsChanged) {
+    await invalidateVisitorSummaryCache(env);
+  }
   return updated;
 }
 
@@ -483,14 +492,20 @@ export async function recordVisitorExchange(env, userId, msg, options = {}) {
     rec.last_preview = sender === 'admin' ? `我：${preview}`.slice(0, 120) : preview.slice(0, 120);
   }
 
+  // Routine message exchanges only change per-visitor message/media counts & previews; keep the
+  // 10-minute overview cache warm unless this is a brand-new visitor with no prior profile row.
+  const isNewVisitor = !storedRec;
   if (store.mode === 'kv') {
     await Promise.all([
       store.putVisitor(uid, rec),
       addToVisitorIndex(env, uid),
-      invalidateVisitorSummaryCache(env),
+      ...(isNewVisitor ? [invalidateVisitorSummaryCache(env)] : []),
     ]);
   } else {
-    await Promise.all([store.putVisitor(uid, rec), invalidateVisitorSummaryCache(env)]);
+    await Promise.all([
+      store.putVisitor(uid, rec),
+      ...(isNewVisitor ? [invalidateVisitorSummaryCache(env)] : []),
+    ]);
   }
 
   return {
@@ -799,14 +814,12 @@ export async function listVisitors(env, options = {}) {
 
   const store = getStore(env);
   let details = [];
-  let sqlTotalCount = 0;
 
   if (store.mode === 'd1') {
-    const [{ rows, totalCount }, supergroupId] = await Promise.all([
+    const [rows, supergroupId] = await Promise.all([
       store.listVisitorRecords({ limit: 120 }),
       resolveSupergroupId(env),
     ]);
-    sqlTotalCount = totalCount;
     details = (
       await Promise.all(rows.map(({ uid, record }) => getVisitorDetail(env, uid, supergroupId, record)))
     ).filter(Boolean);
@@ -876,7 +889,7 @@ export async function listVisitors(env, options = {}) {
   });
 
   const stats = {
-    total: store.mode === 'd1' ? Math.max(sqlTotalCount, details.length) : details.length,
+    total: details.length,
     active: details.filter((v) => !v.isBanned && !v.isClosed).length,
     trusted: details.filter((v) => v.isTrusted && !v.isBanned).length,
     banned: details.filter((v) => v.isBanned).length,
@@ -1151,7 +1164,7 @@ export async function recallAdminVisitorMessage(
   if (removeRes.removed && storedRec) {
     storedRec.photo_count = removeRes.photoCount;
     storedRec.link_count = removeRes.linkCount;
-    await Promise.all([store.putVisitor(uid, storedRec), invalidateVisitorSummaryCache(env)]);
+    await store.putVisitor(uid, storedRec);
   }
   return { ok: true, deletedPmMessageId: target.id };
 }

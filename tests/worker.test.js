@@ -9118,13 +9118,23 @@ describe('Cloudflare D1 Stage 3: visitors, atomic rate_limits, visit_seen & visi
     expect(await kv.get('cache:visitor_summary')).toBeNull();
     expect(kvPutSpy).not.toHaveBeenCalled();
 
-    // 4. Subsequent getVisitorOverview hits D1 meta cache with 0 kv.list, 0 kv.get, and 0 kv.put calls!
+    // 4. Subsequent getVisitorOverview hits D1 meta cache with 0 kv.list, 0 kv.get, and 0 kv.put calls,
+    //    AND stays cache-warm across routine messages from existing visitors!
     const listSpy = vi.spyOn(kv, 'list');
     const getSpy = vi.spyOn(kv, 'get');
     const ov = await getVisitorOverview(env);
     expect(ov.stats.total).toBe(4);
     expect(ov.cached).toBe(true);
     expect(listSpy).not.toHaveBeenCalled();
+    expect(getSpy).not.toHaveBeenCalled();
+    expect(kvPutSpy).not.toHaveBeenCalled();
+
+    // Routine message from existing visitor 93004 must NOT invalidate overview cache
+    await upsertVisitorProfile(env, { id: 93004, first_name: 'FreshD1', username: 'fresh_d1' }, { incrementMsg: true, lastPreview: 'second msg' });
+    await recordVisitorExchange(env, '93004', { message_id: 11, text: 'second msg' }, { sender: 'visitor', pmMessageId: 11, preview: 'second msg' });
+    getSpy.mockClear();
+    const ovStillWarm = await getVisitorOverview(env);
+    expect(ovStillWarm.cached).toBe(true);
     expect(getSpy).not.toHaveBeenCalled();
     expect(kvPutSpy).not.toHaveBeenCalled();
 
@@ -9158,7 +9168,65 @@ describe('Cloudflare D1 Stage 3: visitors, atomic rate_limits, visit_seen & visi
     expect(await isVisitorsBackfilled(staleEnv)).toBe(true);
     expect((await getVisitorDetail(staleEnv, '800349'))?.displayName).toBe('TailSurvivor');
 
-    // 7. migrateVisitor also imports KV `user:{uid}` when migrating a visitor on a fresh DB
+    // 7. Large legacy KV (>900 `user:*` keys): list backfill stops at 6-run cap (0 further kv.list calls),
+    //    while `visitors_kv_migrated` stays false so lazy single-visitor fallback still recovers user #1000!
+    const bigStore = new Map();
+    for (let i = 1; i <= 1000; i += 1) {
+      const u = String(900000 + i);
+      bigStore.set(
+        `user:${u}`,
+        JSON.stringify({ first_name: `Old_${i}`, thread_id: i, msg_count: i, note: `note_${i}`, last_seen_at: '2026-01-10T00:00:00.000Z' })
+      );
+    }
+    const bigKv = {
+      async get(key, opts) {
+        if (!bigStore.has(key)) return null;
+        const raw = bigStore.get(key);
+        return opts === 'json' || opts?.type === 'json' ? JSON.parse(raw) : raw;
+      },
+      async put(key, val) {
+        bigStore.set(key, String(val));
+      },
+      async delete(key) {
+        bigStore.delete(key);
+      },
+      async list({ prefix = '', limit = 1000, cursor } = {}) {
+        const all = Array.from(bigStore.keys()).filter((k) => k.startsWith(prefix));
+        const start = cursor ? Number(cursor) : 0;
+        const page = all.slice(start, start + limit);
+        const next = start + page.length;
+        const complete = next >= all.length;
+        return {
+          keys: page.map((name) => ({ name })),
+          list_complete: complete,
+          ...(complete ? {} : { cursor: String(next) }),
+        };
+      },
+    };
+    const bigDb = createD1Shim();
+    const bigEnv = { TOPIC_MAP: bigKv, DB: bigDb };
+    let lastRes = null;
+    for (let run = 1; run <= 6; run += 1) {
+      lastRes = await ensureVisitorsBackfilled(bigEnv);
+    }
+    expect(lastRes?.stoppedByCap).toBe(true);
+    expect(lastRes?.finished).toBe(false);
+    expect(await isVisitorsBackfilled(bigEnv)).toBe(false);
+
+    // 7th call is a no-op with 0 kv.list calls
+    const bigListSpy = vi.spyOn(bigKv, 'list');
+    const afterCap = await ensureVisitorsBackfilled(bigEnv);
+    expect(afterCap.alreadyDone).toBe(true);
+    expect(bigListSpy).not.toHaveBeenCalled();
+
+    // Visitor #1000 (beyond 6 * 150 = 900 cap) is still recovered cleanly via lazy fallback (no duplicate topic!)
+    const detail1000 = await getVisitorDetail(bigEnv, '901000');
+    expect(detail1000?.displayName).toBe('Old_1000');
+    expect(detail1000?.thread_id).toBe(1000);
+    expect(detail1000?.msg_count).toBe(1000);
+    expect(detail1000?.note).toBe('note_1000');
+
+    // 8. migrateVisitor also imports KV `user:{uid}` when migrating a visitor on a fresh DB
     const db2 = createD1Shim();
     const env2 = { TOPIC_MAP: kv, DB: db2 };
     await migrateVisitor(env2, '93002');

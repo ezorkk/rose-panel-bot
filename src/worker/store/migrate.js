@@ -19,13 +19,18 @@ const FALLBACK_MIGRATION_TS = 1700000000000;
 // Per-isolate cache of UIDs confirmed present in `migrated_visitors`, keyed by `env.DB`
 const migratedUidCache = new WeakMap();
 const VISITORS_BACKFILL_META_KEY = 'visitors_kv_migrated';
+const VISITORS_BACKFILL_STOPPED_META_KEY = 'visitors_kv_backfill_stopped';
 const VISITORS_BACKFILL_STATE_KEY = 'visitors_kv_backfill_state';
 const BACKFILL_MAX_RUNS = 6;
 const BACKFILL_INDEX_SLICE = 150;
 const BACKFILL_BANNED_LIMIT = 200;
 const BACKFILL_USER_PAGE_LIMIT = 150;
 const BACKFILL_KV_READ_CONCURRENCY = 20;
-const visitorsBackfilledCache = new WeakMap();
+// Separate per-isolate caches:
+//   - `visitorsFullyMigratedCache`: true ONLY when KV `user:*` cursor truly completed (gates lazy single-visitor fallback)
+//   - `visitorsBackfillStoppedCache`: true once list backfill either completed OR hit `BACKFILL_MAX_RUNS` (gates `kv.list` sweeps)
+const visitorsFullyMigratedCache = new WeakMap();
+const visitorsBackfillStoppedCache = new WeakMap();
 const visitorsBackfillInFlight = new WeakMap();
 
 function getMigratedSet(db) {
@@ -141,7 +146,7 @@ export async function migrateVisitor(env, uid, options = {}) {
   }
 
   const kv = env?.TOPIC_MAP || null;
-  const needUserFromKv = Boolean(kv && visitorsBackfilledCache.get(db) !== true);
+  const needUserFromKv = Boolean(kv && visitorsFullyMigratedCache.get(db) !== true);
   const [kvHistory, kvUser] = kv
     ? await Promise.all([
         safeGetJSON(kv, `history:${cleanUid}`, null),
@@ -513,24 +518,28 @@ async function listKvPrefixUids(kv, prefix) {
 export async function isVisitorsBackfilled(env) {
   const db = env?.DB;
   if (!db) return true;
-  if (visitorsBackfilledCache.get(db) === true) return true;
+  if (visitorsFullyMigratedCache.has(db)) {
+    return visitorsFullyMigratedCache.get(db);
+  }
   await ensureSchema(env);
   const row = await db
     .prepare(`SELECT value FROM meta WHERE key = ?`)
     .bind(VISITORS_BACKFILL_META_KEY)
     .first();
-  if (row?.value === '1') {
-    visitorsBackfilledCache.set(db, true);
-    return true;
-  }
-  return false;
+  const done = row?.value === '1';
+  visitorsFullyMigratedCache.set(db, done);
+  return done;
 }
 
 /**
  * Bounded, cursor-advancing one-time backfill of legacy KV visitor profiles (`visitors:index`,
  * `user:*`, and orphan `banned:*` keys up to KV parity cap) into D1 `visitors`.
  * - Advances deterministically past stale/missing UIDs (never stalls on dead `visitors:index` entries).
- * - Hard-capped at `BACKFILL_MAX_RUNS` runs so it can never burn KV list quota indefinitely.
+ * - Hard-capped at `BACKFILL_MAX_RUNS` runs (`visitors_kv_backfill_stopped = '1'`) so list sweeps
+ *   never burn KV list quota indefinitely.
+ * - Sets `visitors_kv_migrated = '1'` ONLY when `indexDone && bannedDone && userDone` truly completes;
+ *   if stopped by cap on very large legacy deployments (>900 `user:*` keys), single-visitor lazy KV
+ *   fallback remains active so older visitors never lose their profile or get duplicate topics.
  * - Placeholder records for orphan `banned:*` keys receive `last_seen_at = nowIso` so they surface
  *   for 1-click unban instead of sorting to the bottom as NULL.
  * - Never deletes any KV keys.
@@ -539,7 +548,7 @@ export async function ensureVisitorsBackfilled(env) {
   const db = env?.DB;
   const kv = env?.TOPIC_MAP || null;
   if (!db || !kv) return { skipped: true };
-  if (visitorsBackfilledCache.get(db) === true) return { alreadyDone: true };
+  if (visitorsBackfillStoppedCache.get(db) === true) return { alreadyDone: true };
 
   const inFlight = visitorsBackfillInFlight.get(db);
   if (inFlight) return inFlight;
@@ -547,11 +556,12 @@ export async function ensureVisitorsBackfilled(env) {
   const work = (async () => {
     await ensureSchema(env);
     const metaRes = await db
-      .prepare(`SELECT key, value FROM meta WHERE key IN (?, ?)`)
-      .bind(VISITORS_BACKFILL_META_KEY, VISITORS_BACKFILL_STATE_KEY)
+      .prepare(`SELECT key, value FROM meta WHERE key IN (?, ?, ?)`)
+      .bind(VISITORS_BACKFILL_META_KEY, VISITORS_BACKFILL_STOPPED_META_KEY, VISITORS_BACKFILL_STATE_KEY)
       .all();
 
-    let doneFlag = false;
+    let fullyMigratedFlag = false;
+    let stoppedFlag = false;
     let state = {
       runs: 0,
       indexOffset: 0,
@@ -562,7 +572,9 @@ export async function ensureVisitorsBackfilled(env) {
     };
     for (const row of metaRes?.results || []) {
       if (row?.key === VISITORS_BACKFILL_META_KEY && row.value === '1') {
-        doneFlag = true;
+        fullyMigratedFlag = true;
+      } else if (row?.key === VISITORS_BACKFILL_STOPPED_META_KEY && row.value === '1') {
+        stoppedFlag = true;
       } else if (row?.key === VISITORS_BACKFILL_STATE_KEY && row.value) {
         try {
           const parsed = JSON.parse(row.value);
@@ -582,9 +594,15 @@ export async function ensureVisitorsBackfilled(env) {
       }
     }
 
-    if (doneFlag) {
-      visitorsBackfilledCache.set(db, true);
-      return { alreadyDone: true };
+    if (fullyMigratedFlag) {
+      visitorsFullyMigratedCache.set(db, true);
+      visitorsBackfillStoppedCache.set(db, true);
+      return { alreadyDone: true, finished: true };
+    }
+    if (stoppedFlag) {
+      visitorsFullyMigratedCache.set(db, false);
+      visitorsBackfillStoppedCache.set(db, true);
+      return { alreadyDone: true, finished: false, stoppedByCap: true };
     }
 
     state.runs += 1;
@@ -693,18 +711,28 @@ export async function ensureVisitorsBackfilled(env) {
       }
     }
 
-    const finishedAll =
-      (state.indexDone && state.bannedDone && state.userDone) || state.runs >= BACKFILL_MAX_RUNS;
-    const finalizeStmts = finishedAll
+    const completedAll = state.indexDone && state.bannedDone && state.userDone;
+    const stoppedByCap = !completedAll && state.runs >= BACKFILL_MAX_RUNS;
+    const finalizeStmts = completedAll
       ? [
           db.prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, '1')`).bind(VISITORS_BACKFILL_META_KEY),
+          db
+            .prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, '1')`)
+            .bind(VISITORS_BACKFILL_STOPPED_META_KEY),
           db.prepare(`DELETE FROM meta WHERE key = ?`).bind(VISITORS_BACKFILL_STATE_KEY),
         ]
-      : [
-          db
-            .prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)`)
-            .bind(VISITORS_BACKFILL_STATE_KEY, JSON.stringify(state)),
-        ];
+      : stoppedByCap
+        ? [
+            db
+              .prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, '1')`)
+              .bind(VISITORS_BACKFILL_STOPPED_META_KEY),
+            db.prepare(`DELETE FROM meta WHERE key = ?`).bind(VISITORS_BACKFILL_STATE_KEY),
+          ]
+        : [
+            db
+              .prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)`)
+              .bind(VISITORS_BACKFILL_STATE_KEY, JSON.stringify(state)),
+          ];
 
     if (insertStmts.length === 0) {
       await db.batch(finalizeStmts);
@@ -718,10 +746,14 @@ export async function ensureVisitorsBackfilled(env) {
       }
     }
 
-    if (finishedAll) {
-      visitorsBackfilledCache.set(db, true);
+    if (completedAll) {
+      visitorsFullyMigratedCache.set(db, true);
+      visitorsBackfillStoppedCache.set(db, true);
+    } else if (stoppedByCap) {
+      visitorsFullyMigratedCache.set(db, false);
+      visitorsBackfillStoppedCache.set(db, true);
     }
-    return { backfilled: insertStmts.length, finished: finishedAll, runs: state.runs };
+    return { backfilled: insertStmts.length, finished: completedAll, stoppedByCap, runs: state.runs };
   })();
 
   visitorsBackfillInFlight.set(db, work);

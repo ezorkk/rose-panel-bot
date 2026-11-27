@@ -1209,25 +1209,23 @@ export function createD1Store(env, hooks = {}) {
     },
 
     async listVisitorRecords(options = {}) {
-      if (!db) return { rows: [], totalCount: 0 };
+      if (!db) return [];
       const rawLimit = Number(options?.limit);
       const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 500) : 120;
       await ensureSchema(env);
       await ensureVisitorsBackfilled(env);
 
-      const [rowsRes, countRes] = await db.batch([
-        db
-          .prepare(
-            `SELECT uid, data FROM visitors
-             ORDER BY last_seen_at DESC, updated_at DESC, uid DESC
-             LIMIT ?`
-          )
-          .bind(limit),
-        db.prepare(`SELECT COUNT(*) AS cnt FROM visitors`),
-      ]);
+      const res = await db
+        .prepare(
+          `SELECT uid, data FROM visitors
+           ORDER BY last_seen_at DESC, updated_at DESC, uid DESC
+           LIMIT ?`
+        )
+        .bind(limit)
+        .all();
 
       const rows = [];
-      for (const row of rowsRes?.results || []) {
+      for (const row of res?.results || []) {
         const uid = String(row?.uid || '').trim();
         if (!/^\d+$/.test(uid)) continue;
         let record = { userId: uid };
@@ -1243,8 +1241,7 @@ export function createD1Store(env, hooks = {}) {
         }
         rows.push({ uid, record });
       }
-      const totalCount = Math.max(rows.length, Number(countRes?.results?.[0]?.cnt || 0));
-      return { rows, totalCount };
+      return rows;
     },
 
     async getVisitorOverviewCache(maxAgeMs) {
