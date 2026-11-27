@@ -290,6 +290,8 @@ export default function VisitorsTab({
         setMsgNextCursor(null);
         setMsgSearchError('');
         setMsgHasSearched(false);
+        setMsgSearching(false);
+        setMsgLoadingMore(false);
         return;
       }
 
@@ -326,6 +328,7 @@ export default function VisitorsTab({
         setMsgLoadingMore(true);
       } else {
         setMsgSearching(true);
+        setMsgLoadingMore(false);
       }
       const url = buildSearchUrl({
         q: searchParams.q,
@@ -375,6 +378,8 @@ export default function VisitorsTab({
       setMsgNextCursor(null);
       setMsgSearchError('');
       setMsgHasSearched(false);
+      setMsgSearching(false);
+      setMsgLoadingMore(false);
     }
   }, [d1Bound, searchMode, msgQuery]);
 
