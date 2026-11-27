@@ -8743,7 +8743,7 @@ describe('Cloudflare D1 Stage 2 store: cursor pagination, around jump, LIKE sear
     expect(searchRes2.items[0].visitor).toMatchObject({ userId: '92401', displayName: 'Alice', username: 'alice_tg' });
     expect(searchRes2.hasMore).toBe(false);
 
-    // 6. /api/admin/visitors/:uid/history validates integer cursor params
+    // 6. /api/admin/visitors/:uid/history validates integer cursor params and mutually exclusive modes
     for (const badHistUrl of [
       'https://panel.test/api/admin/visitors/92401/history?before=abc',
       'https://panel.test/api/admin/visitors/92401/history?before=1700000000000&beforeId=-1',
@@ -8751,6 +8751,8 @@ describe('Cloudflare D1 Stage 2 store: cursor pagination, around jump, LIKE sear
       'https://panel.test/api/admin/visitors/92401/history?after=12.34',
       'https://panel.test/api/admin/visitors/92401/history?afterId=12',
       'https://panel.test/api/admin/visitors/92401/history?limit=0',
+      'https://panel.test/api/admin/visitors/92401/history?before=1700000000000&after=1700000000000',
+      'https://panel.test/api/admin/visitors/92401/history?around=m_1&before=1700000000000',
     ]) {
       const badRes = await worker.fetch(
         new Request(badHistUrl, { headers: { 'X-Telegram-Init-Data': adminInit } }),

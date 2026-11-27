@@ -406,6 +406,10 @@ export async function handleApiRequest(request, env, url, ctx = null) {
       }
 
       const around = String(url.searchParams.get('around') || '').trim().slice(0, 128);
+      const activeModes = [Boolean(around), beforeParam.present, afterParam.present].filter(Boolean).length;
+      if (activeModes > 1) {
+        return json({ ok: false, error: 'before、after、around 分页参数不能同时使用' }, 400);
+      }
       const messagesOnly = url.searchParams.get('messagesOnly') === '1';
       const limit = limitParam.value ? Math.min(limitParam.value, MAX_HISTORY_PAGE_LIMIT) : 60;
 

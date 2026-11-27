@@ -168,12 +168,17 @@ export default function VisitorsTab({
   const historySeqRef = useRef(0);
   const historyInFlightRef = useRef(0);
   const hasNewerRef = useRef(false);
+  const messagesRef = useRef([]);
   const scrollIntentRef = useRef({ type: 'none' });
   const highlightTimerRef = useRef(null);
 
   useEffect(() => {
     hasNewerRef.current = Boolean(historyData.hasNewer);
   }, [historyData.hasNewer]);
+
+  useEffect(() => {
+    messagesRef.current = Array.isArray(historyData.messages) ? historyData.messages : [];
+  }, [historyData.messages]);
 
   useEffect(() => {
     if (!d1Bound && searchMode === 'messages') {
@@ -345,12 +350,15 @@ export default function VisitorsTab({
       if (silent) {
         const el = chatStreamRef.current;
         const wasNearBottom = !el || el.scrollHeight - el.scrollTop - el.clientHeight < 90;
-        let tailGrew = false;
+        const incomingLastId = res.messages?.[res.messages.length - 1]?.id || '';
+        const hasNewTailMsg = Boolean(
+          incomingLastId && !messagesRef.current.some((m) => m.id === incomingLastId)
+        );
+        if (wasNearBottom && hasNewTailMsg) {
+          scrollIntentRef.current = { type: 'bottom' };
+        }
         setHistoryData((prev) => {
           const merged = mergeLatestHistoryTail(prev, res);
-          const prevLastId = prev.messages?.[prev.messages.length - 1]?.id || '';
-          const nextLastId = merged.messages?.[merged.messages.length - 1]?.id || '';
-          tailGrew = Boolean(nextLastId && nextLastId !== prevLastId);
           return {
             photos: res.photos || prev.photos || [],
             links: res.links || prev.links || [],
@@ -361,9 +369,6 @@ export default function VisitorsTab({
             newestCursor: merged.newestCursor,
           };
         });
-        if (wasNearBottom && tailGrew) {
-          scrollIntentRef.current = { type: 'bottom' };
-        }
       } else {
         scrollIntentRef.current = { type: 'bottom' };
         setHighlightMsgId('');
@@ -398,6 +403,7 @@ export default function VisitorsTab({
     const prevScrollHeight = el ? el.scrollHeight : 0;
     const prevScrollTop = el ? el.scrollTop : 0;
     const seq = ++historySeqRef.current;
+    historyInFlightRef.current += 1;
 
     try {
       setLoadingOlder(true);
@@ -422,6 +428,7 @@ export default function VisitorsTab({
         onToast(err.message || '加载更早消息失败');
       }
     } finally {
+      historyInFlightRef.current -= 1;
       setLoadingOlder(false);
     }
   };
@@ -433,6 +440,7 @@ export default function VisitorsTab({
     const targetUid = String(activeVisitor.userId);
     const cursor = historyData.newestCursor;
     const seq = ++historySeqRef.current;
+    historyInFlightRef.current += 1;
 
     try {
       setLoadingNewer(true);
@@ -457,6 +465,7 @@ export default function VisitorsTab({
         onToast(err.message || '加载更新消息失败');
       }
     } finally {
+      historyInFlightRef.current -= 1;
       setLoadingNewer(false);
     }
   };
