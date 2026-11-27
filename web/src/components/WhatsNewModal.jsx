@@ -11,6 +11,37 @@ export const SEEN_VERSION_STORAGE_KEY = 'rose_seen_version';
 
 export const RECENT_RELEASES = [
   {
+    version: '2.1.0',
+    url: 'https://github.com/mango0114/rose-panel-bot/releases/tag/v2.1.0',
+    items: [
+      {
+        tag: '新增',
+        tone: 'new',
+        text: '零指令面板歌单：把任意 Telegram 音频（含音乐频道/音乐 Bot，支持多选转发）私聊转给机器人即可生成名片「最近在听」，访客点「听这首」直发原音质音频（零 CF 流量、自动深链兜底）',
+      },
+      {
+        tag: '新增',
+        tone: 'new',
+        text: '5 套主题配色（玫瑰瓷 / 海洋蓝 / 抹茶绿 / 薰衣草 / 极简黑白）与半透明毛玻璃底栏，0ms 开屏同步无闪屏',
+      },
+      {
+        tag: '新增',
+        tone: 'new',
+        text: '一键场景状态与 12 张内置动态小表情（非会员可用），搭配独立临时自动回复；新增访客「待回复」筛选与名片三格待办条',
+      },
+      {
+        tag: '新增',
+        tone: 'new',
+        text: 'D1 存储层阶段二 / 三全量完成：聊天记录游标无限翻页、全历史关键词搜索与上下文跳转、可选自动保留周期，访客档案/限流/月访客全量迁入 D1（KV 旧数据继续保留作备份）',
+      },
+      {
+        tag: '改进',
+        tone: 'imp',
+        text: '设置页低频折叠与吸底保存栏、广告词预设支持移除清空、统一 Bot 指令菜单，访客发私信前新增验证提示',
+      },
+    ],
+  },
+  {
     version: '2.0.0',
     url: 'https://github.com/mango0114/rose-panel-bot/releases/tag/v2.0.0',
     items: [
@@ -245,7 +276,7 @@ export function StarSupportBanner({ onDismiss = null, style = undefined }) {
 }
 
 export default function WhatsNewModal({
-  appVersion = '2.0.0',
+  appVersion = '2.1.0',
   previousVersion = '',
   mode = 'auto',
   onClose,
