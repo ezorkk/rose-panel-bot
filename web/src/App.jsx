@@ -391,13 +391,16 @@ export default function App() {
   const pendingReviewCount = Number(
     bootstrap?.pendingReviewCount ?? bootstrap?.visitorSummary?.pendingReview ?? 0
   );
+  const awaitingReplyCount = Number(
+    bootstrap?.awaitingReplyCount ?? bootstrap?.visitorSummary?.awaitingReply ?? 0
+  );
 
   if (isAdmin) {
     navItems.push({
       id: 'visitors',
       label: '访客',
       icon: Users,
-      badge: pendingReviewCount,
+      badge: pendingReviewCount + awaitingReplyCount,
       badgeAlert: pendingReviewCount > 0,
     });
   } else if (enableCheckin) {
@@ -468,6 +471,17 @@ export default function App() {
               }
               switchTab(tab);
             }}
+            onStatusUpdated={(updatedRes) =>
+              setBootstrap((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      config: updatedRes.config,
+                      adminConfig: updatedRes.adminConfig,
+                    }
+                  : prev
+              )
+            }
             onCheckin={handleCheckin}
             checkinLoading={checkinLoading}
             onToast={showToast}
@@ -522,6 +536,9 @@ export default function App() {
                       ...(patch.visitorSummary ? { visitorSummary: patch.visitorSummary } : {}),
                       ...(typeof patch.pendingReviewCount === 'number'
                         ? { pendingReviewCount: patch.pendingReviewCount }
+                        : {}),
+                      ...(typeof patch.awaitingReplyCount === 'number'
+                        ? { awaitingReplyCount: patch.awaitingReplyCount }
                         : {}),
                       ...(typeof patch.blockedSpamCount === 'number'
                         ? { blockedSpamCount: patch.blockedSpamCount }

@@ -103,7 +103,15 @@ export default function VisitorsTab({
   onToast,
 }) {
   const [visitors, setVisitors] = useState([]);
-  const [stats, setStats] = useState({ total: 0, active: 0, trusted: 0, banned: 0, closed: 0, pendingReview: 0 });
+  const [stats, setStats] = useState({
+    total: 0,
+    active: 0,
+    trusted: 0,
+    banned: 0,
+    closed: 0,
+    pendingReview: 0,
+    awaitingReply: 0,
+  });
   const [sourceStats, setSourceStats] = useState([]);
   const [visitStats, setVisitStats] = useState(initialVisitStats);
   const [blockedSpamCount, setBlockedSpamCount] = useState(initialBlockedSpamCount);
@@ -238,6 +246,7 @@ export default function VisitorsTab({
       onStatsSync?.({
         visitorSummary: res.stats || null,
         pendingReviewCount: Number(res.stats?.pendingReview || 0),
+        awaitingReplyCount: Number(res.stats?.awaitingReply || 0),
         blockedSpamCount: typeof res.blockedSpamCount === 'number' ? res.blockedSpamCount : undefined,
         blockedToday: typeof res.blockedToday === 'number' ? res.blockedToday : undefined,
       });
@@ -992,52 +1001,45 @@ export default function VisitorsTab({
 
   return (
     <>
-      <div className="owner-stat-grid" style={{ marginBottom: 12 }}>
-        <div className="owner-stat-tile rose" style={{ cursor: 'default' }}>
-          <div className="owner-stat-label">
-            <ShieldCheck size={13} /> 已拦截广告
-          </div>
-          <div className="owner-stat-value">
-            <span className="owner-stat-num">{blockedSpamCount || 0}</span>
-            <span className="owner-stat-unit">次（累计）</span>
-          </div>
-          <div className="owner-stat-sub">今日拦截 {blockedToday || 0} 次</div>
+      <div className="card visitor-summary-card">
+        <div className="visitor-summary-row">
+          <button
+            type="button"
+            className={`visitor-summary-pill ${stats.awaitingReply > 0 ? 'accent' : ''}`}
+            onClick={() => {
+              haptic('light');
+              setSearchMode('visitors');
+              setFilter(stats.awaitingReply > 0 ? 'awaiting' : 'all');
+            }}
+          >
+            <MessageSquare size={12} />
+            <span>待回复 {stats.awaitingReply || 0}</span>
+          </button>
+          <span className="visitor-summary-pill">
+            <Users size={12} />
+            <span>活跃 {stats.active || 0} · 信任 {stats.trusted || 0}</span>
+          </span>
+          <span className="visitor-summary-pill">
+            <ShieldCheck size={12} />
+            <span>拦截 {blockedToday || 0}/{blockedSpamCount || 0}</span>
+          </span>
         </div>
 
-        <div className="owner-stat-tile" style={{ cursor: 'default' }}>
-          <div className="owner-stat-label">
-            <Users size={13} /> 活跃访客
+        {(visitStats || sourceStats.length > 0) && (
+          <div className="visitor-summary-sub">
+            {visitStats && typeof visitStats.thisMonth === 'number' && (
+              <span>
+                本月名片访客 <b>{visitStats.thisMonth}</b>（上月 {visitStats.lastMonth ?? 0}）
+              </span>
+            )}
+            {sourceStats.length > 0 && (
+              <span>
+                来源：{sourceStats.map((s) => `${s.label} ${s.count}`).join(' · ')}
+              </span>
+            )}
           </div>
-          <div className="owner-stat-value">
-            <span className="owner-stat-num">{stats.active || 0}</span>
-            <span className="owner-stat-unit">位</span>
-          </div>
-          <div className="owner-stat-sub">
-            信任 {stats.trusted || 0} · 封禁 {stats.banned || 0}
-          </div>
-        </div>
+        )}
       </div>
-
-      {(visitStats || sourceStats.length > 0) && (
-        <div className="card visitor-insight-bar">
-          {visitStats && typeof visitStats.thisMonth === 'number' && (
-            <div className="visitor-insight-line">
-              <span className="visitor-insight-label">名片访问</span>
-              <span className="visitor-insight-val">
-                本月访客 {visitStats.thisMonth} 人（上月 {visitStats.lastMonth ?? 0} 人）
-              </span>
-            </div>
-          )}
-          {sourceStats.length > 0 && (
-            <div className="visitor-insight-line">
-              <span className="visitor-insight-label">来源统计</span>
-              <span className="visitor-insight-val">
-                {sourceStats.map((s) => `${s.label} ${s.count}`).join(' · ')}
-              </span>
-            </div>
-          )}
-        </div>
-      )}
 
       {d1Bound && (
         <div className="search-mode-bar" role="tablist" aria-label="访客视图切换">
@@ -1360,8 +1362,8 @@ export default function VisitorsTab({
           <div className="chip-row">
             {[
               { id: 'all', label: `全部 ${stats.total}` },
-              { id: 'pending', label: '待审核', count: stats.pendingReview || 0, isPending: true },
-              { id: 'active', label: `活跃 ${stats.active}` },
+              { id: 'awaiting', label: '待回复', count: stats.awaitingReply || 0, hasBadge: true, isAlert: false },
+              { id: 'pending', label: '待审核', count: stats.pendingReview || 0, hasBadge: true, isAlert: true },
               { id: 'trusted', label: `信任 ${stats.trusted}` },
               { id: 'banned', label: `已拉黑 ${stats.banned}` },
               { id: 'closed', label: `已结单 ${stats.closed}` },
@@ -1369,12 +1371,12 @@ export default function VisitorsTab({
               <button
                 key={item.id}
                 className={`chip ${filter === item.id ? 'active' : ''}`}
-                style={item.isPending ? { display: 'inline-flex', alignItems: 'center', gap: 5 } : undefined}
+                style={item.hasBadge ? { display: 'inline-flex', alignItems: 'center', gap: 5 } : undefined}
                 onClick={() => setFilter(item.id)}
               >
                 <span>{item.label}</span>
-                {item.isPending && (
-                  <span className={`chip-badge ${item.count > 0 ? 'alert' : ''}`}>
+                {item.hasBadge && (
+                  <span className={`chip-badge ${item.isAlert && item.count > 0 ? 'alert' : ''}`}>
                     {item.count}
                   </span>
                 )}
@@ -1419,6 +1421,11 @@ export default function VisitorsTab({
                         <span className={`pill ${meta.tone}`} style={{ padding: '2px 8px', fontSize: 11 }}>
                           {meta.label}
                         </span>
+                        {v.awaitingReply && (
+                          <span className="pill rose" style={{ padding: '2px 7px', fontSize: 10 }}>
+                            待回复
+                          </span>
+                        )}
                         {v.pendingReview?.length > 0 && (
                           <span className="pill red" style={{ padding: '2px 7px', fontSize: 10 }}>
                             待审核 {v.pendingReview.length}

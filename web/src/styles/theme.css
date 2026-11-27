@@ -3364,3 +3364,228 @@ select {
     box-shadow: 0 0 0 2.5px var(--accent);
   }
 }
+
+/* Profile Status Quick Switcher, Built-in Animated Stickers, Admin To-Do Bar & Compact Visitor Summary */
+.status-pill-btn {
+  cursor: pointer;
+  transition: transform 0.14s ease, filter 0.14s ease;
+}
+
+.status-pill-btn:active {
+  transform: scale(0.96);
+}
+
+.status-sticker-icon {
+  width: 15px;
+  height: 15px;
+  object-fit: contain;
+  flex-shrink: 0;
+  display: block;
+}
+
+.status-sticker-icon.lg {
+  width: 22px;
+  height: 22px;
+}
+
+.pm-verify-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.admin-todo-bar {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.admin-todo-item {
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow);
+  padding: 10px 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  cursor: pointer;
+  transition: transform 0.14s ease, border-color 0.16s ease, background 0.16s ease;
+}
+
+.admin-todo-item:active {
+  transform: scale(0.97);
+}
+
+.admin-todo-item.accent {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+
+.admin-todo-item.alert {
+  background: var(--red-soft);
+  border-color: rgba(212, 52, 72, 0.24);
+  color: var(--red);
+}
+
+.admin-todo-num {
+  font-size: 17px;
+  font-weight: 800;
+  line-height: 1.15;
+}
+
+.admin-todo-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.admin-todo-item.accent .admin-todo-label {
+  color: var(--accent);
+}
+
+.admin-todo-item.alert .admin-todo-label {
+  color: var(--red);
+}
+
+.status-scene-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.status-scene-card {
+  border: 1.5px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-subtle);
+  padding: 10px 11px;
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: border-color 0.16s ease, background 0.16s ease, transform 0.12s ease;
+}
+
+.status-scene-card:active {
+  transform: scale(0.98);
+}
+
+.status-scene-card.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.status-scene-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status-scene-label {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.status-scene-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.status-sticker-strip {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+  scrollbar-width: none;
+}
+
+.status-sticker-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.status-sticker-opt {
+  flex-shrink: 0;
+  min-width: 38px;
+  height: 34px;
+  padding: 0 9px;
+  border-radius: 11px;
+  border: 1.5px solid var(--border);
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.12s ease;
+}
+
+.status-sticker-opt:active {
+  transform: scale(0.94);
+}
+
+.status-sticker-opt.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.visitor-summary-card {
+  padding: 11px 13px;
+  margin-bottom: 10px;
+}
+
+.visitor-summary-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.visitor-summary-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: none;
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+button.visitor-summary-pill {
+  cursor: pointer;
+}
+
+.visitor-summary-pill.accent {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.visitor-summary-sub {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.visitor-summary-sub b {
+  color: var(--text-secondary);
+  font-weight: 700;
+}
