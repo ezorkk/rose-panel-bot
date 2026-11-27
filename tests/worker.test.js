@@ -32,6 +32,7 @@ import {
   VISITOR_REACTION_LIMIT_PER_MIN,
   WEBHOOK_UPDATES_REV,
   WEBHOOK_UPDATES_REV_KEY,
+  buildBotCommandSets,
   buildVisitorCardCaption,
   buildVisitorCardText,
   checkRateLimit,
@@ -9551,5 +9552,52 @@ describe('Cloudflare D1 Stage 3: visitors, atomic rate_limits, visit_seen & visi
     } finally {
       globalThis.fetch = origFetch;
     }
+  });
+});
+
+describe('Pre-release hygiene: unified command menus, dead config removal & statusTone normalization', () => {
+  it('builds consistent command sets across private, group, admin, and supergroup scopes', () => {
+    const basic = buildBotCommandSets({ community: { enableCheckin: false } });
+    expect(basic.privateCommands.map((c) => c.command)).toEqual(['start', 'panel']);
+    expect(basic.groupCommands.map((c) => c.command)).toEqual(['panel']);
+    expect(basic.adminPrivateCommands.map((c) => c.command)).toEqual([
+      'start',
+      'panel',
+      'set',
+      'add',
+      'resetbadge',
+      'cancel',
+    ]);
+    expect(basic.supergroupAdminCommands.map((c) => c.command)).toEqual([
+      'info',
+      'del',
+      'ban',
+      'unban',
+      'trust',
+      'close',
+      'panel',
+    ]);
+
+    const withCheckin = buildBotCommandSets({ community: { enableCheckin: true } });
+    expect(withCheckin.privateCommands.map((c) => c.command)).toContain('checkin');
+    expect(withCheckin.adminPrivateCommands.map((c) => c.command)).toContain('checkin');
+    expect(withCheckin.groupCommands.map((c) => c.command)).toEqual(['panel', 'checkin', 'rank']);
+  });
+
+  it('drops unused default config fields and normalizes profile.statusTone whitelist', async () => {
+    expect(DEFAULT_CONFIG.pmBot).not.toHaveProperty('autoAckEnabled');
+    expect(DEFAULT_CONFIG.probe).not.toHaveProperty('subtitle');
+
+    const kv = createMemoryKV();
+    const env = { TOPIC_MAP: kv };
+
+    const busySaved = await savePanelConfig(env, { profile: { statusTone: 'busy' } });
+    expect(busySaved.profile.statusTone).toBe('busy');
+
+    const awaySaved = await savePanelConfig(env, { profile: { statusTone: 'away' } });
+    expect(awaySaved.profile.statusTone).toBe('away');
+
+    const badSaved = await savePanelConfig(env, { profile: { statusTone: 'purple' } });
+    expect(badSaved.profile.statusTone).toBe('online');
   });
 });

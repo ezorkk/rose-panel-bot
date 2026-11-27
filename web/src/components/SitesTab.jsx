@@ -204,7 +204,7 @@ export default function SitesTab({ sites = [], isAdmin, onOpenSettings, onSitesU
                       </span>
                     )}
                   </div>
-                  <div className="row-desc">{site.description || hostnameOf(site.url)}</div>
+                  {site.description && <div className="row-desc">{site.description}</div>}
                   <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
                     {hostnameOf(site.url)}
                   </div>

@@ -2,6 +2,7 @@ import React, { Suspense, lazy, useState } from 'react';
 import {
   Award,
   Check,
+  ChevronDown,
   ChevronRight,
   Copy,
   Download,
@@ -94,6 +95,7 @@ export default function TicketTab({
   const [posterLoading, setPosterLoading] = useState(false);
   const [posterError, setPosterError] = useState('');
   const [posterData, setPosterData] = useState(null);
+  const [showPromoLinks, setShowPromoLinks] = useState(false);
   const [showGetSame, setShowGetSame] = useState(false);
 
   const resolvedShareUrl =
@@ -286,6 +288,85 @@ export default function TicketTab({
               </button>
             )}
           </div>
+
+          {isAdmin && (() => {
+            const botUsername = String(bot?.username || '').trim().replace(/^@/, '');
+            const appShortName = String(bot?.appShortName || '').trim().replace(/^\/+|\/+$/g, '');
+            if (!botUsername) return null;
+            const cardShareLink = appShortName
+              ? buildSourceLink(`https://t.me/${botUsername}/${appShortName}`, 'link', 'app')
+              : copyShareUrl;
+            const promoLinks = [
+              {
+                id: 'site',
+                label: '放在个人小站的「联系我」按钮',
+                url: buildSourceLink(`https://t.me/${botUsername}`, 'site', 'bot'),
+              },
+              {
+                id: 'channel',
+                label: '放在频道简介',
+                url: buildSourceLink(`https://t.me/${botUsername}`, 'channel', 'bot'),
+              },
+              ...(cardShareLink
+                ? [{ id: 'card', label: '分享名片直链', url: cardShareLink }]
+                : []),
+            ];
+            return (
+              <div
+                style={{
+                  marginTop: 14,
+                  paddingTop: 12,
+                  borderTop: '1px solid var(--border)',
+                }}
+              >
+                <button
+                  type="button"
+                  className="update-collapse-head"
+                  aria-expanded={showPromoLinks}
+                  onClick={() => {
+                    haptic('light');
+                    setShowPromoLinks((v) => !v);
+                  }}
+                >
+                  <span className="update-collapse-title">
+                    <Link2 size={14} color="var(--accent)" style={{ flexShrink: 0 }} />
+                    <span>来源追踪推广链接</span>
+                    <span className="update-collapse-badge">仅站长可见</span>
+                  </span>
+                  {showPromoLinks ? (
+                    <ChevronDown size={15} style={{ flexShrink: 0 }} />
+                  ) : (
+                    <ChevronRight size={15} style={{ flexShrink: 0 }} />
+                  )}
+                </button>
+                {showPromoLinks && (
+                  <div className="update-fork-body" style={{ marginTop: 8 }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {promoLinks.map((item) => (
+                        <div key={item.id} className="promo-link-row">
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div className="promo-link-label">{item.label}</div>
+                            <div className="promo-link-url">{item.url}</div>
+                          </div>
+                          <button
+                            type="button"
+                            className="btn btn-soft btn-sm"
+                            style={{ flexShrink: 0 }}
+                            onClick={() => handleCopy(item.url, item.label)}
+                          >
+                            <Copy size={12} /> 复制
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8, lineHeight: 1.55 }}>
+                      把 <code>src_</code> 后换成任意英文渠道名（如 <code>src_nodeseek</code>），访客页来源统计就会单独归类。
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </div>
       </div>
     );
@@ -652,6 +733,16 @@ export default function TicketTab({
             <div className="ticket-caption" style={{ marginTop: 10 }}>
               {profile.tagline}
             </div>
+
+            {parsedTags.length > 0 && (
+              <div className="tag-cloud" style={{ marginTop: 10 }}>
+                {parsedTags.map((tag, i) => (
+                  <span key={`${tag}-${i}`} className="pill rose" style={{ fontSize: 11, padding: '3px 9px' }}>
+                    # {tag}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
 
           <div style={{ display: 'flex', gap: 8, marginTop: 14, flexWrap: 'wrap' }}>
@@ -734,8 +825,8 @@ export default function TicketTab({
         </div>
       )}
 
-      {/* Personal Tags & Contact Etiquette Card (Visible to everyone when filled) */}
-      {(parsedTags.length > 0 || etiquetteLines.length > 0) && (
+      {/* Contact Etiquette Card (Visible to everyone when filled) */}
+      {etiquetteLines.length > 0 && (
         <div className="card">
           <div className="card-header" style={{ marginBottom: 10 }}>
             <span className="card-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -744,26 +835,14 @@ export default function TicketTab({
             </span>
           </div>
 
-          {parsedTags.length > 0 && (
-            <div className="tag-cloud" style={{ marginBottom: etiquetteLines.length > 0 ? 12 : 0 }}>
-              {parsedTags.map((tag, i) => (
-                <span key={`${tag}-${i}`} className="pill rose">
-                  # {tag}
-                </span>
-              ))}
-            </div>
-          )}
-
-          {etiquetteLines.length > 0 && (
-            <div className="etiquette-list">
-              {etiquetteLines.map((line, i) => (
-                <div className="etiquette-item" key={i}>
-                  <span className="etiquette-num">{i + 1}</span>
-                  <span>{line}</span>
-                </div>
-              ))}
-            </div>
-          )}
+          <div className="etiquette-list">
+            {etiquetteLines.map((line, i) => (
+              <div className="etiquette-item" key={i}>
+                <span className="etiquette-num">{i + 1}</span>
+                <span>{line}</span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

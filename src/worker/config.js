@@ -174,7 +174,6 @@ export const DEFAULT_CONFIG = {
     publicUrl: '',
     apiKey: '',
     title: '节点探针',
-    subtitle: '实时节点监控与负载一览',
     cacheTtlSeconds: 15,
     demoMode: false,
     visibility: 'public', // public | private
@@ -210,7 +209,6 @@ export const DEFAULT_CONFIG = {
     showChatMenuButton: true,
     enableStartWelcome: true,
     showPanelButtonInWelcome: true,
-    autoAckEnabled: true,
     autoReplyEnabled: false,
     autoReplyText: '已收到您的消息 🌸 看到后会第一时间回复，请稍等片刻～',
     autoReplyCooldownMinutes: 30,
@@ -627,6 +625,9 @@ export async function savePanelConfig(env, nextConfig) {
 
   merged.profile.labelsRev = PROFILE_LABELS_REV;
   merged.profile.socialsRev = SOCIALS_CLEANUP_REV;
+  merged.profile.statusTone = ['online', 'busy', 'away'].includes(merged.profile.statusTone)
+    ? merged.profile.statusTone
+    : 'online';
   merged.profile.ownerTag = String(merged.profile.ownerTag ?? '').trim().slice(0, 32);
   merged.profile.badgeTitle = String(merged.profile.badgeTitle ?? '').trim().slice(0, 32);
   merged.profile.joinedText = String(merged.profile.joinedText ?? '').trim().slice(0, 48);
@@ -744,7 +745,6 @@ export function sanitizePublicConfig(config, env, isAdmin = false, requestOrigin
           configured: false,
           publicUrl: '',
           title: '',
-          subtitle: '',
           demoMode: false,
           visibility: 'private',
         }
@@ -753,7 +753,6 @@ export function sanitizePublicConfig(config, env, isAdmin = false, requestOrigin
           configured: Boolean(config.probe.url || config.probe.demoMode),
           publicUrl: config.probe.publicUrl || config.probe.url || '',
           title: config.probe.title,
-          subtitle: config.probe.subtitle,
           demoMode: Boolean(config.probe.demoMode),
           visibility: config.probe.visibility === 'private' ? 'private' : 'public',
         },

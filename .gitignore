@@ -3,6 +3,7 @@ dist/
 .build/
 .wrangler/
 wrangler.generated.toml
+wrangler.test*.toml
 .dev.vars
 .env
 .env.local

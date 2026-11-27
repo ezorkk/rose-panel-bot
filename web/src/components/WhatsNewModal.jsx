@@ -8,7 +8,6 @@ export const DEPLOY_GUIDE_URL = `${REPO_URL}#${encodeURIComponent('-极简部署
 export const FEEDBACK_URL = `${REPO_URL}/issues/new/choose`;
 export const CHANGELOG_URL = 'https://github.com/mango0114/rose-panel-bot/blob/main/CHANGELOG.md';
 export const SEEN_VERSION_STORAGE_KEY = 'rose_seen_version';
-export const HIDE_STAR_STRIP_STORAGE_KEY = 'rose_hide_star_strip';
 
 export const RECENT_RELEASES = [
   {
