@@ -199,6 +199,7 @@ export const DEFAULT_CONFIG = {
     autoReplyCooldownMinutes: 30,
     keywordReplies: [],
     verifiedDays: 30,
+    chatRetentionDays: 0, // 0 = 永久 | 365 = 1 年 | 180 = 6 个月（仅绑定 D1 时生效）
     showVisitorAvatarInCard: false,
     probation: structuredClone(DEFAULT_PROBATION),
   },
@@ -316,7 +317,13 @@ export function normalizeSplash(baseSplash = DEFAULT_SPLASH, override = null) {
 
 export const PROBE_PROVIDER_IDS = ['komari', 'nezha', 'nodeget', 'json'];
 export const ALERT_INTERVAL_OPTIONS = [5, 10, 15, 30];
+export const CHAT_RETENTION_DAYS_OPTIONS = [0, 180, 365];
 const AVATAR_MODES = ['bot', 'owner', 'custom'];
+
+export function normalizeChatRetentionDays(raw) {
+  const n = Number(raw);
+  return CHAT_RETENTION_DAYS_OPTIONS.includes(n) ? n : 0;
+}
 
 function clampInt(val, min, max, fallback) {
   if (val === '' || val === null || val === undefined) return fallback;
@@ -434,6 +441,7 @@ export function mergeConfig(base, override) {
     cloned.probe.visibility = cloned.probe.visibility === 'private' ? 'private' : 'public';
     cloned.probe.provider = PROBE_PROVIDER_IDS.includes(cloned.probe.provider) ? cloned.probe.provider : 'komari';
     cloned.probe.alerts = normalizeProbeAlerts(DEFAULT_PROBE_ALERTS, cloned.probe.alerts);
+    cloned.pmBot.chatRetentionDays = normalizeChatRetentionDays(cloned.pmBot?.chatRetentionDays);
     cloned.pmBot.probation = normalizeProbation(DEFAULT_PROBATION, cloned.pmBot?.probation);
     cloned.ui = {
       navOrder: normalizeNavOrder(cloned.ui?.navOrder),
@@ -505,6 +513,9 @@ export function mergeConfig(base, override) {
           : [],
       showVisitorAvatarInCard: Boolean(
         override.pmBot?.showVisitorAvatarInCard ?? base.pmBot?.showVisitorAvatarInCard ?? false
+      ),
+      chatRetentionDays: normalizeChatRetentionDays(
+        override.pmBot?.chatRetentionDays ?? base.pmBot?.chatRetentionDays
       ),
       probation: normalizeProbation(base.pmBot?.probation, override.pmBot?.probation),
     },
@@ -624,6 +635,7 @@ export async function savePanelConfig(env, nextConfig) {
   merged.pmBot.enableHoneypot = merged.pmBot.enableHoneypot !== false;
   merged.pmBot.honeypotAction = merged.pmBot.honeypotAction === 'ban' ? 'ban' : 'cooldown';
   merged.pmBot.verifiedDays = Math.min(Math.max(Number(merged.pmBot.verifiedDays) || 30, 1), 3650);
+  merged.pmBot.chatRetentionDays = normalizeChatRetentionDays(merged.pmBot.chatRetentionDays);
   merged.pmBot.syncBotDescription = merged.pmBot.syncBotDescription !== false;
   merged.pmBot.showChatMenuButton = merged.pmBot.showChatMenuButton !== false;
   const rawWelcomeImg = String(merged.pmBot.welcomeImageUrl || '').trim();

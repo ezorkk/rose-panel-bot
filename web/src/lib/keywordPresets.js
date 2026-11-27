@@ -91,3 +91,21 @@ export function addBlockedKeywordGroup(raw, keywords = [], maxLen = BLOCKED_KEYW
   }
   return { value: tokens.join(', '), addedCount, truncated };
 }
+
+export function removeBlockedKeywordGroup(raw, keywords = []) {
+  const targets = new Set((Array.isArray(keywords) ? keywords : []).map(keywordKey).filter(Boolean));
+  if (targets.size === 0) {
+    return { value: String(raw || ''), removedCount: 0 };
+  }
+  const tokens = splitBlockedKeywords(raw);
+  let removedCount = 0;
+  const kept = [];
+  for (const token of tokens) {
+    if (targets.has(keywordKey(token))) {
+      removedCount += 1;
+    } else {
+      kept.push(token);
+    }
+  }
+  return { value: kept.join(', '), removedCount };
+}

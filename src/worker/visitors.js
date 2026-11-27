@@ -531,9 +531,81 @@ export async function attachTopicMirror(env, userId, pmMessageId, topicMsgId, to
 export async function getVisitorHistory(env, userId, options = {}) {
   const uid = String(userId || '');
   if ((!env?.TOPIC_MAP && !env?.DB) || !/^\d+$/.test(uid)) {
-    return { photos: [], links: [], pmMessageIds: [], messages: [] };
+    return {
+      photos: [],
+      links: [],
+      pmMessageIds: [],
+      messages: [],
+      hasMore: false,
+      hasNewer: false,
+      oldestCursor: null,
+      newestCursor: null,
+    };
   }
   return getStore(env).getHistory(uid, options);
+}
+
+/**
+ * Searches archived chat messages in D1 and enriches matched rows with lightweight visitor info.
+ * Never reads KV when D1 (`env.DB`) is not bound.
+ */
+export async function searchVisitorMessages(env, options = {}) {
+  const res = await getStore(env).searchMessages(options);
+  if (!res?.supported) {
+    return {
+      supported: false,
+      mode: res?.mode || 'kv',
+      items: [],
+      hasMore: false,
+      nextCursor: null,
+    };
+  }
+
+  const rawItems = Array.isArray(res.items) ? res.items : [];
+  if (rawItems.length === 0) {
+    return {
+      supported: true,
+      mode: 'd1',
+      items: [],
+      hasMore: Boolean(res.hasMore),
+      nextCursor: res.nextCursor || null,
+    };
+  }
+
+  const uniqueUids = Array.from(new Set(rawItems.map((it) => String(it.uid || '')).filter((u) => /^\d+$/.test(u))));
+  const visitorMap = new Map();
+  if (env?.TOPIC_MAP && uniqueUids.length > 0) {
+    const supergroupId = await resolveSupergroupId(env);
+    const details = await Promise.all(uniqueUids.map((uid) => getVisitorDetail(env, uid, supergroupId)));
+    for (let i = 0; i < uniqueUids.length; i += 1) {
+      if (details[i]) {
+        visitorMap.set(uniqueUids[i], {
+          userId: details[i].userId,
+          displayName: details[i].displayName,
+          username: details[i].username || '',
+          status: details[i].status || 'pending',
+        });
+      }
+    }
+  }
+
+  const items = rawItems.map((it) => ({
+    ...it,
+    visitor: visitorMap.get(it.uid) || {
+      userId: it.uid,
+      displayName: `用户 ${it.uid}`,
+      username: '',
+      status: 'pending',
+    },
+  }));
+
+  return {
+    supported: true,
+    mode: 'd1',
+    items,
+    hasMore: Boolean(res.hasMore),
+    nextCursor: res.nextCursor || null,
+  };
 }
 
 /**

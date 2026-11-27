@@ -477,11 +477,13 @@ export default function App() {
 
         {effectiveTab === 'visitors' && isAdmin && (
           <VisitorsTab
+            d1Bound={Boolean(bootstrap?.adminConfig?.d1Bound)}
             initialVisitorId={deepVisitorId}
             initialFilter={visitorFilterPreset}
             initialVisitStats={bootstrap?.visitStats || null}
             initialBlockedSpamCount={bootstrap?.blockedSpamCount || 0}
             initialBlockedToday={bootstrap?.blockedToday || 0}
+            onOpenSettings={(sec) => setSettingsSection(sec)}
             onClearInitial={() => setDeepVisitorId('')}
             onClearInitialFilter={() => setVisitorFilterPreset('')}
             onStatsSync={(patch) => {

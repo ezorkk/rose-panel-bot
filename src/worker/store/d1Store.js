@@ -2,6 +2,7 @@
 // Unifies `messages`, `photos`, and `pmMessageIds` into `messages` (+ `message_links` for URLs),
 // reconstructs the exact v1.11.0 response structures, and never deletes legacy KV keys.
 
+import { CHAT_RETENTION_DAYS_OPTIONS, normalizeChatRetentionDays } from '../config.js';
 import { ensureSchema } from './d1Schema.js';
 import {
   DM_MAP_TTL_SECONDS,
@@ -15,6 +16,14 @@ import {
 export const D1_PHOTO_QUERY_LIMIT = 500;
 export const D1_LINK_QUERY_LIMIT = 500;
 export const D1_PM_QUERY_LIMIT = 1000;
+export const MAX_HISTORY_PAGE_LIMIT = 100;
+export const DEFAULT_SEARCH_LIMIT = 30;
+export const MAX_SEARCH_LIMIT = 50;
+export const MAX_SEARCH_QUERY_LEN = 100;
+export const RETENTION_DELETE_BATCH_SIZE = 500;
+export const RETENTION_MAX_BATCHES_PER_RUN = 5;
+export const ALLOWED_CHAT_RETENTION_DAYS = CHAT_RETENTION_DAYS_OPTIONS;
+export { normalizeChatRetentionDays };
 
 // Excludes internal archive-only photo rows (`p_*`, `p:*`) and non-bubble PM tracking rows (`pm:*`)
 // without using SQL `LIKE` `_` single-character wildcards.
@@ -29,7 +38,35 @@ function nextLocalSuffix() {
 function toNullablePositiveInt(val) {
   if (val === null || val === undefined || val === '') return null;
   const n = Number(val);
-  return Number.isInteger(n) && n > 0 ? n : null;
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
+
+export function escapeLikePattern(raw) {
+  return String(raw || '').replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
+// Note: `messages` has a composite TEXT primary key `(uid, id)`, so `rowid` here is SQLite's
+// implicit rowid used strictly as a short-lived same-millisecond pagination tie-breaker.
+// SQLite VACUUM can renumber implicit rowids, which is low-risk on D1 (user VACUUM is not exposed)
+// and cursors are never persisted across sessions.
+function buildHistoryCursors(chronologicalRows = []) {
+  if (!chronologicalRows.length) {
+    return { oldestCursor: null, newestCursor: null };
+  }
+  const oldest = chronologicalRows[0];
+  const newest = chronologicalRows[chronologicalRows.length - 1];
+  const oldestId = Number(oldest.rowid);
+  const newestId = Number(newest.rowid);
+  return {
+    oldestCursor:
+      Number.isSafeInteger(oldestId) && oldestId > 0
+        ? { ts: Number(oldest.created_at), id: oldestId }
+        : null,
+    newestCursor:
+      Number.isSafeInteger(newestId) && newestId > 0
+        ? { ts: Number(newest.created_at), id: newestId }
+        : null,
+  };
 }
 
 export function rowToMessage(row) {
@@ -112,10 +149,15 @@ export function shouldRunDailyCleanup(nowMs = Date.now()) {
 }
 
 /**
- * Purges expired rows from `topic_map` (>30 days) and `dm_map` (>7 days).
+ * Purges expired rows from `topic_map` (>30 days) and `dm_map` (>7 days),
+ * and when `retentionDays` is set (`180` or `365`), deletes expired `messages`
+ * along with their corresponding `message_links` in bounded batches (`LIMIT 500`
+ * per batch, capped at `maxBatches` per daily run so a first-time retention switch
+ * never risks hitting Worker CPU or D1 query limits; remaining rows are cleaned up
+ * automatically on subsequent days). Never deletes KV backups or `migrated_visitors`.
  * Skips immediately when `env.DB` is not bound.
  */
-export async function cleanupExpiredMaps(env, nowMs = Date.now()) {
+export async function cleanupExpiredMaps(env, nowMs = Date.now(), options = {}) {
   const db = env?.DB;
   if (!db) {
     return { skipped: true, reason: 'no_d1' };
@@ -125,15 +167,96 @@ export async function cleanupExpiredMaps(env, nowMs = Date.now()) {
   const topicCutoff = ts - TOPIC_MSG_MAP_TTL_SECONDS * 1000;
   const dmCutoff = ts - DM_MAP_TTL_SECONDS * 1000;
 
-  const res = await db.batch([
+  const mapRes = await db.batch([
     db.prepare(`DELETE FROM topic_map WHERE created_at < ?`).bind(topicCutoff),
     db.prepare(`DELETE FROM dm_map WHERE created_at < ?`).bind(dmCutoff),
   ]);
 
+  const retentionDays = normalizeChatRetentionDays(options?.retentionDays);
+  const rawBatchSize = Number(options?.batchSize);
+  const batchSize =
+    Number.isInteger(rawBatchSize) && rawBatchSize > 0
+      ? Math.min(rawBatchSize, 1000)
+      : RETENTION_DELETE_BATCH_SIZE;
+  const rawMaxBatches = Number(options?.maxBatches);
+  const maxBatches =
+    Number.isInteger(rawMaxBatches) && rawMaxBatches > 0
+      ? Math.min(rawMaxBatches, 20)
+      : RETENTION_MAX_BATCHES_PER_RUN;
+
+  let deletedMessages = 0;
+  let deletedLinks = 0;
+  let retentionBatches = 0;
+  let hasMoreExpired = false;
+
+  if (retentionDays > 0) {
+    const msgCutoff = ts - retentionDays * 86400 * 1000;
+    for (let i = 0; i < maxBatches; i += 1) {
+      const batchRes = await db.batch([
+        // 1. Delete message_links belonging to the expired messages batch (uses idx_links_uniq via row-value IN)
+        db
+          .prepare(
+            `DELETE FROM message_links
+             WHERE (uid, message_id) IN (
+               SELECT uid, id FROM messages
+               WHERE created_at < ?
+               ORDER BY created_at ASC, rowid ASC
+               LIMIT ?
+             )`
+          )
+          .bind(msgCutoff, batchSize),
+        // 2. Delete up to `batchSize` oldest expired messages by rowid
+        db
+          .prepare(
+            `DELETE FROM messages
+             WHERE rowid IN (
+               SELECT rowid FROM messages
+               WHERE created_at < ?
+               ORDER BY created_at ASC, rowid ASC
+               LIMIT ?
+             )`
+          )
+          .bind(msgCutoff, batchSize),
+        // 3. Delete up to `batchSize` remaining expired message_links (e.g. migrated legacy `l_*` rows)
+        db
+          .prepare(
+            `DELETE FROM message_links
+             WHERE rowid IN (
+               SELECT rowid FROM message_links
+               WHERE created_at < ?
+               ORDER BY created_at ASC, rowid ASC
+               LIMIT ?
+             )`
+          )
+          .bind(msgCutoff, batchSize),
+      ]);
+
+      const pairedLinkChanges = Number(batchRes?.[0]?.meta?.changes || 0);
+      const msgChanges = Number(batchRes?.[1]?.meta?.changes || 0);
+      const extraLinkChanges = Number(batchRes?.[2]?.meta?.changes || 0);
+      deletedMessages += msgChanges;
+      deletedLinks += pairedLinkChanges + extraLinkChanges;
+      retentionBatches += 1;
+
+      if (msgChanges < batchSize && extraLinkChanges < batchSize) {
+        hasMoreExpired = false;
+        break;
+      }
+      if (i === maxBatches - 1) {
+        hasMoreExpired = true;
+      }
+    }
+  }
+
   return {
     ok: true,
-    deletedTopicMaps: Number(res?.[0]?.meta?.changes || 0),
-    deletedDmMaps: Number(res?.[1]?.meta?.changes || 0),
+    deletedTopicMaps: Number(mapRes?.[0]?.meta?.changes || 0),
+    deletedDmMaps: Number(mapRes?.[1]?.meta?.changes || 0),
+    retentionDays,
+    deletedMessages,
+    deletedLinks,
+    retentionBatches,
+    hasMoreExpired,
   };
 }
 
@@ -294,62 +417,335 @@ export function createD1Store(env, hooks = {}) {
 
     async getHistory(uid, options = {}) {
       const cleanUid = String(uid || '');
+      const rawLimit = Number(options?.limit);
       const limit =
-        Number.isInteger(Number(options?.limit)) && Number(options.limit) > 0 ? Number(options.limit) : MAX_MESSAGES;
+        Number.isInteger(rawLimit) && rawLimit > 0
+          ? Math.min(rawLimit, MAX_HISTORY_PAGE_LIMIT)
+          : MAX_MESSAGES;
+      const messagesOnly = Boolean(options?.messagesOnly);
+      const before = toNullablePositiveInt(options?.before);
+      const beforeId = toNullablePositiveInt(options?.beforeId);
+      const after = toNullablePositiveInt(options?.after);
+      const afterId = toNullablePositiveInt(options?.afterId);
+      const around = typeof options?.around === 'string' ? options.around.trim().slice(0, 128) : '';
+
       if (!db || !/^\d+$/.test(cleanUid)) {
-        return { photos: [], links: [], pmMessageIds: [], messages: [] };
+        return {
+          photos: [],
+          links: [],
+          pmMessageIds: [],
+          messages: [],
+          hasMore: false,
+          hasNewer: false,
+          oldestCursor: null,
+          newestCursor: null,
+        };
       }
       await ensureReady(cleanUid);
 
-      const [msgRes, photoRes, linkRes, pmRes] = await db.batch([
+      const buildArchiveStmts = () =>
+        messagesOnly
+          ? []
+          : [
+              db
+                .prepare(
+                  `SELECT id, photo_file_id, thumb_file_id, text, sender, created_at
+                   FROM messages
+                   WHERE uid = ? AND photo_file_id IS NOT NULL AND photo_file_id != ''
+                   ORDER BY created_at DESC, rowid DESC
+                   LIMIT ?`
+                )
+                .bind(cleanUid, D1_PHOTO_QUERY_LIMIT),
+              db
+                .prepare(
+                  `SELECT rowid, message_id, url, snippet, sender, created_at
+                   FROM message_links
+                   WHERE uid = ?
+                   ORDER BY created_at DESC, rowid DESC
+                   LIMIT ?`
+                )
+                .bind(cleanUid, D1_LINK_QUERY_LIMIT),
+              db
+                .prepare(
+                  `SELECT pm_message_id, topic_msg_id, topic_copy_id, topic_thread_id,
+                          topic_chat_id, dm_msg_id, dm_copy_id, sender, created_at
+                   FROM messages
+                   WHERE uid = ? AND pm_message_id IS NOT NULL
+                   ORDER BY created_at DESC, rowid DESC
+                   LIMIT ?`
+                )
+                .bind(cleanUid, D1_PM_QUERY_LIMIT),
+            ];
+
+      const mapArchives = (results, offset) => {
+        if (messagesOnly) {
+          return { photos: [], links: [], pmMessageIds: [] };
+        }
+        return {
+          photos: (results[offset]?.results || []).map(rowToPhoto),
+          links: (results[offset + 1]?.results || []).map(rowToLink),
+          pmMessageIds: (results[offset + 2]?.results || []).map(rowToPmEntry).filter(Boolean),
+        };
+      };
+
+      // Mode 1: `around=<messageId>` — centered context window for jumping to a search hit.
+      // If the message was recalled or cleaned up, fall back gracefully to the latest page.
+      let aroundFallback = false;
+      if (around) {
+        const targetRow = await db
+          .prepare(
+            `SELECT rowid, * FROM messages
+             WHERE uid = ? AND id = ? AND ${IS_BUBBLE_ID_SQL}
+             LIMIT 1`
+          )
+          .bind(cleanUid, around)
+          .first();
+
+        if (targetRow) {
+          const targetTs = Number(targetRow.created_at);
+          const targetRowId = Number(targetRow.rowid);
+          const olderLimit = Math.floor((limit - 1) / 2);
+          const newerLimit = Math.max(0, limit - 1 - olderLimit);
+
+          const batchStmts = [
+            db
+              .prepare(
+                `SELECT rowid, * FROM messages
+                 WHERE uid = ? AND ${IS_BUBBLE_ID_SQL}
+                   AND (created_at < ? OR (created_at = ? AND rowid < ?))
+                 ORDER BY created_at DESC, rowid DESC
+                 LIMIT ?`
+              )
+              .bind(cleanUid, targetTs, targetTs, targetRowId, olderLimit + 1),
+            db
+              .prepare(
+                `SELECT rowid, * FROM messages
+                 WHERE uid = ? AND ${IS_BUBBLE_ID_SQL}
+                   AND (created_at > ? OR (created_at = ? AND rowid > ?))
+                 ORDER BY created_at ASC, rowid ASC
+                 LIMIT ?`
+              )
+              .bind(cleanUid, targetTs, targetTs, targetRowId, newerLimit + 1),
+            ...buildArchiveStmts(),
+          ];
+
+          const results = await db.batch(batchStmts);
+          const olderRaw = results[0]?.results || [];
+          const newerRaw = results[1]?.results || [];
+          const hasMore = olderRaw.length > olderLimit;
+          const hasNewer = newerRaw.length > newerLimit;
+          const chronologicalRows = [
+            ...olderRaw.slice(0, olderLimit).reverse(),
+            targetRow,
+            ...newerRaw.slice(0, newerLimit),
+          ];
+          const archives = mapArchives(results, 2);
+          return {
+            ...archives,
+            messages: chronologicalRows.map(rowToMessage),
+            hasMore,
+            hasNewer,
+            ...buildHistoryCursors(chronologicalRows),
+            aroundFound: true,
+          };
+        }
+        aroundFallback = true;
+      }
+
+      // Mode 2: `before` (+ optional `beforeId` rowid tie-breaker) — load older page
+      if (before && !aroundFallback) {
+        const msgStmt = beforeId
+          ? db
+              .prepare(
+                `SELECT rowid, * FROM messages
+                 WHERE uid = ? AND ${IS_BUBBLE_ID_SQL}
+                   AND (created_at < ? OR (created_at = ? AND rowid < ?))
+                 ORDER BY created_at DESC, rowid DESC
+                 LIMIT ?`
+              )
+              .bind(cleanUid, before, before, beforeId, limit + 1)
+          : db
+              .prepare(
+                `SELECT rowid, * FROM messages
+                 WHERE uid = ? AND ${IS_BUBBLE_ID_SQL}
+                   AND created_at < ?
+                 ORDER BY created_at DESC, rowid DESC
+                 LIMIT ?`
+              )
+              .bind(cleanUid, before, limit + 1);
+
+        const results = await db.batch([msgStmt, ...buildArchiveStmts()]);
+        const rawRows = results[0]?.results || [];
+        const hasMore = rawRows.length > limit;
+        const chronologicalRows = rawRows.slice(0, limit).reverse();
+        const archives = mapArchives(results, 1);
+        return {
+          ...archives,
+          messages: chronologicalRows.map(rowToMessage),
+          hasMore,
+          hasNewer: false,
+          ...buildHistoryCursors(chronologicalRows),
+        };
+      }
+
+      // Mode 3: `after` (+ optional `afterId` rowid tie-breaker) — load newer page from historical view
+      if (after && !aroundFallback) {
+        const msgStmt = afterId
+          ? db
+              .prepare(
+                `SELECT rowid, * FROM messages
+                 WHERE uid = ? AND ${IS_BUBBLE_ID_SQL}
+                   AND (created_at > ? OR (created_at = ? AND rowid > ?))
+                 ORDER BY created_at ASC, rowid ASC
+                 LIMIT ?`
+              )
+              .bind(cleanUid, after, after, afterId, limit + 1)
+          : db
+              .prepare(
+                `SELECT rowid, * FROM messages
+                 WHERE uid = ? AND ${IS_BUBBLE_ID_SQL}
+                   AND created_at > ?
+                 ORDER BY created_at ASC, rowid ASC
+                 LIMIT ?`
+              )
+              .bind(cleanUid, after, limit + 1);
+
+        const results = await db.batch([msgStmt, ...buildArchiveStmts()]);
+        const rawRows = results[0]?.results || [];
+        const hasNewer = rawRows.length > limit;
+        const chronologicalRows = rawRows.slice(0, limit);
+        const archives = mapArchives(results, 1);
+        return {
+          ...archives,
+          messages: chronologicalRows.map(rowToMessage),
+          hasMore: false,
+          hasNewer,
+          ...buildHistoryCursors(chronologicalRows),
+        };
+      }
+
+      // Mode 4: Latest page (default, or graceful fallback when `around` message was missing)
+      const results = await db.batch([
         db
           .prepare(
-            `SELECT * FROM messages
+            `SELECT rowid, * FROM messages
              WHERE uid = ? AND ${IS_BUBBLE_ID_SQL}
              ORDER BY created_at DESC, rowid DESC
              LIMIT ?`
           )
-          .bind(cleanUid, limit),
-        db
-          .prepare(
-            `SELECT id, photo_file_id, thumb_file_id, text, sender, created_at
-             FROM messages
-             WHERE uid = ? AND photo_file_id IS NOT NULL AND photo_file_id != ''
-             ORDER BY created_at DESC, rowid DESC
-             LIMIT ?`
-          )
-          .bind(cleanUid, D1_PHOTO_QUERY_LIMIT),
-        db
-          .prepare(
-            `SELECT rowid, message_id, url, snippet, sender, created_at
-             FROM message_links
-             WHERE uid = ?
-             ORDER BY created_at DESC, rowid DESC
-             LIMIT ?`
-          )
-          .bind(cleanUid, D1_LINK_QUERY_LIMIT),
-        db
-          .prepare(
-            `SELECT pm_message_id, topic_msg_id, topic_copy_id, topic_thread_id,
-                    topic_chat_id, dm_msg_id, dm_copy_id, sender, created_at
-             FROM messages
-             WHERE uid = ? AND pm_message_id IS NOT NULL
-             ORDER BY created_at DESC, rowid DESC
-             LIMIT ?`
-          )
-          .bind(cleanUid, D1_PM_QUERY_LIMIT),
+          .bind(cleanUid, limit + 1),
+        ...buildArchiveStmts(),
       ]);
 
-      const messages = (msgRes?.results || []).map(rowToMessage).reverse();
-      const photos = (photoRes?.results || []).map(rowToPhoto);
-      const links = (linkRes?.results || []).map(rowToLink);
-      const pmMessageIds = (pmRes?.results || []).map(rowToPmEntry).filter(Boolean);
+      const rawRows = results[0]?.results || [];
+      const hasMore = rawRows.length > limit;
+      const chronologicalRows = rawRows.slice(0, limit).reverse();
+      const archives = mapArchives(results, 1);
 
       return {
-        photos,
-        links,
-        pmMessageIds,
-        messages,
+        ...archives,
+        messages: chronologicalRows.map(rowToMessage),
+        hasMore,
+        hasNewer: false,
+        ...buildHistoryCursors(chronologicalRows),
+        ...(aroundFallback ? { aroundFound: false } : {}),
+      };
+    },
+
+    async searchMessages(options = {}) {
+      if (!db) {
+        return { supported: false, mode: 'kv', items: [], hasMore: false, nextCursor: null };
+      }
+      const trimmedQ = String(options?.q || '').trim();
+      if (!trimmedQ || trimmedQ.length > MAX_SEARCH_QUERY_LEN) {
+        return { supported: true, mode: 'd1', items: [], hasMore: false, nextCursor: null };
+      }
+
+      const rawLimit = Number(options?.limit);
+      const limit =
+        Number.isInteger(rawLimit) && rawLimit > 0
+          ? Math.min(rawLimit, MAX_SEARCH_LIMIT)
+          : DEFAULT_SEARCH_LIMIT;
+
+      const cleanUid = String(options?.uid || '').trim();
+      const fromMs = toNullablePositiveInt(options?.from);
+      const toMs = toNullablePositiveInt(options?.to);
+      const before = toNullablePositiveInt(options?.before);
+      const beforeId = toNullablePositiveInt(options?.beforeId);
+
+      await ensureSchema(env);
+      if (/^\d+$/.test(cleanUid) && ensureMigrated) {
+        await ensureMigrated(env, cleanUid);
+      }
+
+      const pattern = `%${escapeLikePattern(trimmedQ)}%`;
+      const clauses = [IS_BUBBLE_ID_SQL, `(text LIKE ? ESCAPE '\\' OR media_tag LIKE ? ESCAPE '\\')`];
+      const binds = [pattern, pattern];
+
+      if (/^\d+$/.test(cleanUid)) {
+        clauses.push(`uid = ?`);
+        binds.push(cleanUid);
+      }
+      if (fromMs) {
+        clauses.push(`created_at >= ?`);
+        binds.push(fromMs);
+      }
+      if (toMs) {
+        clauses.push(`created_at <= ?`);
+        binds.push(toMs);
+      }
+      if (before) {
+        if (beforeId) {
+          clauses.push(`(created_at < ? OR (created_at = ? AND rowid < ?))`);
+          binds.push(before, before, beforeId);
+        } else {
+          clauses.push(`created_at < ?`);
+          binds.push(before);
+        }
+      }
+
+      binds.push(limit + 1);
+      const res = await db
+        .prepare(
+          `SELECT rowid, id, uid, sender, pm_message_id, text, media_tag,
+                  photo_file_id, sticker_file_id, created_at
+           FROM messages
+           WHERE ${clauses.join(' AND ')}
+           ORDER BY created_at DESC, rowid DESC
+           LIMIT ?`
+        )
+        .bind(...binds)
+        .all();
+
+      const rawRows = res?.results || [];
+      const hasMore = rawRows.length > limit;
+      const rows = rawRows.slice(0, limit);
+      const items = rows.map((row) => ({
+        id: String(row.id),
+        uid: String(row.uid),
+        sender: row.sender || 'visitor',
+        text: row.text || '',
+        mediaTag: row.media_tag || '',
+        hasPhoto: Boolean(row.photo_file_id),
+        hasSticker: Boolean(row.sticker_file_id),
+        pmMessageId:
+          row.pm_message_id !== null && row.pm_message_id !== undefined ? Number(row.pm_message_id) : null,
+        at: new Date(Number(row.created_at)).toISOString(),
+        createdAt: Number(row.created_at),
+      }));
+
+      const lastRow = rows.length > 0 ? rows[rows.length - 1] : null;
+      const nextCursor =
+        hasMore && lastRow && Number.isSafeInteger(Number(lastRow.rowid)) && Number(lastRow.rowid) > 0
+          ? { before: Number(lastRow.created_at), beforeId: Number(lastRow.rowid) }
+          : null;
+
+      return {
+        supported: true,
+        mode: 'd1',
+        items,
+        hasMore,
+        nextCursor,
       };
     },
 
