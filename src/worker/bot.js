@@ -52,6 +52,7 @@ import {
   formatDisplayName,
   formatSourceLabel,
   getVisitorDetail,
+  invalidateVisitorSummaryCache,
   normalizeSourceParam,
   recallAdminVisitorMessage,
   recordVisitorExchange,
@@ -63,6 +64,44 @@ import { TOPIC_MSG_MAP_PREFIX, TOPIC_MSG_MAP_TTL_SECONDS, getStore } from './sto
 
 export { TOPIC_MSG_MAP_PREFIX, TOPIC_MSG_MAP_TTL_SECONDS };
 export const WEBHOOK_UPDATES_REV_KEY = 'webhook:updates_rev';
+
+/**
+ * Single source of truth for Telegram Bot command menus across /setup, config sync, and /bind.
+ * Redundant aliases (/me) and infrequent moderation commands (/reset, /open, /unbind) stay
+ * callable as commands without cluttering the slash-command picker.
+ */
+export function buildBotCommandSets(cfg = {}) {
+  const enableCheckin = Boolean(cfg?.community?.enableCheckin);
+  const privateCommands = [
+    { command: 'start', description: '开始联系主人 / 人机验证' },
+    { command: 'panel', description: '打开个人面板小程序' },
+  ];
+  const groupCommands = [{ command: 'panel', description: '打开个人面板小程序' }];
+  if (enableCheckin) {
+    privateCommands.push({ command: 'checkin', description: '每日签到领积分' });
+    groupCommands.push(
+      { command: 'checkin', description: '群内每日签到领积分' },
+      { command: 'rank', description: '查看群积分排行榜' }
+    );
+  }
+  const adminPrivateCommands = [
+    ...privateCommands,
+    { command: 'set', description: '设动态贴纸徽章（跟贴纸链接或直接发贴纸）' },
+    { command: 'add', description: '添加表情包看图验证题（发贴纸再贴题目）' },
+    { command: 'resetbadge', description: '恢复默认玫瑰票根徽章' },
+    { command: 'cancel', description: '取消当前录入' },
+  ];
+  const supergroupAdminCommands = [
+    { command: 'info', description: '查看当前话题访客资料与媒体统计' },
+    { command: 'del', description: '撤回发给访客的上一条或引用消息' },
+    { command: 'ban', description: '拉黑当前话题访客' },
+    { command: 'unban', description: '解除拉黑' },
+    { command: 'trust', description: '设为永久信任（免验证）' },
+    { command: 'close', description: '结束当前对话' },
+    { command: 'panel', description: '打开个人面板小程序' },
+  ];
+  return { privateCommands, groupCommands, adminPrivateCommands, supergroupAdminCommands };
+}
 export const WEBHOOK_UPDATES_REV = '1';
 export const VISITOR_REACTION_LIMIT_PER_MIN = 10;
 export const PROBATION_NOTIFY_COOLDOWN_SECONDS = 600;
@@ -1048,6 +1087,7 @@ export async function completeTurnstileVerification(env, requestOrigin, verifyId
   if (prevVerified !== 'trusted') {
     await env.TOPIC_MAP.put(`verified:${state.userId}`, 'turnstile:v1', { expirationTtl: ttlDays * 86400 });
     await startVisitorProbation(env, state.userId, config, { prevVerified });
+    await invalidateVisitorSummaryCache(env).catch(() => {});
   }
   await env.TOPIC_MAP.delete(`needs_verify:${state.userId}`);
   await env.TOPIC_MAP.delete(`chal:${verifyId}`);
@@ -1785,6 +1825,7 @@ async function handleCallbackQuery(env, requestOrigin, cq, config) {
           incrementMsg: false,
           lastPreview: '[触发蜜罐陷阱 · 已自动拉黑]',
         }).catch(() => {});
+        await invalidateVisitorSummaryCache(env).catch(() => {});
         await tgCall(env, 'answerCallbackQuery', {
           callback_query_id: cq.id,
           text: '🚫 触发防脚本陷阱，已拒绝访问。',
@@ -1911,6 +1952,7 @@ async function handleCallbackQuery(env, requestOrigin, cq, config) {
         expirationTtl: ttlDays * 86400,
       });
       await startVisitorProbation(env, state.userId, config, { prevVerified });
+      await invalidateVisitorSummaryCache(env).catch(() => {});
     }
     await env.TOPIC_MAP.delete(`needs_verify:${state.userId}`);
     await env.TOPIC_MAP.delete(`chal:${verifyId}`);
@@ -2210,31 +2252,15 @@ async function handleBindInboxCommand(env, requestOrigin, msg) {
   await saveBoundSupergroupId(env, chatId);
 
   // Automatically register topic moderation commands in this group & admin commands in binder's private chat
+  const bindCfg = await loadPanelConfig(env).catch(() => ({}));
+  const { supergroupAdminCommands, adminPrivateCommands } = buildBotCommandSets(bindCfg);
   await Promise.all([
     tgCall(env, 'setMyCommands', {
-      commands: [
-        { command: 'info', description: '查看当前话题访客资料与媒体统计' },
-        { command: 'del', description: '撤回发给访客的上一条或引用消息' },
-        { command: 'ban', description: '拉黑当前话题访客' },
-        { command: 'unban', description: '解除拉黑' },
-        { command: 'trust', description: '设为永久信任（免验证）' },
-        { command: 'reset', description: '重置访客验证状态' },
-        { command: 'close', description: '结束当前对话' },
-        { command: 'open', description: '重新开启对话' },
-        { command: 'unbind', description: '解绑当前通知群' },
-        { command: 'panel', description: '打开个人面板小程序' },
-      ],
+      commands: supergroupAdminCommands,
       scope: { type: 'chat_administrators', chat_id: Number(chatId) },
     }).catch(() => {}),
     tgCall(env, 'setMyCommands', {
-      commands: [
-        { command: 'start', description: '打开个人面板与欢迎页' },
-        { command: 'panel', description: '打开个人面板小程序' },
-        { command: 'set', description: '设动态贴纸徽章（跟贴纸链接或直接发贴纸）' },
-        { command: 'add', description: '添加表情包看图验证题（发贴纸再贴题目）' },
-        { command: 'resetbadge', description: '恢复默认玫瑰徽章' },
-        { command: 'cancel', description: '取消当前录入' },
-      ],
+      commands: adminPrivateCommands,
       scope: { type: 'chat', chat_id: Number(uid) },
     }).catch(() => {}),
   ]);
@@ -2753,6 +2779,7 @@ export async function handleTelegramUpdate(update, env, requestOrigin) {
                 incrementMsg: false,
                 lastPreview: '[命中 CAS 黑名单 · 已自动拦截]',
               }).catch(() => {});
+              await invalidateVisitorSummaryCache(env).catch(() => {});
               await recordBlockedSpam(env, config);
               return;
             }
@@ -2855,6 +2882,7 @@ export async function handleTelegramUpdate(update, env, requestOrigin) {
             incrementMsg: false,
             lastPreview: '[命中 CAS 黑名单 · 已自动拦截]',
           }).catch(() => {});
+          await invalidateVisitorSummaryCache(env).catch(() => {});
           await recordBlockedSpam(env, config);
           return;
         }
@@ -3038,22 +3066,9 @@ export async function syncTelegramBotSurface(env, requestOrigin, config = null, 
     }));
   }
 
-  // 3. Sync private & group command menus
-  const privateCommands = [
-    { command: 'start', description: '开始联系主人 / 人机验证' },
-    { command: 'panel', description: '打开个人面板小程序' },
-  ];
-  const groupCommands = [
-    { command: 'panel', description: '打开个人面板小程序' },
-    { command: 'me', description: '查看我的个人票根' },
-  ];
-  if (cfg.community?.enableCheckin) {
-    privateCommands.push({ command: 'checkin', description: '每日签到领积分' });
-    groupCommands.push(
-      { command: 'checkin', description: '群内每日签到领积分' },
-      { command: 'rank', description: '查看群积分排行榜' }
-    );
-  }
+  // 3. Sync private & group command menus (shared source of truth with /bind)
+  const { privateCommands, groupCommands, adminPrivateCommands, supergroupAdminCommands } =
+    buildBotCommandSets(cfg);
 
   results.privateCommands = await tgCall(env, 'setMyCommands', {
     commands: privateCommands,
@@ -3063,14 +3078,6 @@ export async function syncTelegramBotSurface(env, requestOrigin, config = null, 
     commands: groupCommands,
     scope: { type: 'all_group_chats' },
   }).catch((e) => ({ error: e.message }));
-
-  const adminPrivateCommands = [
-    ...privateCommands,
-    { command: 'set', description: '设动态贴纸徽章（跟贴纸链接或直接发贴纸）' },
-    { command: 'add', description: '添加表情包看图验证题（发贴纸再贴题目）' },
-    { command: 'resetbadge', description: '恢复默认玫瑰票根徽章' },
-    { command: 'cancel', description: '取消当前录入' },
-  ];
 
   const adminIdSet = parseAdminIds(env);
   const supergroupId = await resolveSupergroupId(env);
@@ -3084,18 +3091,7 @@ export async function syncTelegramBotSurface(env, requestOrigin, config = null, 
       // Ignore
     }
     results.supergroupAdminCommands = await tgCall(env, 'setMyCommands', {
-      commands: [
-        { command: 'info', description: '查看当前话题访客资料与媒体统计' },
-        { command: 'del', description: '撤回发给访客的上一条或引用消息' },
-        { command: 'ban', description: '拉黑当前话题访客' },
-        { command: 'unban', description: '解除拉黑' },
-        { command: 'trust', description: '设为永久信任（免验证）' },
-        { command: 'reset', description: '重置访客验证状态' },
-        { command: 'close', description: '结束当前对话' },
-        { command: 'open', description: '重新开启对话' },
-        { command: 'unbind', description: '解绑当前通知群' },
-        { command: 'panel', description: '打开个人面板小程序' },
-      ],
+      commands: supergroupAdminCommands,
       scope: { type: 'chat_administrators', chat_id: Number(supergroupId) },
     }).catch((e) => ({ error: e.message }));
   }

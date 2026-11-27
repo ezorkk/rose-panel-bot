@@ -5,12 +5,10 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
-  Copy,
   Database,
   ExternalLink,
   GitFork,
   Globe,
-  Link2,
   Lock,
   Palette,
   Plus,
@@ -30,7 +28,7 @@ import {
   removeBlockedKeywordGroup,
   toggleBlockedKeyword,
 } from '../lib/keywordPresets.js';
-import { buildSourceLink, confirmDialog, copyText, haptic, openExternalUrl } from '../lib/telegram.js';
+import { confirmDialog, haptic, openExternalUrl } from '../lib/telegram.js';
 import {
   DOCK_STYLES,
   THEME_PRESETS,
@@ -131,13 +129,14 @@ export default function SettingsDrawer({
   const [syncResult, setSyncResult] = useState(null);
   const [forkCardOpen, setForkCardOpen] = useState(() => Boolean(adminConfig?.updater?.forkRepo?.trim()));
   const [forkAdvancedOpen, setForkAdvancedOpen] = useState(false);
+  const [modesAdvancedOpen, setModesAdvancedOpen] = useState(false);
+  const [welcomeAdvancedOpen, setWelcomeAdvancedOpen] = useState(false);
   const [profilePanels, setProfilePanels] = useState({
     appearance: false,
     emblem: false,
     ticket: false,
     splash: false,
     nav: false,
-    promo: false,
   });
   const toggleProfilePanel = (key) => {
     haptic('light');
@@ -1502,102 +1501,6 @@ export default function SettingsDrawer({
                   </div>
                 )}
               </div>
-
-              {/* Collapsible 5: Promo & Referral Links Helper */}
-              <div className="card update-fork-card">
-                <button
-                  type="button"
-                  className="update-collapse-head"
-                  aria-expanded={profilePanels.promo}
-                  onClick={() => toggleProfilePanel('promo')}
-                >
-                  <span className="update-collapse-title">
-                    <Link2 size={14} color="var(--accent)" style={{ flexShrink: 0 }} />
-                    <span>名片分享 · 推广链接</span>
-                    <span className="update-collapse-badge">来源追踪</span>
-                  </span>
-                  {profilePanels.promo ? (
-                    <ChevronDown size={16} style={{ flexShrink: 0 }} />
-                  ) : (
-                    <ChevronRight size={16} style={{ flexShrink: 0 }} />
-                  )}
-                </button>
-
-                {profilePanels.promo && (
-                  <div className="update-fork-body">
-                    {(() => {
-                      const botUsername = String(botInfo?.username || draft.botUsername || '')
-                        .trim()
-                        .replace(/^@/, '');
-                      const appShortName = String(botInfo?.appShortName || '')
-                        .trim()
-                        .replace(/^\/+|\/+$/g, '');
-                      if (!botUsername) {
-                        return (
-                          <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-                            需要先配置 <code>BOT_USERNAME</code>。
-                          </div>
-                        );
-                      }
-                      const siteShareBase =
-                        String(shareUrl || '').trim() ||
-                        (typeof window !== 'undefined' ? `${window.location.origin}/` : '');
-                      const cardShareLink = appShortName
-                        ? buildSourceLink(`https://t.me/${botUsername}/${appShortName}`, 'link', 'app')
-                        : buildSourceLink(siteShareBase, 'link', 'web');
-                      const promoLinks = [
-                        {
-                          id: 'site',
-                          label: '放在个人小站的「联系我」按钮',
-                          url: buildSourceLink(`https://t.me/${botUsername}`, 'site', 'bot'),
-                        },
-                        {
-                          id: 'channel',
-                          label: '放在频道简介',
-                          url: buildSourceLink(`https://t.me/${botUsername}`, 'channel', 'bot'),
-                        },
-                        ...(cardShareLink
-                          ? [
-                              {
-                                id: 'card',
-                                label: '分享名片',
-                                url: cardShareLink,
-                              },
-                            ]
-                          : []),
-                      ];
-                      return (
-                        <>
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                            {promoLinks.map((item) => (
-                              <div key={item.id} className="promo-link-row">
-                                <div style={{ minWidth: 0, flex: 1 }}>
-                                  <div className="promo-link-label">{item.label}</div>
-                                  <div className="promo-link-url">{item.url}</div>
-                                </div>
-                                <button
-                                  type="button"
-                                  className="btn btn-soft btn-sm"
-                                  style={{ flexShrink: 0 }}
-                                  onClick={async () => {
-                                    const ok = await copyText(item.url);
-                                    onToast(ok ? `已复制「${item.label}」链接` : '复制失败');
-                                  }}
-                                >
-                                  <Copy size={12} /> 复制
-                                </button>
-                              </div>
-                            ))}
-                          </div>
-                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 10, lineHeight: 1.55 }}>
-                            也可以把 <code>src_</code> 后面换成任意英文渠道名，例如 <code>src_nodeseek</code>，来源统计里就会单独显示。
-                          </div>
-                        </>
-                      );
-                    })()}
-                  </div>
-                )}
-              </div>
             </>
           );
         })()}
@@ -2181,7 +2084,9 @@ export default function SettingsDrawer({
               </div>
 
               {(draft.pmBot.verificationMode === 'sticker_quiz' ||
-                (draft.pmBot.stickerChallenges || []).length > 0) && (
+                (draft.pmBot.verificationMode === 'turnstile' &&
+                  !draft.pmBot.turnstileReady &&
+                  (draft.pmBot.stickerChallenges || []).length > 0)) && (
                 <div
                   style={{
                     background: 'var(--bg-subtle)',
@@ -2396,68 +2301,106 @@ export default function SettingsDrawer({
               )}
 
               {draft.pmBot.verificationMode !== 'off' && (
-                <div className="field" style={{ marginBottom: 10 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
-                    <label className="field-label" style={{ margin: 0 }}>
-                      验证通过免重复验证天数（1–3650 天）
-                    </label>
-                    <div style={{ display: 'flex', gap: 4 }}>
-                      {[7, 30, 90, 365].map((d) => (
-                        <button
-                          key={d}
-                          type="button"
-                          className={`pill ${Number(draft.pmBot.verifiedDays ?? 30) === d ? 'rose' : ''}`}
-                          style={{ cursor: 'pointer', fontSize: 10, padding: '2px 7px' }}
-                          onClick={() => updateField('pmBot', 'verifiedDays', d)}
-                        >
-                          {d}天
-                        </button>
-                      ))}
+                <div style={{ marginTop: 8, marginBottom: 4 }}>
+                  <button
+                    type="button"
+                    className="update-collapse-head"
+                    aria-expanded={modesAdvancedOpen}
+                    onClick={() => {
+                      haptic('light');
+                      setModesAdvancedOpen((v) => !v);
+                    }}
+                  >
+                    <span className="update-collapse-title">
+                      <span>⚙️ 高级验证参数</span>
+                      <span className="update-collapse-badge">
+                        免验 {draft.pmBot.verifiedDays || 30}天
+                        {draft.pmBot.verificationMode !== 'turnstile'
+                          ? ` · 容错 ${draft.pmBot.maxVerifyFailures || 2}次`
+                          : ''}
+                      </span>
+                    </span>
+                    {modesAdvancedOpen ? (
+                      <ChevronDown size={15} style={{ flexShrink: 0 }} />
+                    ) : (
+                      <ChevronRight size={15} style={{ flexShrink: 0 }} />
+                    )}
+                  </button>
+
+                  {modesAdvancedOpen && (
+                    <div
+                      style={{
+                        background: 'var(--bg-subtle)',
+                        borderRadius: 14,
+                        padding: 10,
+                        marginTop: 8,
+                      }}
+                    >
+                      <div className="field" style={{ marginBottom: 10 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
+                          <label className="field-label" style={{ margin: 0 }}>
+                            验证通过免重复验证天数（1–3650 天）
+                          </label>
+                          <div style={{ display: 'flex', gap: 4 }}>
+                            {[7, 30, 90, 365].map((d) => (
+                              <button
+                                key={d}
+                                type="button"
+                                className={`pill ${Number(draft.pmBot.verifiedDays ?? 30) === d ? 'rose' : ''}`}
+                                style={{ cursor: 'pointer', fontSize: 10, padding: '2px 7px' }}
+                                onClick={() => updateField('pmBot', 'verifiedDays', d)}
+                              >
+                                {d}天
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <input
+                          className="input"
+                          type="number"
+                          min="1"
+                          max="3650"
+                          value={draft.pmBot.verifiedDays ?? 30}
+                          onChange={(e) =>
+                            updateField('pmBot', 'verifiedDays', e.target.value === '' ? '' : Number(e.target.value))
+                          }
+                        />
+                      </div>
+
+                      {draft.pmBot.verificationMode !== 'turnstile' && (
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                          <div className="field" style={{ marginBottom: 0 }}>
+                            <label className="field-label">最多容错次数</label>
+                            <input
+                              className="input"
+                              type="number"
+                              min="1"
+                              max="5"
+                              value={draft.pmBot.maxVerifyFailures ?? 2}
+                              onChange={(e) => updateField('pmBot', 'maxVerifyFailures', Number(e.target.value))}
+                            />
+                          </div>
+                          <div className="field" style={{ marginBottom: 0 }}>
+                            <label className="field-label">失败冷却（分钟）</label>
+                            <input
+                              className="input"
+                              type="number"
+                              min="1"
+                              max="1440"
+                              value={draft.pmBot.cooldownMinutes ?? 10}
+                              onChange={(e) => updateField('pmBot', 'cooldownMinutes', Number(e.target.value))}
+                            />
+                          </div>
+                        </div>
+                      )}
                     </div>
-                  </div>
-                  <input
-                    className="input"
-                    type="number"
-                    min="1"
-                    max="3650"
-                    value={draft.pmBot.verifiedDays ?? 30}
-                    onChange={(e) =>
-                      updateField('pmBot', 'verifiedDays', e.target.value === '' ? '' : Number(e.target.value))
-                    }
-                  />
+                  )}
                 </div>
               )}
 
-              {draft.pmBot.verificationMode !== 'off' && draft.pmBot.verificationMode !== 'turnstile' && (
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
-                  <div className="field" style={{ marginBottom: 0 }}>
-                    <label className="field-label">最多容错次数</label>
-                    <input
-                      className="input"
-                      type="number"
-                      min="1"
-                      max="5"
-                      value={draft.pmBot.maxVerifyFailures ?? 2}
-                      onChange={(e) => updateField('pmBot', 'maxVerifyFailures', Number(e.target.value))}
-                    />
-                  </div>
-                  <div className="field" style={{ marginBottom: 0 }}>
-                    <label className="field-label">失败冷却（分钟）</label>
-                    <input
-                      className="input"
-                      type="number"
-                      min="1"
-                      max="1440"
-                      value={draft.pmBot.cooldownMinutes ?? 10}
-                      onChange={(e) => updateField('pmBot', 'cooldownMinutes', Number(e.target.value))}
-                    />
-                  </div>
-                </div>
-              )}
-
-              {/* 4-Layer Anti-Spam Shield Toggles */}
+              {/* 5-Layer Anti-Spam Shield Toggles */}
               <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
-                <div className="field-label" style={{ marginBottom: 6 }}>🛡️ 四层智能反广告护盾</div>
+                <div className="field-label" style={{ marginBottom: 6 }}>🛡️ 五层智能反广告护盾</div>
 
                 <div className="list-row">
                   <div className="row-main">
@@ -2492,12 +2435,21 @@ export default function SettingsDrawer({
                 <div className="list-row">
                   <div className="row-main">
                     <div className="row-title" style={{ fontSize: 13 }}>高危广告自动升级 CF Turnstile</div>
-                    <div className="row-desc wrap">检测到转发、外链、首条图片、零宽混淆或广告昵称自动拉高验证等级</div>
+                    <div className="row-desc wrap">
+                      {draft.pmBot.turnstileReady
+                        ? '检测到转发、外链、首条图片、零宽混淆或广告昵称自动拉高验证等级'
+                        : '需先在 Cloudflare 环境变量配置 TURNSTILE_SITE_KEY 与 TURNSTILE_SECRET 后生效'}
+                    </div>
                   </div>
                   <button
                     type="button"
-                    className={`switch ${draft.pmBot.smartEscalation !== false ? 'on' : ''}`}
-                    onClick={() => updateField('pmBot', 'smartEscalation', draft.pmBot.smartEscalation === false)}
+                    disabled={!draft.pmBot.turnstileReady}
+                    className={`switch ${draft.pmBot.turnstileReady && draft.pmBot.smartEscalation !== false ? 'on' : ''}`}
+                    style={!draft.pmBot.turnstileReady ? { opacity: 0.45, cursor: 'not-allowed' } : undefined}
+                    onClick={() => {
+                      if (!draft.pmBot.turnstileReady) return;
+                      updateField('pmBot', 'smartEscalation', draft.pmBot.smartEscalation === false);
+                    }}
                   >
                     <span className="switch-knob" />
                   </button>
@@ -2763,85 +2715,111 @@ export default function SettingsDrawer({
                 </button>
               </div>
 
-              <div className="field" style={{ marginTop: 10 }}>
-                <label className="field-label">可选：/start 欢迎配图链接（https:// 图床直链，留空不发图）</label>
-                <input
-                  className="input"
-                  value={draft.pmBot.welcomeImageUrl || ''}
-                  onChange={(e) => updateField('pmBot', 'welcomeImageUrl', e.target.value)}
-                  placeholder="https://example.com/welcome.jpg"
-                />
-                <div className="row-desc wrap" style={{ marginTop: 5 }}>
-                  💡 小贴士：若还想在陌生人未按「开始」前的介绍框顶部展示固定封面图，在 <code>@BotFather</code> → <code>Edit Bot</code> → <code>Edit Description Picture</code> 上传一张图片即可永久显示。
-                </div>
-              </div>
-
-              <div className="list-row" style={{ marginTop: 6, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
-                <div className="row-main">
-                  <div className="row-title" style={{ fontSize: 13 }}>点 /start 时展示欢迎引导语</div>
-                  <div className="row-desc wrap">
-                    陌生人点「开始」会立即弹出人机验证（开启本项时验证题上方会附带你的欢迎语；关闭则直接弹出纯净验证题）
-                  </div>
-                </div>
+              <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
                 <button
                   type="button"
-                  className={`switch ${draft.pmBot.enableStartWelcome !== false ? 'on' : ''}`}
-                  onClick={() => updateField('pmBot', 'enableStartWelcome', draft.pmBot.enableStartWelcome === false)}
+                  className="update-collapse-head"
+                  aria-expanded={welcomeAdvancedOpen}
+                  onClick={() => {
+                    haptic('light');
+                    setWelcomeAdvancedOpen((v) => !v);
+                  }}
                 >
-                  <span className="switch-knob" />
+                  <span className="update-collapse-title">
+                    <span>⚙️ 更多欢迎配图与入口开关</span>
+                    <span className="update-collapse-badge">配图 / 左下角按钮 / 资料卡头像</span>
+                  </span>
+                  {welcomeAdvancedOpen ? (
+                    <ChevronDown size={15} style={{ flexShrink: 0 }} />
+                  ) : (
+                    <ChevronRight size={15} style={{ flexShrink: 0 }} />
+                  )}
                 </button>
-              </div>
 
-              <div className="list-row">
-                <div className="row-main">
-                  <div className="row-title" style={{ fontSize: 13 }}>验证通过后附带「查看个人面板」按钮</div>
-                  <div className="row-desc wrap">
-                    验证通过提示「现在可以打字给主人发消息了」下方是否附带个人面板入口按钮（纯私聊党可关闭）
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  className={`switch ${draft.pmBot.showPanelButtonInWelcome !== false ? 'on' : ''}`}
-                  onClick={() =>
-                    updateField('pmBot', 'showPanelButtonInWelcome', draft.pmBot.showPanelButtonInWelcome === false)
-                  }
-                >
-                  <span className="switch-knob" />
-                </button>
-              </div>
+                {welcomeAdvancedOpen && (
+                  <div style={{ marginTop: 10 }}>
+                    <div className="field">
+                      <label className="field-label">可选：/start 欢迎配图链接（https:// 图床直链，留空不发图）</label>
+                      <input
+                        className="input"
+                        value={draft.pmBot.welcomeImageUrl || ''}
+                        onChange={(e) => updateField('pmBot', 'welcomeImageUrl', e.target.value)}
+                        placeholder="https://example.com/welcome.jpg"
+                      />
+                      <div className="row-desc wrap" style={{ marginTop: 5 }}>
+                        💡 小贴士：若还想在陌生人未按「开始」前的介绍框顶部展示固定封面图，在 <code>@BotFather</code> → <code>Edit Bot</code> → <code>Edit Description Picture</code> 上传一张图片即可永久显示。
+                      </div>
+                    </div>
 
-              <div className="list-row">
-                <div className="row-main">
-                  <div className="row-title" style={{ fontSize: 13 }}>聊天框左下角显示「个人面板」按钮</div>
-                  <div className="row-desc wrap">
-                    关闭并保存后，左下角将恢复为普通命令菜单（隐藏面板入口；站长随时发 /panel 仍可打开面板后台）
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  className={`switch ${draft.pmBot.showChatMenuButton !== false ? 'on' : ''}`}
-                  onClick={() =>
-                    updateField('pmBot', 'showChatMenuButton', draft.pmBot.showChatMenuButton === false)
-                  }
-                >
-                  <span className="switch-knob" />
-                </button>
-              </div>
+                    <div className="list-row" style={{ marginTop: 6, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+                      <div className="row-main">
+                        <div className="row-title" style={{ fontSize: 13 }}>点 /start 时展示欢迎引导语</div>
+                        <div className="row-desc wrap">
+                          陌生人点「开始」会立即弹出人机验证（开启本项时验证题上方会附带你的欢迎语；关闭则直接弹出纯净验证题）
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className={`switch ${draft.pmBot.enableStartWelcome !== false ? 'on' : ''}`}
+                        onClick={() => updateField('pmBot', 'enableStartWelcome', draft.pmBot.enableStartWelcome === false)}
+                      >
+                        <span className="switch-knob" />
+                      </button>
+                    </div>
 
-              <div className="list-row">
-                <div className="row-main">
-                  <div className="row-title" style={{ fontSize: 13 }}>话题访客资料卡附带对方头像</div>
-                  <div className="row-desc wrap">
-                    开启后，新建话题及 /info 资料卡将附带访客 TG 头像大图（点击卡片昵称亦可直达资料页）
+                    <div className="list-row">
+                      <div className="row-main">
+                        <div className="row-title" style={{ fontSize: 13 }}>验证通过后附带「查看个人面板」按钮</div>
+                        <div className="row-desc wrap">
+                          验证通过提示「现在可以打字给主人发消息了」下方是否附带个人面板入口按钮（纯私聊党可关闭）
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className={`switch ${draft.pmBot.showPanelButtonInWelcome !== false ? 'on' : ''}`}
+                        onClick={() =>
+                          updateField('pmBot', 'showPanelButtonInWelcome', draft.pmBot.showPanelButtonInWelcome === false)
+                        }
+                      >
+                        <span className="switch-knob" />
+                      </button>
+                    </div>
+
+                    <div className="list-row">
+                      <div className="row-main">
+                        <div className="row-title" style={{ fontSize: 13 }}>聊天框左下角显示「个人面板」按钮</div>
+                        <div className="row-desc wrap">
+                          关闭并保存后，左下角将恢复为普通命令菜单（隐藏面板入口；站长随时发 /panel 仍可打开面板后台）
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className={`switch ${draft.pmBot.showChatMenuButton !== false ? 'on' : ''}`}
+                        onClick={() =>
+                          updateField('pmBot', 'showChatMenuButton', draft.pmBot.showChatMenuButton === false)
+                        }
+                      >
+                        <span className="switch-knob" />
+                      </button>
+                    </div>
+
+                    <div className="list-row">
+                      <div className="row-main">
+                        <div className="row-title" style={{ fontSize: 13 }}>话题访客资料卡附带对方头像</div>
+                        <div className="row-desc wrap">
+                          开启后，新建话题及 /info 资料卡将附带访客 TG 头像大图（点击卡片昵称亦可直达资料页）
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className={`switch ${draft.pmBot.showVisitorAvatarInCard ? 'on' : ''}`}
+                        onClick={() => updateField('pmBot', 'showVisitorAvatarInCard', !draft.pmBot.showVisitorAvatarInCard)}
+                      >
+                        <span className="switch-knob" />
+                      </button>
+                    </div>
                   </div>
-                </div>
-                <button
-                  type="button"
-                  className={`switch ${draft.pmBot.showVisitorAvatarInCard ? 'on' : ''}`}
-                  onClick={() => updateField('pmBot', 'showVisitorAvatarInCard', !draft.pmBot.showVisitorAvatarInCard)}
-                >
-                  <span className="switch-knob" />
-                </button>
+                )}
               </div>
             </div>
 
